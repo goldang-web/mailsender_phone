@@ -1,0 +1,205 @@
+# -*- coding: euc-kr -*-
+import base64
+import random
+import smtplib
+import telnetlib
+import time
+from typing import Iterable, List, Optional, Tuple
+
+smtp_port = 25
+
+NAVER_MX = [
+    "mx1.naver.com",
+    "mx2.naver.com",
+    "mx3.naver.com",
+    "mx4.naver.com",
+    "mx5.naver.com",
+    "mx6.naver.com",
+]
+
+DAUM_MX = [
+    "mx1.hanmail.net",
+    "mx2.hanmail.net",
+    "mx3.hanmail.net",
+    "mx4.hanmail.net",
+]
+
+
+def get_mx_server_for_email(email: str) -> str:
+    if "@" in email:
+        domain = email.split("@", 1)[1].lower()
+    else:
+        return random.choice(NAVER_MX)
+    if domain in {"naver.com", "navercorp.com"}:
+        return random.choice(NAVER_MX)
+    if domain in {"daum.net", "hanmail.net", "kakao.com"}:
+        return random.choice(DAUM_MX)
+    return random.choice(NAVER_MX)
+
+
+def _encode_euc_kr(text: str) -> bytes:
+    try:
+        return text.encode("euc-kr")
+    except UnicodeEncodeError:
+        parts: List[bytes] = []
+        for char in text:
+            try:
+                parts.append(char.encode("euc-kr"))
+            except UnicodeEncodeError:
+                parts.append(f"&#{ord(char)};".encode("ascii"))
+        return b"".join(parts)
+
+
+def send_mail(
+    smtp_server: Optional[str],
+    sender_email: str,
+    recipient_email: str,
+    subject: str,
+    body: str,
+    port: int = smtp_port,
+) -> Tuple[bool, str]:
+    target_server = smtp_server or get_mx_server_for_email(recipient_email)
+    header = (
+        f"From: {sender_email}\r\n"
+        f"To: {recipient_email}\r\n"
+        f"Subject: {subject}\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: text/plain; charset=euc-kr\r\n"
+        "Content-Transfer-Encoding: 8bit\r\n"
+        "\r\n"
+    )
+    message = header + body + "\r\n"
+    try:
+        with smtplib.SMTP(target_server, port, timeout=15) as server:
+            server.ehlo()
+            server.sendmail(
+                sender_email,
+                [recipient_email],
+                _encode_euc_kr(message),
+            )
+        return True, "이메일 전송 성공"
+    except Exception as exc:  # pylint: disable=broad-except
+        return False, f"이메일 전송 실패: {exc}"
+
+
+def _read_reply(tn: telnetlib.Telnet, timeout: int) -> str:
+    line = tn.read_until(b"\n", timeout=timeout)
+    if not line:
+        return ""
+    text = line.decode("utf-8", errors="ignore").rstrip("\r\n")
+    if len(text) >= 4 and text[3] == "-":
+        parts = [text]
+        while True:
+            extra = tn.read_until(b"\n", timeout=timeout)
+            if not extra:
+                break
+            chunk = extra.decode("utf-8", errors="ignore").rstrip("\r\n")
+            parts.append(chunk)
+            if len(chunk) >= 4 and chunk[3] == " ":
+                break
+        return "\n".join(parts)
+    return text
+
+
+def _write_command(tn: telnetlib.Telnet, command: str) -> None:
+    tn.write((command + "\r\n").encode("ascii"))
+    time.sleep(0.3)
+
+
+def send_mail_telnet(
+    smtp_server: Optional[str],
+    smtp_port_value: int,
+    helo_name: str,
+    sender_email: str,
+    recipient_email: str,
+    header: str,
+    timeout: int = 15,
+    bcc_emails: Optional[Iterable[str]] = None,
+) -> Tuple[bool, str]:
+    target_server = smtp_server or get_mx_server_for_email(recipient_email)
+    responses: List[str] = []
+    last_error = ""
+    try:
+        with telnetlib.Telnet(target_server, smtp_port_value, timeout=timeout) as tn:
+            responses.append(_read_reply(tn, timeout))
+
+            helo_phrase = helo_name or "localhost"
+            _write_command(tn, f"EHLO {helo_phrase}")
+            reply = _read_reply(tn, timeout)
+            responses.append(reply)
+            if not reply.startswith("250"):
+                _write_command(tn, f"HELO {helo_phrase}")
+                reply = _read_reply(tn, timeout)
+                responses.append(reply)
+
+            _write_command(tn, f"MAIL FROM:<{sender_email}>")
+            responses.append(_read_reply(tn, timeout))
+
+            _write_command(tn, f"RCPT TO:<{recipient_email}>")
+            responses.append(_read_reply(tn, timeout))
+
+            if bcc_emails:
+                for bcc in bcc_emails:
+                    _write_command(tn, f"RCPT TO:<{bcc}>")
+                    responses.append(_read_reply(tn, timeout))
+
+            _write_command(tn, "DATA")
+            responses.append(_read_reply(tn, timeout))
+
+            payload = header.replace("\r\n", "\n").replace("\r", "\n")
+            if not payload.endswith("\n"):
+                payload += "\n"
+            payload = payload.replace("\n", "\r\n")
+            tn.write(_encode_euc_kr(payload))
+            tn.write(b".\r\n")
+            time.sleep(0.3)
+            responses.append(_read_reply(tn, timeout))
+
+            _write_command(tn, "QUIT")
+            responses.append(_read_reply(tn, timeout))
+
+        merged = "\n".join(filter(None, responses))
+        success = any(line.startswith("250") for line in reversed(responses) if line)
+        return success, merged
+    except EOFError as exc:  # 연결이 강제로 끊어진 경우
+        last_error = f"EOFError: {exc}"
+    except Exception as exc:  # pylint: disable=broad-except
+        last_error = f"예외: {exc}"
+
+    merged = "\n".join(filter(None, responses))
+    if merged:
+        merged = f"{merged}\n{last_error}" if last_error else merged
+    else:
+        merged = last_error or "연결 종료"
+    return False, merged
+
+
+if __name__ == "__main__":
+    sender = "mobile2@elite-watch.com"
+    recipient = "nanagame2@naver.com"
+    subject_text = "텔넷 샘플"
+    subject_encoded = base64.b64encode(subject_text.encode("euc-kr")).decode("ascii")
+    header_text = (
+        f"From: {sender}\r\n"
+        f"To: {recipient}\r\n"
+        f"Subject: =?EUC-KR?B?{subject_encoded}?=\r\n"
+        "MIME-Version: 1.0\r\n"
+        "Content-Type: text/plain; charset=euc-kr\r\n"
+        "Content-Transfer-Encoding: 8bit\r\n"
+        "\r\n"
+        "텔넷 전송 테스트 본문입니다.\r\n"
+    )
+    print("메일 전송을 시작합니다...")
+    target = get_mx_server_for_email(recipient)
+    print(f"선택된 SMTP 서버: {target}")
+    success, details = send_mail_telnet(
+        smtp_server=target,
+        smtp_port_value=smtp_port,
+        helo_name="sample-helo",
+        sender_email=sender,
+        recipient_email=recipient,
+        header=header_text,
+        timeout=10,
+    )
+    if success:
+        print("이메일 전송 성공 
