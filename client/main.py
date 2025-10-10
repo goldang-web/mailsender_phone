@@ -182,6 +182,10 @@ def configure_device_name(config: Dict[str, object]) -> Dict[str, object]:
             print("디바이스 이름은 비울 수 없습니다.")
         else:
             config["device_name"] = new_value
+            answer = prompt_value("해당 이름으로 디바이스 ID를 새로 발급할까요? (y/N)")
+            if answer and answer.lower().startswith("y"):
+                config["device_id"] = ""
+                print("디바이스 ID를 재발급하도록 설정했습니다. 다음 연결 시 새로운 ID가 생성됩니다.")
             save_config(config)
     return config
 
@@ -1368,6 +1372,11 @@ class MailClient:
                 except requests.RequestException as exc:
                     if self.connected:
                         print(f"[네트워크 오류] {exc}. {self.interval}초 후 재시도합니다.")
+                    try:
+                        self.session.close()
+                    except Exception:
+                        pass
+                    self.session = requests.Session()
                     self.connected = False
                     time.sleep(self.interval)
                 except KeyboardInterrupt:

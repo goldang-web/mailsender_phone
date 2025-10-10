@@ -1,6 +1,6 @@
 {
   "server_url": "http://127.0.0.1:8000",
-  "device_name": "Phone1",
+  "device_name": "Mac",
   "device_id": "ec6746ec40e341d4b8c86835305312ae",
   "interval": 5,
   "timeout": 15,
