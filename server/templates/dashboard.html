@@ -98,8 +98,28 @@ header {
 .global-form .field {
   flex: 1 1 220px;
 }
+.global-form .domain-field {
+  min-width: 220px;
+}
 .global-form textarea {
   min-height: 80px;
+}
+.domain-radio-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+.domain-radio-group label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+  font-size: 14px;
+}
+.domain-radio-group input[type="radio"] {
+  width: 16px;
+  height: 16px;
 }
 .global-footer {
   display: flex;
@@ -778,6 +798,19 @@ button:not(:disabled):hover {
 <section class="global-panel" id="globalPanel">
   <h2>공통 발송 설정</h2>
   <div class="global-form">
+    <div class="field domain-field">
+      <span>활성 도메인</span>
+      <div class="domain-radio-group" id="globalActiveDomainGroup">
+        <label>
+          <input type="radio" name="globalActiveDomain" value="naver">
+          네이버
+        </label>
+        <label>
+          <input type="radio" name="globalActiveDomain" value="daum">
+          다음
+        </label>
+      </div>
+    </div>
     <label class="field">
       <span>HELO</span>
       <input type="text" id="globalHelo" placeholder="예: mail.example.com">
@@ -910,8 +943,9 @@ button:not(:disabled):hover {
 </div>
 
 <script>
-const GLOBAL_FIELD_LIST = ["helo", "mail_from", "header", "session_count", "bcc_count", "stop_schedule_time", "stop_schedule_enabled"];
+const GLOBAL_FIELD_LIST = ["active_domain", "helo", "mail_from", "header", "session_count", "bcc_count", "stop_schedule_time", "stop_schedule_enabled"];
 const GLOBAL_DEFAULTS = {
+  active_domain: "naver",
   helo: "",
   mail_from: "",
   header: "",
@@ -925,6 +959,7 @@ const GLOBAL_META_DEFAULTS = {
   stop_schedule_next_run: null,
 };
 const GLOBAL_INPUT_IDS = {
+  active_domain: "globalActiveDomainGroup",
   helo: "globalHelo",
   mail_from: "globalMailFrom",
   header: "globalHeader",
@@ -948,6 +983,7 @@ const state = {
   globalConfig: { ...GLOBAL_DEFAULTS, ...GLOBAL_META_DEFAULTS, updated_at: null },
   globalDraft: { ...GLOBAL_DEFAULTS },
   globalDirty: {
+    active_domain: false,
     helo: false,
     mail_from: false,
     header: false,
@@ -1085,6 +1121,14 @@ function sanitizeBccValue(value) {
     return "0";
   }
   return String(clampNumber(parsed, BCC_MIN, BCC_MAX, BCC_MIN));
+}
+
+function sanitizeGlobalDomain(value) {
+  const candidate = String(value ?? "").trim().toLowerCase();
+  if (candidate === "daum") {
+    return "daum";
+  }
+  return "naver";
 }
 
 function sanitizeScheduleTime(value) {
@@ -1645,6 +1689,9 @@ function setGlobalStatus(message, type = "info") {
 }
 
 function normalizeGlobalFieldValue(field, value) {
+  if (field === "active_domain") {
+    return sanitizeGlobalDomain(value ?? GLOBAL_DEFAULTS.active_domain);
+  }
   if (field === "session_count") {
     return sanitizeSessionValue(value ?? "");
   }
@@ -1683,6 +1730,18 @@ function syncGlobalInputsFromDraft(options = {}) {
     if (!force && state.globalDirty[field]) {
       return;
     }
+     if (field === "active_domain") {
+       const normalizedDomain = normalizeGlobalFieldValue(field, state.globalDraft[field]);
+       state.globalDraft[field] = normalizedDomain;
+       const radios = document.querySelectorAll('input[name="globalActiveDomain"]');
+       if (!radios.length) {
+         return;
+       }
+       radios.forEach((radio) => {
+         radio.checked = radio.value === normalizedDomain;
+       });
+       return;
+     }
     const input = document.getElementById(GLOBAL_INPUT_IDS[field]);
     if (!input) {
       return;
@@ -1722,6 +1781,23 @@ function applyValuesToGlobalDraft(values, options = {}) {
 
 function initGlobalForm() {
   GLOBAL_FIELD_LIST.forEach((field) => {
+    if (field === "active_domain") {
+      const radios = document.querySelectorAll('input[name="globalActiveDomain"]');
+      if (!radios.length) {
+        return;
+      }
+      radios.forEach((radio) => {
+        radio.addEventListener("change", () => {
+          if (!radio.checked) {
+            return;
+          }
+          const sanitized = sanitizeGlobalDomain(radio.value);
+          state.globalDirty.active_domain = true;
+          state.globalDraft.active_domain = sanitized;
+        });
+      });
+      return;
+    }
     const input = document.getElementById(GLOBAL_INPUT_IDS[field]);
     if (!input) return;
     if (field === "stop_schedule_enabled" || field === "stop_schedule_time") {
@@ -3227,7 +3303,17 @@ async function handleGlobalApply() {
   const bccInput = document.getElementById("globalBccCount");
   const stopEnabledInput = document.getElementById("globalStopEnabled");
   const stopTimeInput = document.getElementById("globalStopTime");
+  const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
   if (!applyBtn) return;
+  const activeDomainValue = sanitizeGlobalDomain(
+    activeDomainRadio?.value ?? state.globalDraft.active_domain ?? GLOBAL_DEFAULTS.active_domain,
+  );
+  if (!activeDomainRadio || activeDomainRadio.value !== activeDomainValue) {
+    const radios = document.querySelectorAll('input[name="globalActiveDomain"]');
+    radios.forEach((radio) => {
+      radio.checked = radio.value === activeDomainValue;
+    });
+  }
   const heloValue = heloInput?.value.trim() ?? "";
   const mailValue = mailInput?.value.trim() ?? "";
   const headerValue = headerInput?.value ?? "";
@@ -3259,6 +3345,7 @@ async function handleGlobalApply() {
     }
   }
   setStopScheduleEnabledUI(stopEnabledValue, { force: true });
+  state.globalDraft.active_domain = activeDomainValue;
   state.globalDraft.helo = heloValue;
   state.globalDraft.mail_from = mailValue;
   state.globalDraft.header = headerValue;
@@ -3269,6 +3356,7 @@ async function handleGlobalApply() {
   }
   state.globalDraft.stop_schedule_enabled = stopEnabledValue;
   const payload = {
+    active_domain: activeDomainValue,
     helo: heloValue,
     mail_from: mailValue,
     header: headerValue,
@@ -3305,6 +3393,7 @@ async function handleGlobalApply() {
       }
     } else {
       const fieldLabels = appliedFields.map((field) => {
+        if (field === "active_domain") return "활성 도메인";
         if (field === "helo") return "HELO";
         if (field === "mail_from") return "MAIL FROM";
         if (field === "header") return "HEADER";

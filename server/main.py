@@ -48,6 +48,7 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "header": "",
     "bcc_count": 0,
     "session_count": 1,
+    "active_domain": "naver",
     "stop_schedule_enabled": False,
     "stop_schedule_time": "",
     "stop_schedule_last_run": None,
@@ -162,6 +163,18 @@ def compute_next_stop_schedule(time_str: str, *, ref: Optional[datetime] = None)
     return candidate.isoformat()
 
 
+def sanitize_global_active_domain(value: Any) -> str:
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+    elif value is None:
+        candidate = ""
+    else:
+        candidate = str(value).strip().lower()
+    if candidate in DOMAINS:
+        return candidate
+    return "naver"
+
+
 def to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
@@ -173,6 +186,7 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized["header"] = str(raw.get("header") or "")
     sanitized["bcc_count"] = clamp_bcc_count(raw.get("bcc_count"))
     sanitized["session_count"] = sanitize_session_count(raw.get("session_count"))
+    sanitized["active_domain"] = sanitize_global_active_domain(raw.get("active_domain"))
     enabled = sanitize_stop_schedule_enabled(raw.get("stop_schedule_enabled"))
     time_value = sanitize_stop_schedule_time(raw.get("stop_schedule_time"))
     if not time_value:
@@ -290,6 +304,15 @@ def apply_global_config_to_devices(
             conn.execute(query, params)
             total_updates += 1
     return device_count, total_updates
+
+
+def apply_global_active_domain(conn: sqlite3.Connection, domain: str) -> int:
+    now = now_ts()
+    cursor = conn.execute(
+        "UPDATE devices SET active_domain=?, updated_at=?",
+        (domain, now),
+    )
+    return cursor.rowcount
 
 
 def get_conn() -> sqlite3.Connection:
@@ -1186,6 +1209,7 @@ class GlobalConfigPayload(BaseModel):
     header: Optional[str] = ""
     bcc_count: Optional[int] = 0
     session_count: Optional[int] = 1
+    active_domain: Optional[str] = None
     stop_schedule_enabled: Optional[bool] = False
     stop_schedule_time: Optional[str] = ""
 
@@ -1196,6 +1220,7 @@ class GlobalConfigResponse(BaseModel):
     header: str
     bcc_count: int
     session_count: int
+    active_domain: str
     updated_at: Optional[str] = None
     stop_schedule_enabled: bool = False
     stop_schedule_time: Optional[str] = None
@@ -1242,6 +1267,7 @@ def get_global_config_endpoint() -> GlobalConfigResponse:
         header=config.get("header", ""),
         bcc_count=clamp_bcc_count(config.get("bcc_count", 0)),
         session_count=sanitize_session_count(config.get("session_count", 1)),
+        active_domain=sanitize_global_active_domain(config.get("active_domain")),
         updated_at=config.get("updated_at"),
         stop_schedule_enabled=sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled")),
         stop_schedule_time=sanitize_stop_schedule_time(config.get("stop_schedule_time")),
@@ -1265,11 +1291,21 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         "stop_schedule_enabled": schedule_enabled,
         "stop_schedule_time": schedule_time,
     }
+    domain_update_requested = payload.active_domain is not None
     with db_lock, get_conn() as conn:
         current_config = load_global_config(conn=conn)
         stored_config = sanitize_global_config_payload(current_config)
         previous_enabled = stored_config.get("stop_schedule_enabled", False)
         previous_time = stored_config.get("stop_schedule_time", "")
+        previous_active_domain = stored_config.get("active_domain", "naver")
+        requested_active_domain = (
+            sanitize_global_active_domain(payload.active_domain)
+            if domain_update_requested
+            else previous_active_domain
+        )
+        active_domain_changed = (
+            domain_update_requested and requested_active_domain != previous_active_domain
+        )
         apply_values: Dict[str, Any] = {}
         applied_fields: List[str] = []
         for field in GLOBAL_CONFIG_DEVICE_FIELDS:
@@ -1293,6 +1329,12 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 stored_config[field] = value_to_apply
                 applied_fields.append(field)
         device_count, update_count = apply_global_config_to_devices(conn, apply_values)
+        domain_update_count = 0
+        if active_domain_changed:
+            domain_update_count = apply_global_active_domain(conn, requested_active_domain)
+            applied_fields.append("active_domain")
+        stored_config["active_domain"] = requested_active_domain
+        device_count = max(device_count, domain_update_count)
         next_time_value = schedule_time or previous_time or ""
         stored_config["stop_schedule_enabled"] = schedule_enabled
         stored_config["stop_schedule_time"] = next_time_value
