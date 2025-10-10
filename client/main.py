@@ -1367,6 +1367,7 @@ class MailClient:
                                     group = next_group()
                                     if not group:
                                         break
+                                    group = prepare_group_for_dispatch(group)
                                     future = executor.submit(deliver_group, group)
                                     inflight[future] = group
                                     if stop_requested:
