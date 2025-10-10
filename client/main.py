@@ -14,12 +14,13 @@ from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 from smtp_utils import send_via_telnet
 from urllib.parse import urlparse, urlunparse
 
 
-APP_VERSION = "0.0.1"
+APP_VERSION = "0.0.2"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -271,25 +272,73 @@ class MailClient:
     # ------------------------------------------------------------------ #
     def _configure_session(self) -> None:
         self.session.headers.update({"Connection": "keep-alive"})
-        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=0)
+        retry_strategy = Retry(
+            total=2,
+            connect=2,
+            read=2,
+            status=0,
+            backoff_factor=0.5,
+            allowed_methods=None,
+            raise_on_status=False,
+            respect_retry_after_header=False,
+        )
+        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=retry_strategy)
         self.session.mount("http://", adapter)
         self.session.mount("https://", adapter)
+
+    def _reset_session(self) -> None:
+        try:
+            self.session.close()
+        except Exception:
+            pass
+        self.session = requests.Session()
+        self._configure_session()
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         url = join_url(self.server_url, path)
         timeout = kwargs.pop("timeout", self.timeout)
         print(f"[HTTP {method.upper()}] {url}")
-        try:
-            response = self.session.request(method=method, url=url, timeout=timeout, **kwargs)
-        except requests.RequestException as exc:
-            print(f"[HTTP {method.upper()}] 요청 실패: {exc}")
-            raise
+        max_attempts = 3
+        attempt = 0
+        last_exc: Optional[requests.RequestException] = None
+        response: Optional[requests.Response] = None
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                response = self.session.request(method=method, url=url, timeout=timeout, **kwargs)
+                break
+            except requests.RequestException as exc:
+                last_exc = exc
+                print(f"[HTTP {method.upper()}] 요청 실패 (시도 {attempt}/{max_attempts}): {exc}")
+                if attempt >= max_attempts or not self._should_retry(exc):
+                    raise
+                self._reset_session()
+                time.sleep(min(1.0, 0.2 * attempt))
+        if response is None:
+            if last_exc:
+                raise last_exc
+            raise RuntimeError("알 수 없는 HTTP 요청 오류가 발생했습니다.")
         print(f"[HTTP {method.upper()}] 응답 {response.status_code}")
         content_type = response.headers.get("content-type", "")
         if response.content and ("json" in content_type or content_type.startswith("text/")):
             preview = response.text[:150]
             print(f"[HTTP {method.upper()}] 응답 본문 미리보기: {preview}")
         return response
+
+    @staticmethod
+    def _should_retry(exc: requests.RequestException) -> bool:
+        if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.HTTPError)):
+            return False
+        message = str(exc).lower()
+        if isinstance(exc, requests.exceptions.ConnectionError):
+            return True
+        retry_signatures = (
+            "remotedisconnected",
+            "connection aborted",
+            "broken pipe",
+            "badstatusline",
+        )
+        return any(signature in message for signature in retry_signatures)
 
     def persist(self) -> None:
         snapshot = self.config.copy()
