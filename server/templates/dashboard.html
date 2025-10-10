@@ -129,6 +129,31 @@ header {
   justify-content: space-between;
   align-items: flex-start;
 }
+.card-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+button.card-hide-btn {
+  display: none;
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  padding: 0;
+  border-radius: 999px;
+  border: 1px solid #e2e8f0;
+  background: transparent;
+  color: #64748b;
+  font-size: 16px;
+  font-weight: 700;
+  line-height: 1;
+}
+button.card-hide-btn:hover {
+  background: #e2e8f0;
+}
+button.card-hide-btn:active {
+  background: #cbd5f5;
+}
 .device-title {
   font-size: 16px;
   font-weight: 700;
@@ -592,6 +617,14 @@ button:not(:disabled):hover {
       <span>MAIL FROM</span>
       <input type="text" id="globalMailFrom" placeholder="sender@example.com">
     </label>
+    <label class="field compact">
+      <span>세션 수</span>
+      <input type="number" id="globalSessionCount" min="1" step="1" placeholder="1 이상">
+    </label>
+    <label class="field compact">
+      <span>BCC 수</span>
+      <input type="number" id="globalBccCount" min="0" max="30" step="1" placeholder="0~30">
+    </label>
   </div>
   <label class="field">
     <span>HEADER</span>
@@ -651,6 +684,22 @@ button:not(:disabled):hover {
 </div>
 
 <script>
+const GLOBAL_FIELD_LIST = ["helo", "mail_from", "header", "session_count", "bcc_count"];
+const GLOBAL_DEFAULTS = {
+  helo: "",
+  mail_from: "",
+  header: "",
+  session_count: "1",
+  bcc_count: "0",
+};
+const GLOBAL_INPUT_IDS = {
+  helo: "globalHelo",
+  mail_from: "globalMailFrom",
+  header: "globalHeader",
+  session_count: "globalSessionCount",
+  bcc_count: "globalBccCount",
+};
+
 const state = {
   devices: [],
   lastSync: null,
@@ -662,11 +711,14 @@ const state = {
   },
   pollingHandle: null,
   successCounters: {},
-  globalConfig: {
-    helo: "",
-    mail_from: "",
-    header: "",
-    updated_at: null,
+  globalConfig: { ...GLOBAL_DEFAULTS, updated_at: null },
+  globalDraft: { ...GLOBAL_DEFAULTS },
+  globalDirty: {
+    helo: false,
+    mail_from: false,
+    header: false,
+    session_count: false,
+    bcc_count: false,
   },
   globalStatusTimer: null,
 };
@@ -697,6 +749,8 @@ const ANCHOR_MIN = 1;
 const ANCHOR_MAX = 1000;
 const fieldCache = {};
 const cardRegistry = {};
+const HIDDEN_OFFLINE_KEY = "dashboard.hiddenOfflineDevices";
+const hiddenOfflineDevices = loadHiddenOfflineDevices();
 
 function clampNumber(value, min, max, fallback) {
   const parsed = typeof value === "number" ? value : parseInt(value, 10);
@@ -704,6 +758,32 @@ function clampNumber(value, min, max, fallback) {
     return fallback;
   }
   return Math.min(max, Math.max(min, parsed));
+}
+
+function loadHiddenOfflineDevices() {
+  try {
+    const raw = localStorage.getItem(HIDDEN_OFFLINE_KEY);
+    if (!raw) {
+      return new Set();
+    }
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) {
+      return new Set();
+    }
+    return new Set(parsed.filter((value) => typeof value === "string" && value));
+  } catch (err) {
+    console.warn("숨김 오프라인 목록을 불러오지 못했습니다.", err);
+    return new Set();
+  }
+}
+
+function persistHiddenOfflineDevices() {
+  try {
+    const serialized = JSON.stringify(Array.from(hiddenOfflineDevices));
+    localStorage.setItem(HIDDEN_OFFLINE_KEY, serialized);
+  } catch (err) {
+    console.warn("숨김 오프라인 목록 저장에 실패했습니다.", err);
+  }
 }
 
 function parseBccInput(value) {
@@ -937,26 +1017,107 @@ function setGlobalStatus(message, type = "info") {
   }
 }
 
+function normalizeGlobalFieldValue(field, value) {
+  if (field === "session_count") {
+    return sanitizeSessionValue(value ?? "");
+  }
+  if (field === "bcc_count") {
+    return sanitizeBccValue(value ?? "");
+  }
+  if (value === undefined || value === null) {
+    return GLOBAL_DEFAULTS[field];
+  }
+  return String(value);
+}
+
+function normalizeGlobalConfig(config) {
+  const normalized = {};
+  GLOBAL_FIELD_LIST.forEach((field) => {
+    normalized[field] = normalizeGlobalFieldValue(field, config?.[field]);
+  });
+  normalized.updated_at = config?.updated_at || null;
+  return normalized;
+}
+
+function syncGlobalInputsFromDraft(options = {}) {
+  const { force = false } = options;
+  GLOBAL_FIELD_LIST.forEach((field) => {
+    if (!force && state.globalDirty[field]) {
+      return;
+    }
+    const input = document.getElementById(GLOBAL_INPUT_IDS[field]);
+    if (!input) {
+      return;
+    }
+    const normalizedValue = normalizeGlobalFieldValue(field, state.globalDraft[field]);
+    state.globalDraft[field] = normalizedValue;
+    if (force || document.activeElement !== input) {
+      input.value = normalizedValue;
+    }
+  });
+}
+
+function applyValuesToGlobalDraft(values, options = {}) {
+  const { markDirty = true, force = true } = options;
+  if (!values) {
+    return;
+  }
+  Object.entries(values).forEach(([field, value]) => {
+    if (!GLOBAL_FIELD_LIST.includes(field)) {
+      return;
+    }
+    const normalized = normalizeGlobalFieldValue(field, value);
+    state.globalDraft[field] = normalized;
+    state.globalDirty[field] = markDirty;
+  });
+  if (force) {
+    syncGlobalInputsFromDraft({ force: true });
+  }
+}
+
+function initGlobalForm() {
+  GLOBAL_FIELD_LIST.forEach((field) => {
+    const input = document.getElementById(GLOBAL_INPUT_IDS[field]);
+    if (!input) return;
+    input.addEventListener("input", () => {
+      state.globalDirty[field] = true;
+      state.globalDraft[field] = input.value;
+    });
+    if (field === "session_count") {
+      input.addEventListener("blur", () => {
+        const sanitized = sanitizeSessionValue(input.value);
+        if (input.value !== sanitized) {
+          input.value = sanitized;
+        }
+        state.globalDraft[field] = sanitized;
+        state.globalDirty[field] = true;
+      });
+    } else if (field === "bcc_count") {
+      input.addEventListener("blur", () => {
+        const sanitized = sanitizeBccValue(input.value);
+        if (input.value !== sanitized) {
+          input.value = sanitized;
+        }
+        state.globalDraft[field] = sanitized;
+        state.globalDirty[field] = true;
+      });
+    }
+  });
+}
+
 function renderGlobalConfig(config) {
-  const heloInput = document.getElementById("globalHelo");
-  const mailInput = document.getElementById("globalMailFrom");
-  const headerInput = document.getElementById("globalHeader");
+  const normalized = normalizeGlobalConfig(config || {});
   const updatedAtEl = document.getElementById("globalUpdatedAt");
-  const heloValue = config?.helo ?? "";
-  const mailValue = config?.mail_from ?? "";
-  const headerValue = config?.header ?? "";
-  if (heloInput && document.activeElement !== heloInput) {
-    heloInput.value = heloValue;
-  }
-  if (mailInput && document.activeElement !== mailInput) {
-    mailInput.value = mailValue;
-  }
-  if (headerInput && document.activeElement !== headerInput) {
-    headerInput.value = headerValue;
-  }
+  state.globalConfig = { ...normalized };
+  GLOBAL_FIELD_LIST.forEach((field) => {
+    if (!state.globalDirty[field]) {
+      state.globalDraft[field] = normalized[field];
+    }
+  });
+  syncGlobalInputsFromDraft();
   if (updatedAtEl) {
-    if (config?.updated_at) {
-      updatedAtEl.textContent = `마지막 적용: ${formatDate(config.updated_at)}`;
+    if (normalized.updated_at) {
+      updatedAtEl.textContent = `마지막 적용: ${formatDate(normalized.updated_at)}`;
     } else {
       updatedAtEl.textContent = "아직 적용 기록이 없습니다.";
     }
@@ -1533,6 +1694,23 @@ function attachCardEvents(card) {
     }
   });
 
+  const copyGlobalBtn = card.querySelector('button[data-action="copy-global"]');
+  if (copyGlobalBtn) {
+    copyGlobalBtn.addEventListener("click", () => {
+      const currentDevice = getDevice();
+      const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
+      const { payload } = collectConfigPayload(card, currentDevice, domain);
+      applyValuesToGlobalDraft({
+        helo: payload.helo,
+        mail_from: payload.mail_from,
+        header: payload.header,
+        session_count: payload.session_count,
+        bcc_count: payload.bcc_count,
+      });
+      setGlobalStatus("선택한 카드의 설정을 전체 설정 폼에 채웠습니다. 적용 버튼을 눌러 반영하세요.", "info");
+    });
+  }
+
   const singleBtn = card.querySelector('button[data-action="single"]');
   singleBtn.addEventListener("click", async () => {
     const currentDevice = getDevice();
@@ -1641,6 +1819,19 @@ function attachCardEvents(card) {
       }
     });
   }
+
+  const hideBtn = card.querySelector('button[data-action="hide-offline"]');
+  if (hideBtn) {
+    hideBtn.addEventListener("click", () => {
+      const currentDevice = getDevice();
+      if (!currentDevice?.id) {
+        return;
+      }
+      hiddenOfflineDevices.add(currentDevice.id);
+      persistHiddenOfflineDevices();
+      renderDevices();
+    });
+  }
 }
 
 function buildDeviceCard(device) {
@@ -1654,9 +1845,12 @@ function buildDeviceCard(device) {
         <div class="meta">ID: <span data-role="deviceId"></span></div>
         <div class="meta" data-role="lastSeen"></div>
       </div>
-      <div class="status-chip" data-role="statusChip">
-        <span class="status-dot"></span>
-        <span data-role="statusText"></span>
+      <div class="card-header-actions">
+        <div class="status-chip status-unknown" data-role="statusChip">
+          <span class="status-dot"></span>
+          <span data-role="statusText"></span>
+        </div>
+        <button type="button" class="card-hide-btn" data-action="hide-offline" title="오프라인 디바이스 카드를 숨깁니다." aria-label="오프라인 카드 숨기기">&times;</button>
       </div>
     </div>
     <div class="ip-row" data-role="ipRow">
@@ -1716,13 +1910,14 @@ function buildDeviceCard(device) {
           <span>단일 발송 RCPT TO</span>
           <input type="text" data-field="rcpt_to" placeholder="recipient@example.com">
         </label>
-        <div class="action-buttons">
-          <button data-action="save">설정 저장</button>
-          <button class="secondary" data-action="single">단일 발송</button>
-          <button data-action="batch">전체 발송</button>
-          <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
-          <button class="ghost" data-action="files" data-domain="naver">네이버 DB 추가</button>
-          <button class="ghost" data-action="files" data-domain="daum">다음 DB 추가</button>
+      <div class="action-buttons">
+        <button data-action="save">설정 저장</button>
+        <button class="ghost" data-action="copy-global">전체 적용</button>
+        <button class="secondary" data-action="single">단일 발송</button>
+        <button data-action="batch">전체 발송</button>
+        <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
+        <button class="ghost" data-action="files" data-domain="naver">네이버 DB 추가</button>
+        <button class="ghost" data-action="files" data-domain="daum">다음 DB 추가</button>
         </div>
       </div>
     </div>
@@ -1756,6 +1951,10 @@ function updateDeviceCard(card, device) {
   if (statusChip) statusChip.className = statusClass(device.status);
   const statusText = card.querySelector('[data-role="statusText"]');
   if (statusText) statusText.textContent = STATUS_LABELS[device.status] || device.status || "상태 미확인";
+  const hideBtn = card.querySelector('button[data-action="hide-offline"]');
+  if (hideBtn) {
+    hideBtn.style.display = device.status === "disconnected" ? "inline-flex" : "none";
+  }
 
   card.querySelectorAll('[data-role="domainRadio"]').forEach((radio) => {
     radio.name = `domain-${device.id}`;
@@ -1778,7 +1977,25 @@ function renderDevices() {
   const emptyHint = document.getElementById("emptyHint");
   const seenIds = new Set();
 
+  if (emptyHint && !emptyHint.dataset.defaultMessage) {
+    emptyHint.dataset.defaultMessage = emptyHint.textContent;
+  }
+
   state.devices.forEach((device) => {
+    const isOffline = device.status === "disconnected";
+    if (!isOffline && hiddenOfflineDevices.has(device.id)) {
+      hiddenOfflineDevices.delete(device.id);
+      persistHiddenOfflineDevices();
+    }
+    if (isOffline && hiddenOfflineDevices.has(device.id)) {
+      const existing = cardRegistry[device.id];
+      if (existing?.parentNode === container) {
+        container.removeChild(existing);
+      }
+      delete cardRegistry[device.id];
+      delete state.successCounters[device.id];
+      return;
+    }
     let card = cardRegistry[device.id];
     if (!card) {
       card = buildDeviceCard(device);
@@ -1803,9 +2020,21 @@ function renderDevices() {
     }
   });
 
-  if (!state.devices.length) {
-    emptyHint.style.display = "block";
-  } else {
+  const visibleCards = container.querySelectorAll(".card").length;
+  if (!visibleCards) {
+    if (emptyHint) {
+      const hasDevices = (state.devices || []).length > 0;
+      if (hasDevices && hiddenOfflineDevices.size > 0) {
+        emptyHint.textContent = "표시할 디바이스가 없습니다. 숨긴 오프라인 카드는 새로고침하거나 다시 연결되면 다시 나타납니다.";
+      } else if (emptyHint.dataset.defaultMessage) {
+        emptyHint.textContent = emptyHint.dataset.defaultMessage;
+      }
+      emptyHint.style.display = "block";
+    }
+  } else if (emptyHint) {
+    if (emptyHint.dataset.defaultMessage) {
+      emptyHint.textContent = emptyHint.dataset.defaultMessage;
+    }
     emptyHint.style.display = "none";
   }
 }
@@ -1820,13 +2049,7 @@ async function loadDevices(options = {}) {
     const data = await fetchJSON("/api/devices", { method: "GET" });
     state.devices = data.devices || [];
     const globalConfig = data.global_config || {};
-    state.globalConfig = {
-      helo: globalConfig.helo || "",
-      mail_from: globalConfig.mail_from || "",
-      header: globalConfig.header || "",
-      updated_at: globalConfig.updated_at || null,
-    };
-    renderGlobalConfig(state.globalConfig);
+    renderGlobalConfig(globalConfig);
     renderSummary(data.counts || {});
     state.lastSync = new Date().toISOString();
     renderLastSync();
@@ -2065,6 +2288,8 @@ if (purgeBtn) {
   });
 }
 
+initGlobalForm();
+
 document.getElementById("globalApplyBtn").addEventListener("click", () => {
   handleGlobalApply();
 });
@@ -2082,11 +2307,31 @@ async function handleGlobalApply() {
   const heloInput = document.getElementById("globalHelo");
   const mailInput = document.getElementById("globalMailFrom");
   const headerInput = document.getElementById("globalHeader");
+  const sessionInput = document.getElementById("globalSessionCount");
+  const bccInput = document.getElementById("globalBccCount");
   if (!applyBtn) return;
+  const heloValue = heloInput?.value.trim() ?? "";
+  const mailValue = mailInput?.value.trim() ?? "";
+  const headerValue = headerInput?.value ?? "";
+  const sessionValue = sanitizeSessionValue(sessionInput?.value ?? state.globalDraft.session_count ?? GLOBAL_DEFAULTS.session_count);
+  if (sessionInput && sessionInput.value !== sessionValue) {
+    sessionInput.value = sessionValue;
+  }
+  const bccValue = sanitizeBccValue(bccInput?.value ?? state.globalDraft.bcc_count ?? GLOBAL_DEFAULTS.bcc_count);
+  if (bccInput && bccInput.value !== bccValue) {
+    bccInput.value = bccValue;
+  }
+  state.globalDraft.helo = heloValue;
+  state.globalDraft.mail_from = mailValue;
+  state.globalDraft.header = headerValue;
+  state.globalDraft.session_count = sessionValue;
+  state.globalDraft.bcc_count = bccValue;
   const payload = {
-    helo: heloInput?.value.trim() ?? "",
-    mail_from: mailInput?.value.trim() ?? "",
-    header: headerInput?.value ?? "",
+    helo: heloValue,
+    mail_from: mailValue,
+    header: headerValue,
+    session_count: Number(sessionValue),
+    bcc_count: parseBccInput(bccValue),
   };
   const originalText = applyBtn.textContent;
   applyBtn.disabled = true;
@@ -2105,18 +2350,17 @@ async function handleGlobalApply() {
         if (field === "helo") return "HELO";
         if (field === "mail_from") return "MAIL FROM";
         if (field === "header") return "HEADER";
+        if (field === "session_count") return "세션 수";
+        if (field === "bcc_count") return "BCC 수";
         return field.toUpperCase();
       });
       setGlobalStatus(`총 ${affected}대에 ${fieldLabels.join(", ")} 값을 적용했습니다.`, "success");
     }
-    const resultConfig = result.config || payload;
-    state.globalConfig = {
-      helo: resultConfig.helo ?? payload.helo ?? "",
-      mail_from: resultConfig.mail_from ?? payload.mail_from ?? "",
-      header: resultConfig.header ?? payload.header ?? "",
-      updated_at: result.updated_at || null,
-    };
-    renderGlobalConfig(state.globalConfig);
+    const serverConfig = { ...(result.config || {}), updated_at: result.updated_at || null };
+    GLOBAL_FIELD_LIST.forEach((field) => {
+      state.globalDirty[field] = false;
+    });
+    renderGlobalConfig(serverConfig);
     await loadDevices({ silent: true });
   } catch (err) {
     setGlobalStatus(err.message || "설정 적용에 실패했습니다.", "error");

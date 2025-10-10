@@ -41,7 +41,14 @@ db_lock = threading.RLock()
 DEVICE_HEARTBEAT_TIMEOUT_SECONDS = 15
 JOB_STALE_GRACE_SECONDS = DEVICE_HEARTBEAT_TIMEOUT_SECONDS * 2
 GLOBAL_CONFIG_KEY = "common_config"
-GLOBAL_CONFIG_FIELDS = ("helo", "mail_from", "header")
+GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
+    "helo": "",
+    "mail_from": "",
+    "header": "",
+    "bcc_count": 0,
+    "session_count": 1,
+}
+GLOBAL_CONFIG_FIELDS = tuple(GLOBAL_CONFIG_DEFAULTS.keys())
 
 
 def ensure_storage_root() -> None:
@@ -81,6 +88,14 @@ def normalize_anchor_email(value: Any) -> str:
     return candidate
 
 
+def sanitize_session_count(value: Any) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return 1
+    return max(1, count)
+
+
 def to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
@@ -112,7 +127,15 @@ def load_global_config(*, conn: Optional[sqlite3.Connection] = None) -> Dict[str
             payload = json.loads(raw_value)
         except json.JSONDecodeError:
             payload = {}
-    config = {field: (payload.get(field) or "") for field in GLOBAL_CONFIG_FIELDS}
+    config: Dict[str, Any] = {}
+    for field, default in GLOBAL_CONFIG_DEFAULTS.items():
+        raw_value = payload.get(field, default)
+        if field == "bcc_count":
+            config[field] = clamp_bcc_count(raw_value)
+        elif field == "session_count":
+            config[field] = sanitize_session_count(raw_value)
+        else:
+            config[field] = raw_value or ""
     config["updated_at"] = updated_at
     if owns_conn:
         conn.close()
@@ -121,7 +144,14 @@ def load_global_config(*, conn: Optional[sqlite3.Connection] = None) -> Dict[str
 
 def save_global_config(conn: sqlite3.Connection, config: Dict[str, Any]) -> str:
     now = now_ts()
-    payload = {field: config.get(field, "") for field in GLOBAL_CONFIG_FIELDS}
+    payload: Dict[str, Any] = {}
+    for field, default in GLOBAL_CONFIG_DEFAULTS.items():
+        if field == "bcc_count":
+            payload[field] = clamp_bcc_count(config.get(field, default))
+        elif field == "session_count":
+            payload[field] = sanitize_session_count(config.get(field, default))
+        else:
+            payload[field] = config.get(field, "") or ""
     conn.execute(
         """
         INSERT INTO global_settings (key, value, updated_at)
@@ -1036,12 +1066,16 @@ class GlobalConfigPayload(BaseModel):
     helo: Optional[str] = ""
     mail_from: Optional[str] = ""
     header: Optional[str] = ""
+    bcc_count: Optional[int] = 0
+    session_count: Optional[int] = 1
 
 
 class GlobalConfigResponse(BaseModel):
     helo: str
     mail_from: str
     header: str
+    bcc_count: int
+    session_count: int
     updated_at: Optional[str] = None
 
 
@@ -1082,6 +1116,8 @@ def get_global_config_endpoint() -> GlobalConfigResponse:
         helo=config.get("helo", ""),
         mail_from=config.get("mail_from", ""),
         header=config.get("header", ""),
+        bcc_count=clamp_bcc_count(config.get("bcc_count", 0)),
+        session_count=sanitize_session_count(config.get("session_count", 1)),
         updated_at=config.get("updated_at"),
     )
 
@@ -1092,20 +1128,37 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         "helo": (payload.helo or "").strip(),
         "mail_from": (payload.mail_from or "").strip(),
         "header": payload.header or "",
+        "bcc_count": clamp_bcc_count(payload.bcc_count),
+        "session_count": sanitize_session_count(payload.session_count),
     }
     with db_lock, get_conn() as conn:
         current_config = load_global_config(conn=conn)
-        stored_config = {field: current_config.get(field, "") for field in GLOBAL_CONFIG_FIELDS}
-        apply_values: Dict[str, str] = {}
+        stored_config: Dict[str, Any] = {}
+        for field, default in GLOBAL_CONFIG_DEFAULTS.items():
+            if field == "bcc_count":
+                stored_config[field] = clamp_bcc_count(current_config.get(field, default))
+            elif field == "session_count":
+                stored_config[field] = sanitize_session_count(current_config.get(field, default))
+            else:
+                stored_config[field] = current_config.get(field, "") or ""
+        apply_values: Dict[str, Any] = {}
         applied_fields: List[str] = []
         for field in GLOBAL_CONFIG_FIELDS:
-            raw_value = raw_inputs[field]
+            raw_value = raw_inputs.get(field)
             if field == "header":
                 should_apply = isinstance(raw_value, str) and bool(raw_value.strip())
                 value_to_apply = raw_value
-            else:
-                value_to_apply = raw_value.strip()
+            elif field in ("helo", "mail_from"):
+                value_to_apply = (raw_value or "").strip()
                 should_apply = bool(value_to_apply)
+            elif field == "bcc_count":
+                value_to_apply = clamp_bcc_count(raw_value)
+                should_apply = value_to_apply != stored_config[field]
+            elif field == "session_count":
+                value_to_apply = sanitize_session_count(raw_value)
+                should_apply = value_to_apply != stored_config[field]
+            else:
+                continue
             if should_apply:
                 apply_values[field] = value_to_apply
                 stored_config[field] = value_to_apply
