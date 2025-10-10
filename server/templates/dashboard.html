@@ -408,6 +408,25 @@ button:not(:disabled):hover {
   font-weight: 600;
   color: #1e293b;
 }
+.log-stats.secondary {
+  font-weight: 500;
+  color: #475569;
+}
+.log-stats.secondary[data-state="running"] {
+  color: #2563eb;
+}
+.log-stats.secondary[data-state="cancelling"] {
+  color: #d97706;
+}
+.log-stats.secondary[data-state="success"] {
+  color: #047857;
+}
+.log-stats.secondary[data-state="failed"] {
+  color: #b91c1c;
+}
+.log-stats.secondary[data-state="cancelled"] {
+  color: #b45309;
+}
 .log-clear-btn {
   padding: 4px 10px;
   font-size: 11px;
@@ -1469,6 +1488,7 @@ function ensureSuccessTracker(deviceId) {
       lastBatchId: null,
       resetCutoff: null,
       value: 0,
+      anchor: 0,
     };
   }
   return state.successCounters[deviceId];
@@ -1480,6 +1500,92 @@ function parseTimestampMs(value) {
   }
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? NaN : ms;
+}
+
+function jobIsActive(job) {
+  if (!job) {
+    return false;
+  }
+  if (job.status === "running" && job.cancel_requested) {
+    return true;
+  }
+  return ACTIVE_JOB_STATES.has(job.status);
+}
+
+function formatElapsedDuration(ms) {
+  if (!Number.isFinite(ms) || ms < 0) {
+    return "-";
+  }
+  const totalSeconds = Math.floor(ms / 1000);
+  if (totalSeconds <= 0) {
+    return "<1초";
+  }
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return minutes > 0 ? `${hours}시간 ${minutes}분` : `${hours}시간`;
+  }
+  if (minutes > 0) {
+    return seconds > 0 ? `${minutes}분 ${seconds}초` : `${minutes}분`;
+  }
+  return `${seconds}초`;
+}
+
+function describeElapsedStatus(job) {
+  if (!job) {
+    return { text: "대기 중", state: "idle" };
+  }
+  const active = jobIsActive(job);
+  const cancelRequested = Boolean(job.cancel_requested);
+  const startedMs = parseTimestampMs(job.started_at);
+  const queuedMs = parseTimestampMs(job.queued_at);
+  const createdMs = parseTimestampMs(job.created_at);
+  const hasStarted = !Number.isNaN(startedMs);
+  if (!hasStarted && (!active || job.status === "pending" || job.status === "dispatched")) {
+    const label = JOB_STATUS_LABELS[job.status] || job.status || "대기 중";
+    return { text: label, state: job.status || "idle" };
+  }
+  let startMs = startedMs;
+  if (Number.isNaN(startMs)) {
+    startMs = Number.isNaN(queuedMs) ? createdMs : queuedMs;
+  }
+  if (Number.isNaN(startMs)) {
+    const fallbackLabel = JOB_STATUS_LABELS[job.status] || job.status || "대기 중";
+    const state = active ? (cancelRequested ? "cancelling" : "running") : (job.status || "idle");
+    return { text: fallbackLabel, state };
+  }
+  let endMs = Date.now();
+  if (!active) {
+    const finishedMs = parseTimestampMs(job.finished_at);
+    if (!Number.isNaN(finishedMs)) {
+      endMs = finishedMs;
+    }
+  }
+  const diffMs = Math.max(0, endMs - startMs);
+  const durationText = diffMs < 1000 ? "<1초" : formatElapsedDuration(diffMs);
+  let statusLabel;
+  let stateLabel;
+  if (active) {
+    statusLabel = cancelRequested ? "중지 중" : (JOB_STATUS_LABELS[job.status] || "진행 중");
+    stateLabel = cancelRequested ? "cancelling" : "running";
+  } else {
+    const fallback = JOB_STATUS_LABELS[job.status] || job.status || "완료";
+    statusLabel = fallback;
+    if (job.status === "success") {
+      stateLabel = "success";
+    } else if (job.status === "failed") {
+      stateLabel = "failed";
+    } else if (job.status === "cancelled") {
+      stateLabel = "cancelled";
+    } else {
+      stateLabel = job.status || "idle";
+    }
+  }
+  return {
+    text: `${statusLabel} ${durationText}`,
+    state: stateLabel,
+  };
 }
 
 function updateSuccessCounter(card, device) {
@@ -1511,6 +1617,7 @@ function updateSuccessCounter(card, device) {
     : null;
 
   let maxCount = 0;
+  let anchorTotal = 0;
   (device.logs || []).forEach((entry) => {
     if (!entry?.success) {
       return;
@@ -1529,15 +1636,29 @@ function updateSuccessCounter(card, device) {
     if (parsed.isPrimary && typeof parsed.bccCount === "number" && parsed.bccCount > 0) {
       candidate = parsed.count + parsed.bccCount;
     }
+    if (parsed.isPrimary && typeof parsed.anchorCount === "number" && parsed.anchorCount > 0) {
+      anchorTotal += parsed.anchorCount;
+    }
     if (candidate > maxCount) {
       maxCount = candidate;
     }
   });
 
   tracker.value = maxCount;
+  tracker.anchor = anchorTotal;
   const counterEl = card.querySelector('[data-role="successCounter"]');
   if (counterEl) {
     counterEl.textContent = `누적 성공: ${formatCount(maxCount)}건`;
+  }
+  const elapsedEl = card.querySelector('[data-role="elapsedCounter"]');
+  if (elapsedEl) {
+    const elapsed = describeElapsedStatus(job);
+    elapsedEl.textContent = `경과: ${elapsed.text} · 알박기: ${formatCount(anchorTotal)}건`;
+    if (elapsed.state) {
+      elapsedEl.dataset.state = elapsed.state;
+    } else {
+      delete elapsedEl.dataset.state;
+    }
   }
 }
 
@@ -1926,6 +2047,7 @@ function buildDeviceCard(device) {
         <div class="log-box-heading">
           <h4>로그</h4>
           <div class="log-stats" data-role="successCounter">누적 성공: 0건</div>
+          <div class="log-stats secondary" data-role="elapsedCounter">경과: -</div>
         </div>
         <button class="ghost log-clear-btn" data-action="clear-logs">로그 초기화</button>
       </div>
