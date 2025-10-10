@@ -1,7 +1,7 @@
 {
   "server_url": "http://127.0.0.1:8000",
-  "device_name": "Mac",
-  "device_id": "ec6746ec40e341d4b8c86835305312ae",
+  "device_name": "MAC",
+  "device_id": "e6a2a62fb6c74f3ba967c3d95c59c6ca",
   "interval": 5,
   "timeout": 15,
   "active_domain": "naver",

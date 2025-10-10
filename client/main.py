@@ -18,6 +18,8 @@ from smtp_utils import send_via_telnet
 from urllib.parse import urlparse, urlunparse
 
 
+APP_VERSION = "0.0.1"
+
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
 DATA_DIR = BASE_DIR / "data"
@@ -1405,7 +1407,7 @@ def main() -> None:
     config = load_config()
     while True:
         print("\n========================")
-        print(" 메일 발송 클라이언트")
+        print(f" 메일 발송 클라이언트 v{APP_VERSION}")
         print("========================")
         print(f"1. 서버 연결 (현재: {config.get('server_url') or '미설정'})")
         print(f"2. 서버 주소 설정")
