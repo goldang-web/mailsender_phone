@@ -22,7 +22,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.10"
+APP_VERSION = "0.0.11"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -1333,6 +1333,7 @@ class MailClient:
                     throttle_marker_messages = {
                         "452 4.7.1 sent too many messages": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
                         "452 4.7.1 sent too many message": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
+                        "421 4.3.2 your ip blocked from this server": "네이버 '421 4.3.2 Your IP blocked from this server' 응답 감지",
                     }
                     fatal_stop_marker_messages = {
                         "421 4.7.1 this email has been temporarily blocked": "네이버 '421 4.7.1 This email has been temporarily blocked' 응답 감지",
