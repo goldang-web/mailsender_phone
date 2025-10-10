@@ -46,6 +46,59 @@ header {
   gap: 18px;
   margin-bottom: 20px;
 }
+.global-panel {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 18px 20px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.global-panel h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+}
+.global-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.global-form .field {
+  flex: 1 1 220px;
+}
+.global-form textarea {
+  min-height: 80px;
+}
+.global-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.global-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.global-status {
+  font-size: 12px;
+  min-height: 16px;
+  color: #475569;
+}
+.global-status.success {
+  color: #047857;
+}
+.global-status.error {
+  color: #b91c1c;
+}
+.global-updated {
+  font-size: 12px;
+  color: #6b7280;
+}
 .summary-item {
   display: flex;
   flex-direction: column;
@@ -495,6 +548,33 @@ button:not(:disabled):hover {
   </div>
 </header>
 
+<section class="global-panel" id="globalPanel">
+  <h2>공통 발송 설정</h2>
+  <div class="global-form">
+    <label class="field">
+      <span>HELO</span>
+      <input type="text" id="globalHelo" placeholder="예: mail.example.com">
+    </label>
+    <label class="field">
+      <span>MAIL FROM</span>
+      <input type="text" id="globalMailFrom" placeholder="sender@example.com">
+    </label>
+  </div>
+  <label class="field">
+    <span>HEADER</span>
+    <textarea id="globalHeader" placeholder="헤더를 입력하세요"></textarea>
+  </label>
+  <div class="global-footer">
+    <div class="global-updated" id="globalUpdatedAt">아직 적용 기록이 없습니다.</div>
+    <div class="global-actions">
+      <button id="globalApplyBtn">설정 적용</button>
+      <button class="secondary" id="globalSendAllBtn">전체 발송</button>
+      <button class="danger" id="globalStopAllBtn">전체 중지</button>
+    </div>
+  </div>
+  <div class="global-status" id="globalStatus"></div>
+</section>
+
 <section class="summary" id="summaryBar">
   <div class="summary-item">
     총 디바이스
@@ -548,6 +628,13 @@ const state = {
   },
   pollingHandle: null,
   successCounters: {},
+  globalConfig: {
+    helo: "",
+    mail_from: "",
+    header: "",
+    updated_at: null,
+  },
+  globalStatusTimer: null,
 };
 
 const DOMAIN_LABELS = { naver: "네이버", daum: "다음" };
@@ -571,7 +658,7 @@ const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 6;
 const CARD_COLUMNS_DEFAULT = 4;
 const BCC_MIN = 1;
-const BCC_MAX = 10;
+const BCC_MAX = 30;
 const fieldCache = {};
 const cardRegistry = {};
 
@@ -748,6 +835,55 @@ function formatDate(iso) {
 function formatCount(value) {
   const numeric = Number(value) || 0;
   return numeric.toLocaleString("ko-KR");
+}
+
+function setGlobalStatus(message, type = "info") {
+  const statusEl = document.getElementById("globalStatus");
+  if (!statusEl) return;
+  if (state.globalStatusTimer) {
+    clearTimeout(state.globalStatusTimer);
+    state.globalStatusTimer = null;
+  }
+  const className = type === "success"
+    ? "global-status success"
+    : type === "error"
+      ? "global-status error"
+      : "global-status";
+  statusEl.className = className;
+  statusEl.textContent = message || "";
+  if (message) {
+    state.globalStatusTimer = setTimeout(() => {
+      statusEl.className = "global-status";
+      statusEl.textContent = "";
+      state.globalStatusTimer = null;
+    }, 4000);
+  }
+}
+
+function renderGlobalConfig(config) {
+  const heloInput = document.getElementById("globalHelo");
+  const mailInput = document.getElementById("globalMailFrom");
+  const headerInput = document.getElementById("globalHeader");
+  const updatedAtEl = document.getElementById("globalUpdatedAt");
+  const heloValue = config?.helo ?? "";
+  const mailValue = config?.mail_from ?? "";
+  const headerValue = config?.header ?? "";
+  if (heloInput && document.activeElement !== heloInput) {
+    heloInput.value = heloValue;
+  }
+  if (mailInput && document.activeElement !== mailInput) {
+    mailInput.value = mailValue;
+  }
+  if (headerInput && document.activeElement !== headerInput) {
+    headerInput.value = headerValue;
+  }
+  if (updatedAtEl) {
+    if (config?.updated_at) {
+      updatedAtEl.textContent = `마지막 적용: ${formatDate(config.updated_at)}`;
+    } else {
+      updatedAtEl.textContent = "아직 적용 기록이 없습니다.";
+    }
+  }
 }
 
 function parseSendLogPayload(payload) {
@@ -1403,7 +1539,7 @@ function buildDeviceCard(device) {
         </label>
         <label class="field compact">
           <span>BCC 수</span>
-          <input type="number" class="input-compact" data-field="bcc_count" min="0" max="10" step="1" placeholder="0~10">
+          <input type="number" class="input-compact" data-field="bcc_count" min="0" max="30" step="1" placeholder="0~30">
         </label>
       </div>
       <label class="field">
@@ -1522,6 +1658,14 @@ async function loadDevices(options = {}) {
   try {
     const data = await fetchJSON("/api/devices", { method: "GET" });
     state.devices = data.devices || [];
+    const globalConfig = data.global_config || {};
+    state.globalConfig = {
+      helo: globalConfig.helo || "",
+      mail_from: globalConfig.mail_from || "",
+      header: globalConfig.header || "",
+      updated_at: globalConfig.updated_at || null,
+    };
+    renderGlobalConfig(state.globalConfig);
     renderSummary(data.counts || {});
     state.lastSync = new Date().toISOString();
     renderLastSync();
@@ -1725,6 +1869,116 @@ document.getElementById("fileUploadBtn").addEventListener("click", (event) => {
   event.preventDefault();
   handleFileUpload();
 });
+
+document.getElementById("globalApplyBtn").addEventListener("click", () => {
+  handleGlobalApply();
+});
+
+document.getElementById("globalSendAllBtn").addEventListener("click", () => {
+  handleGlobalSendAll();
+});
+
+document.getElementById("globalStopAllBtn").addEventListener("click", () => {
+  handleGlobalStopAll();
+});
+
+async function handleGlobalApply() {
+  const applyBtn = document.getElementById("globalApplyBtn");
+  const heloInput = document.getElementById("globalHelo");
+  const mailInput = document.getElementById("globalMailFrom");
+  const headerInput = document.getElementById("globalHeader");
+  if (!applyBtn) return;
+  const payload = {
+    helo: heloInput?.value.trim() ?? "",
+    mail_from: mailInput?.value.trim() ?? "",
+    header: headerInput?.value ?? "",
+  };
+  const originalText = applyBtn.textContent;
+  applyBtn.disabled = true;
+  applyBtn.textContent = "적용 중...";
+  try {
+    const result = await fetchJSON("/api/global/config/apply", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const appliedFields = Array.isArray(result.applied_fields) ? result.applied_fields : [];
+    const affected = Number(result.device_count ?? 0);
+    if (!appliedFields.length || affected <= 0) {
+      setGlobalStatus("적용할 값이 없어 기존 설정을 유지했습니다.", "info");
+    } else {
+      const fieldLabels = appliedFields.map((field) => {
+        if (field === "helo") return "HELO";
+        if (field === "mail_from") return "MAIL FROM";
+        if (field === "header") return "HEADER";
+        return field.toUpperCase();
+      });
+      setGlobalStatus(`총 ${affected}대에 ${fieldLabels.join(", ")} 값을 적용했습니다.`, "success");
+    }
+    const resultConfig = result.config || payload;
+    state.globalConfig = {
+      helo: resultConfig.helo ?? payload.helo ?? "",
+      mail_from: resultConfig.mail_from ?? payload.mail_from ?? "",
+      header: resultConfig.header ?? payload.header ?? "",
+      updated_at: result.updated_at || null,
+    };
+    renderGlobalConfig(state.globalConfig);
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(err.message || "설정 적용에 실패했습니다.", "error");
+  } finally {
+    applyBtn.disabled = false;
+    applyBtn.textContent = originalText;
+  }
+}
+
+async function handleGlobalSendAll() {
+  const sendBtn = document.getElementById("globalSendAllBtn");
+  if (!sendBtn) return;
+  const originalText = sendBtn.textContent;
+  sendBtn.disabled = true;
+  sendBtn.textContent = "전체 발송 예약 중...";
+  try {
+    const result = await fetchJSON("/api/global/actions/send-batch", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    setGlobalStatus(`총 ${result.device_count ?? 0}대에 전체 발송을 예약했습니다.`, "success");
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(err.message || "전체 발송 예약에 실패했습니다.", "error");
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.textContent = originalText;
+  }
+}
+
+async function handleGlobalStopAll() {
+  const stopBtn = document.getElementById("globalStopAllBtn");
+  if (!stopBtn) return;
+  const originalText = stopBtn.textContent;
+  stopBtn.disabled = true;
+  stopBtn.textContent = "중지 요청 중...";
+  try {
+    const result = await fetchJSON("/api/global/actions/stop", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    const cancelled = result.cancelled ?? 0;
+    const cancelRequested = result.cancel_requested ?? 0;
+    const affected = cancelled + cancelRequested;
+    if (affected === 0) {
+      setGlobalStatus("중지할 발송 작업이 없습니다.", "info");
+    } else {
+      setGlobalStatus(`즉시 중지 ${cancelled}건, 중지 요청 ${cancelRequested}건을 처리했습니다.`, "success");
+    }
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(err.message || "전체 중지 요청에 실패했습니다.", "error");
+  } finally {
+    stopBtn.disabled = false;
+    stopBtn.textContent = originalText;
+  }
+}
 
 document.getElementById("fileListContainer").addEventListener("click", (event) => {
   const target = event.target.closest("[data-file-action]");

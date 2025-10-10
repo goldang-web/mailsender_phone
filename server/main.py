@@ -38,6 +38,8 @@ db_lock = threading.RLock()
 
 DEVICE_HEARTBEAT_TIMEOUT_SECONDS = 15
 JOB_STALE_GRACE_SECONDS = DEVICE_HEARTBEAT_TIMEOUT_SECONDS * 2
+GLOBAL_CONFIG_KEY = "common_config"
+GLOBAL_CONFIG_FIELDS = ("helo", "mail_from", "header")
 
 
 def ensure_storage_root() -> None:
@@ -57,7 +59,7 @@ def clamp_bcc_count(value: Any) -> int:
         count = int(value)
     except (TypeError, ValueError):
         return 0
-    return max(0, min(10, count))
+    return max(0, min(30, count))
 
 
 def to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -71,6 +73,76 @@ def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def load_global_config(*, conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_conn()
+    assert conn is not None
+    row = conn.execute(
+        "SELECT value, updated_at FROM global_settings WHERE key=?",
+        (GLOBAL_CONFIG_KEY,),
+    ).fetchone()
+    payload: Dict[str, Any] = {}
+    updated_at: Optional[str] = None
+    if row:
+        updated_at = row["updated_at"]
+        raw_value = row["value"] or "{}"
+        try:
+            payload = json.loads(raw_value)
+        except json.JSONDecodeError:
+            payload = {}
+    config = {field: (payload.get(field) or "") for field in GLOBAL_CONFIG_FIELDS}
+    config["updated_at"] = updated_at
+    if owns_conn:
+        conn.close()
+    return config
+
+
+def save_global_config(conn: sqlite3.Connection, config: Dict[str, Any]) -> str:
+    now = now_ts()
+    payload = {field: config.get(field, "") for field in GLOBAL_CONFIG_FIELDS}
+    conn.execute(
+        """
+        INSERT INTO global_settings (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+        """,
+        (
+            GLOBAL_CONFIG_KEY,
+            json.dumps(payload, ensure_ascii=False),
+            now,
+        ),
+    )
+    return now
+
+
+def apply_global_config_to_devices(
+    conn: sqlite3.Connection,
+    values: Dict[str, str],
+) -> Tuple[int, int]:
+    if not values:
+        return 0, 0
+    fields = tuple(values.keys())
+    now = now_ts()
+    device_rows = conn.execute(
+        "SELECT id FROM devices",
+    ).fetchall()
+    device_count = len(device_rows)
+    if device_count == 0:
+        return 0, 0
+    assignments = ", ".join(f"{field}=?" for field in fields)
+    query = f"UPDATE device_configs SET {assignments}, updated_at=? WHERE device_id=? AND domain=?"
+    base_params = [values[field] for field in fields]
+    total_updates = 0
+    for row in device_rows:
+        device_id = row["id"]
+        for domain in DOMAINS:
+            params = base_params + [now, device_id, domain]
+            conn.execute(query, params)
+            total_updates += 1
+    return device_count, total_updates
 
 
 def get_conn() -> sqlite3.Connection:
@@ -181,6 +253,12 @@ def _init_db() -> None:
                 data TEXT,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS global_settings (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TEXT NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_job_progress_job
@@ -530,12 +608,14 @@ def load_device_summary() -> Dict[str, Any]:
                 "logs": log_map.get(device["id"], [])[:40],
             }
         )
+    global_config = load_global_config()
     return {
         "devices": devices,
         "counts": {
             "total": len(devices),
             "online": online_count,
         },
+        "global_config": global_config,
     }
 
 
@@ -882,6 +962,30 @@ class FileListResponse(BaseModel):
     files: List[FileInfo]
 
 
+class GlobalConfigPayload(BaseModel):
+    helo: Optional[str] = ""
+    mail_from: Optional[str] = ""
+    header: Optional[str] = ""
+
+
+class GlobalConfigResponse(BaseModel):
+    helo: str
+    mail_from: str
+    header: str
+    updated_at: Optional[str] = None
+
+
+class GlobalBatchRequest(BaseModel):
+    domain: Optional[str] = Field(
+        default="active",
+        description="명시하면 해당 도메인으로 전체 발송을 예약합니다. 기본은 각 디바이스의 활성 도메인입니다.",
+    )
+
+
+class GlobalStopRequest(BaseModel):
+    reason: Optional[str] = None
+
+
 class ClearLogsRequest(BaseModel):
     domain: Optional[str] = None
 
@@ -899,6 +1003,53 @@ def dashboard(request: Request) -> HTMLResponse:
 @app.get("/api/devices")
 def list_devices() -> Dict[str, Any]:
     return load_device_summary()
+
+
+@app.get("/api/global/config", response_model=GlobalConfigResponse)
+def get_global_config_endpoint() -> GlobalConfigResponse:
+    config = load_global_config()
+    return GlobalConfigResponse(
+        helo=config.get("helo", ""),
+        mail_from=config.get("mail_from", ""),
+        header=config.get("header", ""),
+        updated_at=config.get("updated_at"),
+    )
+
+
+@app.post("/api/global/config/apply")
+def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]:
+    raw_inputs = {
+        "helo": (payload.helo or "").strip(),
+        "mail_from": (payload.mail_from or "").strip(),
+        "header": payload.header or "",
+    }
+    with db_lock, get_conn() as conn:
+        current_config = load_global_config(conn=conn)
+        stored_config = {field: current_config.get(field, "") for field in GLOBAL_CONFIG_FIELDS}
+        apply_values: Dict[str, str] = {}
+        applied_fields: List[str] = []
+        for field in GLOBAL_CONFIG_FIELDS:
+            raw_value = raw_inputs[field]
+            if field == "header":
+                should_apply = isinstance(raw_value, str) and bool(raw_value.strip())
+                value_to_apply = raw_value
+            else:
+                value_to_apply = raw_value.strip()
+                should_apply = bool(value_to_apply)
+            if should_apply:
+                apply_values[field] = value_to_apply
+                stored_config[field] = value_to_apply
+                applied_fields.append(field)
+        device_count, update_count = apply_global_config_to_devices(conn, apply_values)
+        updated_at = save_global_config(conn, stored_config)
+        conn.commit()
+    return {
+        "config": stored_config,
+        "updated_at": updated_at,
+        "device_count": device_count,
+        "config_updates": update_count,
+        "applied_fields": applied_fields,
+    }
 
 
 @app.post("/api/devices/register", response_model=RegisterResponse)
@@ -990,6 +1141,39 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
     }
 
 
+@app.post("/api/global/actions/send-batch")
+def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
+    mode = (payload.domain or "active").strip().lower() or "active"
+    forced_domain: Optional[str] = None
+    if mode != "active":
+        forced_domain = normalize_domain(mode)
+    created_jobs: List[Dict[str, Any]] = []
+    with db_lock, get_conn() as conn:
+        device_rows = conn.execute(
+            "SELECT id, active_domain FROM devices ORDER BY name COLLATE NOCASE",
+        ).fetchall()
+        for device_row in device_rows:
+            device_id = device_row["id"]
+            active = device_row["active_domain"] or "naver"
+            domain = forced_domain or normalize_domain(active)
+            configs = load_device_configs(device_id, conn=conn)
+            config_snapshot = build_config_snapshot(configs, domain)
+            job = create_job(
+                conn,
+                device_id,
+                domain,
+                "batch_send",
+                {"config": config_snapshot},
+            )
+            created_jobs.append(job)
+        conn.commit()
+    return {
+        "jobs": [job["id"] for job in created_jobs],
+        "device_count": len(created_jobs),
+        "mode": forced_domain or "active",
+    }
+
+
 @app.post("/api/devices/{device_id}/actions/send-single")
 def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str, Any]:
     domain = normalize_domain(payload.domain)
@@ -999,6 +1183,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
+        config_snapshot["bcc_count"] = 0
         rcpt_to = (payload.rcpt_to or "").strip() or config_snapshot.get("rcpt_to")
         if not rcpt_to:
             raise HTTPException(status_code=400, detail="RCPT TO 주소가 필요합니다.")
@@ -1140,6 +1325,67 @@ def cancel_job(job_id: str, payload: JobCancelRequest) -> Dict[str, Any]:
         "job_id": job_id,
         "status": status,
         "cancel_requested": True,
+    }
+
+
+@app.post("/api/global/actions/stop")
+def request_global_stop(payload: GlobalStopRequest) -> Dict[str, Any]:
+    cancel_message = (payload.reason or "").strip() or "사용자가 전체 중지를 요청했습니다."
+    with db_lock, get_conn() as conn:
+        job_rows = conn.execute(
+            """
+            SELECT jobs.*, devices.status AS device_status
+            FROM jobs
+            JOIN devices ON devices.id = jobs.device_id
+            WHERE jobs.job_type IN ('batch_send', 'single_send')
+              AND jobs.status IN ('pending', 'dispatched', 'running')
+            """,
+        ).fetchall()
+        cancelled = 0
+        cancel_requested = 0
+        for job_row in job_rows:
+            status = job_row["status"]
+            job_id = job_row["id"]
+            device_id = job_row["device_id"]
+            device_status = job_row["device_status"]
+            if status == "pending" or device_status != "connected":
+                updated_row = update_job_status(
+                    conn,
+                    device_id,
+                    job_id,
+                    "cancelled",
+                    cancel_message,
+                    None,
+                    cancel_message,
+                )
+                if updated_row:
+                    pseudo_report = JobReportPayload(
+                        job_id=updated_row["id"],
+                        status="cancelled",
+                        message=cancel_message,
+                        result=None,
+                        error=cancel_message,
+                    )
+                    handle_job_completion(conn, updated_row, pseudo_report)
+                cancelled += 1
+                continue
+            if job_row["cancel_requested"]:
+                continue
+            conn.execute(
+                "UPDATE jobs SET cancel_requested=1 WHERE id=?",
+                (job_id,),
+            )
+            refreshed_row = conn.execute(
+                "SELECT * FROM jobs WHERE id=?",
+                (job_id,),
+            ).fetchone()
+            record_job_progress(conn, refreshed_row or job_row, "cancel_requested", cancel_message, None)
+            cancel_requested += 1
+        conn.commit()
+    return {
+        "total_jobs": len(job_rows),
+        "cancelled": cancelled,
+        "cancel_requested": cancel_requested,
     }
 
 

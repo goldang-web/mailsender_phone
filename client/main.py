@@ -373,7 +373,7 @@ class MailClient:
             count = int(value or 0)
         except (TypeError, ValueError):
             return 0
-        return max(0, min(10, count))
+        return max(0, min(30, count))
 
     @staticmethod
     def _sanitize_session_count(value: object) -> int:
@@ -731,11 +731,8 @@ class MailClient:
         if not rcpt_to:
             return JobResult(job_id=job_id, status="failed", message="RCPT TO 정보가 없습니다.")
         normalized_domain = (domain or "").lower()
-        bcc_count = self._sanitize_bcc_count(config.get("bcc_count"))
         bcc_rows: List[sqlite3.Row] = []
-        if normalized_domain:
-            bcc_rows = self._select_bcc_candidates(normalized_domain, bcc_count, [rcpt_to])
-        bcc_emails = [row["email"] for row in bcc_rows]
+        bcc_emails: List[str] = []
         success, response_text = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
             smtp_port=int(config.get("smtp_port") or 25),
