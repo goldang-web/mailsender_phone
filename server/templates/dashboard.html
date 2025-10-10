@@ -1240,6 +1240,40 @@ function latestBatchJob(device) {
   return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
 }
 
+function parseSummaryNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : 0;
+}
+
+function extractSummaryPayload(payload) {
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  if (payload.summary && typeof payload.summary === "object") {
+    return extractSummaryPayload(payload.summary);
+  }
+  const hasExpectedField = ["processed", "sent", "failed", "bcc", "anchor"].some((key) => Object.prototype.hasOwnProperty.call(payload, key));
+  return hasExpectedField ? payload : null;
+}
+
+function latestJobSummary(job) {
+  if (!job) {
+    return null;
+  }
+  const progress = Array.isArray(job.progress) ? job.progress : [];
+  for (let i = progress.length - 1; i >= 0; i -= 1) {
+    const candidate = extractSummaryPayload(progress[i]?.data);
+    if (candidate) {
+      return candidate;
+    }
+  }
+  const resultSummary = extractSummaryPayload(job.result);
+  if (resultSummary) {
+    return resultSummary;
+  }
+  return null;
+}
+
 function hasActiveBatchJob(device) {
   if (!device?.jobs?.length) {
     return false;
@@ -1610,6 +1644,29 @@ function updateSuccessCounter(card, device) {
   if (jobId && tracker.resetCutoff === null) {
     const jobCreatedMs = parseTimestampMs(job?.created_at);
     tracker.resetCutoff = Number.isNaN(jobCreatedMs) ? Date.now() : jobCreatedMs;
+  }
+
+  const summary = latestJobSummary(job);
+  if (summary) {
+    const sentTotal = parseSummaryNumber(summary.sent);
+    const anchorTotal = parseSummaryNumber(summary.anchor);
+    tracker.value = sentTotal;
+    tracker.anchor = anchorTotal;
+    const counterEl = card.querySelector('[data-role="successCounter"]');
+    if (counterEl) {
+      counterEl.textContent = `누적 성공: ${formatCount(sentTotal)}건`;
+    }
+    const elapsedEl = card.querySelector('[data-role="elapsedCounter"]');
+    if (elapsedEl) {
+      const elapsed = describeElapsedStatus(job);
+      elapsedEl.textContent = `경과: ${elapsed.text} · 알박기: ${formatCount(anchorTotal)}건`;
+      if (elapsed.state) {
+        elapsedEl.dataset.state = elapsed.state;
+      } else {
+        delete elapsedEl.dataset.state;
+      }
+    }
+    return;
   }
 
   const cutoffMs = typeof tracker.resetCutoff === "number" && !Number.isNaN(tracker.resetCutoff)
