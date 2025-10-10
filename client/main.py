@@ -772,30 +772,30 @@ class MailClient:
         dispatch_logs: List[Dict[str, object]] = []
         bcc_total = len(bcc_emails)
         if delivery_status == "sent":
-            for offset, recipient in enumerate(recipients, start=1):
-                is_primary = offset == 1
-                meta_items: List[Tuple[str, object]] = []
-                if is_primary and bcc_total > 0:
-                    meta_items = [("bcc", bcc_total), ("primary", 1)]
-                log_line = self._format_dispatch_log_line("Sent", offset, recipient, meta_items)
-                display_line = self._format_dispatch_display_line("Sent", recipient, bcc_total, is_primary)
-                dispatch_logs.append(
-                    {
-                        "log": log_line,
-                        "display": display_line,
-                        "email": recipient,
-                        "sequence": offset,
-                        "delivery_status": "sent",
-                        "detail": detail_line or status_line,
-                        "bcc_total": bcc_total if is_primary else 0,
-                        "is_primary": is_primary,
-                    }
-                )
+            meta_items: List[Tuple[str, object]] = [("primary", 1)]
+            if bcc_total > 0:
+                meta_items.append(("bcc", bcc_total))
+            log_line = self._format_dispatch_log_line("Sent", 1, rcpt_to, meta_items)
+            display_line = self._format_dispatch_display_line("Sent", rcpt_to, bcc_total, 0, True)
+            dispatch_logs.append(
+                {
+                    "log": log_line,
+                    "display": display_line,
+                    "email": rcpt_to,
+                    "sequence": 1,
+                    "delivery_status": "sent",
+                    "detail": detail_line or status_line,
+                    "bcc_total": bcc_total,
+                    "anchor_total": 0,
+                    "is_primary": True,
+                }
+            )
+            print(display_line)
         else:
             label = "Block" if delivery_status == "block" else "Fail"
             for recipient in recipients:
                 log_line = self._format_dispatch_log_line(label, 0, recipient)
-                display_line = self._format_dispatch_display_line(label, recipient, 0, False)
+                display_line = self._format_dispatch_display_line(label, recipient, 0, 0, False)
                 dispatch_logs.append(
                     {
                         "log": log_line,
@@ -805,11 +805,13 @@ class MailClient:
                         "delivery_status": delivery_status,
                         "detail": detail_line or status_line,
                         "bcc_total": 0,
+                        "anchor_total": 0,
                         "is_primary": False,
                     }
                 )
-        for entry in dispatch_logs:
-            print(entry.get("display") or entry["log"])
+        if delivery_status != "sent":
+            for entry in dispatch_logs:
+                print(entry.get("display") or entry["log"])
         if bcc_emails:
             print(f"  ↳ BCC 대상 {len(bcc_emails)}건 포함")
         if not success and detail_line and detail_line != status_line:
@@ -1199,42 +1201,49 @@ class MailClient:
                     processed += group_size_actual
                     dispatch_logs: List[Dict[str, object]] = []
                     recipient_emails = [record.email for record in recipients]
+                    bcc_count = len(group.bcc)
+                    anchor_count = len(group.injected)
                     if outcome.delivery_status == "sent":
                         sent_base = sent_count
                         sent_count += group_size_actual
-                        bcc_total = len(group.bcc) + len(group.injected)
-                        for offset, recipient in enumerate(recipient_emails, start=1):
-                            sequence = sent_base + offset
-                            is_primary = offset == 1
-                            meta_items: List[Tuple[str, object]] = []
-                            if is_primary and (group.bcc or group.injected):
-                                meta_items = [("primary", 1)]
-                                if group.bcc:
-                                    meta_items.append(("bcc", len(group.bcc)))
-                                if group.injected:
-                                    meta_items.append(("anchor", len(group.injected)))
-                            log_line = self._format_dispatch_log_line("Sent", sequence, recipient, meta_items)
-                            display_line = self._format_dispatch_display_line("Sent", recipient, bcc_total, is_primary)
-                            dispatch_logs.append(
-                                {
-                                    "log": log_line,
-                                    "display": display_line,
-                                    "email": recipient,
-                                    "sequence": sequence,
-                                    "delivery_status": outcome.delivery_status,
-                                    "detail": detail_for_log,
-                                    "bcc_total": bcc_total if is_primary else 0,
-                                    "is_primary": is_primary,
-                                }
-                            )
-                            print(display_line)
+                        primary_email = recipient_emails[0] if recipient_emails else "-"
+                        sequence = sent_base + 1
+                        meta_items: List[Tuple[str, object]] = [("primary", 1)]
+                        if bcc_count > 0:
+                            meta_items.append(("bcc", bcc_count))
+                        if anchor_count > 0:
+                            meta_items.append(("anchor", anchor_count))
+                        log_line = self._format_dispatch_log_line("Sent", sequence, primary_email, meta_items)
+                        display_line = self._format_dispatch_display_line(
+                            "Sent",
+                            primary_email,
+                            bcc_count,
+                            anchor_count,
+                            True,
+                        )
+                        dispatch_logs.append(
+                            {
+                                "log": log_line,
+                                "display": display_line,
+                                "email": primary_email,
+                                "sequence": sequence,
+                                "delivery_status": outcome.delivery_status,
+                                "detail": detail_for_log,
+                                "bcc_total": bcc_count,
+                                "anchor_total": anchor_count,
+                                "is_primary": True,
+                                "bcc_recipients": [record.email for record in group.bcc],
+                                "anchor": list(group.injected),
+                            }
+                        )
+                        print(display_line)
                     else:
                         is_block = outcome.delivery_status == "block"
                         label = "Block" if is_block else "Fail"
                         for offset, recipient in enumerate(recipient_emails, start=1):
                             sequence_for_log = processed - group_size_actual + offset
                             log_line = self._format_dispatch_log_line(label, sequence_for_log, recipient)
-                            display_line = self._format_dispatch_display_line(label, recipient, 0, False)
+                            display_line = self._format_dispatch_display_line(label, recipient, 0, 0, False)
                             dispatch_logs.append(
                                 {
                                     "log": log_line,
@@ -1244,6 +1253,7 @@ class MailClient:
                                     "delivery_status": "throttle" if throttle_detected else outcome.delivery_status,
                                     "detail": detail_for_log,
                                     "bcc_total": 0,
+                                    "anchor_total": 0,
                                     "is_primary": False,
                                 }
                             )
@@ -1277,6 +1287,7 @@ class MailClient:
                                 "delivery_status": outcome.delivery_status,
                                 "detail": detail_for_log,
                                 "bcc_total": 0,
+                                "anchor_total": len(group.injected),
                                 "is_primary": False,
                                 "anchor": list(group.injected),
                             }
@@ -1601,13 +1612,17 @@ class MailClient:
         label: str,
         email: Optional[str],
         bcc_total: int,
+        anchor_total: int,
         is_primary: bool,
     ) -> str:
         safe_label = (label or "").strip() or "Sent"
         target = (email or "").strip() or "-"
         display = f"{safe_label} - {target}"
-        if is_primary and bcc_total > 0:
-            display += f" 외 {bcc_total}"
+        if is_primary:
+            if bcc_total > 0:
+                display += f" 외 {bcc_total}"
+            if anchor_total > 0:
+                display += f" + 알박기 {anchor_total}"
         return display
 
     def _build_sqlite_from_emails(self, db_path: Path, emails: List[str], source_name: str) -> None:

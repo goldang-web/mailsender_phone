@@ -976,7 +976,14 @@ function parseSendLogPayload(payload) {
       bccCount = parsedBcc;
     }
   }
-  return { label, email, count, timestamp, meta, isPrimary, bccCount };
+  let anchorCount = null;
+  if (typeof meta.anchor === "string" && meta.anchor) {
+    const parsedAnchor = parseInt(meta.anchor, 10);
+    if (!Number.isNaN(parsedAnchor) && parsedAnchor > 0) {
+      anchorCount = parsedAnchor;
+    }
+  }
+  return { label, email, count, timestamp, meta, isPrimary, bccCount, anchorCount };
 }
 
 function buildLogDisplayText(entry) {
@@ -984,9 +991,15 @@ function buildLogDisplayText(entry) {
   if (!parsed || !parsed.label || !parsed.email) {
     return entry?.response || entry?.log || "-";
   }
-  const suffix = (parsed.isPrimary && typeof parsed.bccCount === "number" && parsed.bccCount > 0)
-    ? ` 외 ${parsed.bccCount}`
-    : "";
+  let suffix = "";
+  if (parsed.isPrimary) {
+    if (typeof parsed.bccCount === "number" && parsed.bccCount > 0) {
+      suffix += ` 외 ${parsed.bccCount}`;
+    }
+    if (typeof parsed.anchorCount === "number" && parsed.anchorCount > 0) {
+      suffix += ` + 알박기 ${parsed.anchorCount}`;
+    }
+  }
   return `${parsed.label} - ${parsed.email}${suffix}`;
 }
 
