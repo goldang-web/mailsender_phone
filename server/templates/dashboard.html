@@ -1,0 +1,1663 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>메일 발송 제어 대시보드</title>
+<style>
+:root {
+  color-scheme: light;
+  --card-columns: 4;
+  --card-gap: 12px;
+  --card-min-width: 220px;
+}
+* { box-sizing: border-box; }
+body {
+  font-family: "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+  background: #f1f5f9;
+  color: #0f172a;
+  margin: 0;
+  padding: 20px;
+}
+h1 {
+  margin: 0;
+  font-size: 28px;
+  font-weight: 700;
+}
+h2 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 600;
+}
+a { color: inherit; }
+header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 20px;
+}
+.summary {
+  background: #ffffff;
+  border-radius: 16px;
+  padding: 16px 20px;
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+.summary-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 14px;
+}
+.summary-item span {
+  font-weight: 600;
+  font-size: 16px;
+}
+.device-grid {
+  display: grid;
+  gap: var(--card-gap);
+  grid-template-columns: repeat(var(--card-columns), minmax(var(--card-min-width), 1fr));
+  align-items: stretch;
+}
+.card {
+  background: #ffffff;
+  border-radius: 10px;
+  padding: 12px;
+  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.08);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+}
+.device-title {
+  font-size: 16px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+.meta {
+  font-size: 11px;
+  color: #64748b;
+  line-height: 1.45;
+}
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.status-connected { background: #dcfce7; color: #047857; }
+.status-disconnected { background: #fee2e2; color: #b91c1c; }
+.status-unknown { background: #f1f5f9; color: #475569; }
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.domain-toggle {
+  display: inline-flex;
+  gap: 12px;
+  align-items: center;
+}
+.domain-toggle label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #334155;
+  padding: 4px 8px;
+  border-radius: 999px;
+  transition: background-color 0.16s ease, color 0.16s ease;
+}
+.domain-toggle label.checked {
+  background: #dbeafe;
+  color: #1d4ed8;
+  font-weight: 600;
+}
+.domain-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 38px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  font-size: 11px;
+  font-weight: 600;
+  color: #1e293b;
+}
+.domain-toggle label.checked .domain-count {
+  background: #2563eb;
+  color: #ffffff;
+}
+.domain-summary {
+  font-size: 12px;
+  color: #475569;
+  margin: 4px 0 0 0;
+}
+.config-block {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.field-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.field-row .field {
+  flex: 1 1 160px;
+}
+.field.compact {
+  flex: 0 0 100px;
+}
+.field.compact input {
+  text-align: right;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 13px;
+  color: #1f2937;
+}
+.field span { font-weight: 600; }
+.field input,
+.field textarea {
+  padding: 8px 10px;
+  border: 1px solid #cbd5f5;
+  border-radius: 10px;
+  background: #f8fafc;
+  font-size: 13px;
+  font-family: inherit;
+}
+.field textarea {
+  min-height: 100px;
+  resize: vertical;
+}
+.input-compact {
+  max-width: 88px;
+}
+.action-bar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.rcpt-field {
+  flex: 1 1 220px;
+}
+.action-buttons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+button {
+  cursor: pointer;
+  border: none;
+  border-radius: 10px;
+  padding: 8px 16px;
+  font-weight: 600;
+  font-size: 13px;
+  background: #2563eb;
+  color: #fff;
+  transition: transform 0.12s ease, box-shadow 0.16s ease;
+}
+button.secondary {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+button.ghost {
+  background: transparent;
+  border: 1px solid #94a3b8;
+  color: #1e293b;
+}
+button.danger {
+  background: #ef4444;
+}
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  box-shadow: none;
+}
+button:not(:disabled):hover {
+  transform: translateY(-1px);
+  box-shadow: 0 10px 18px rgba(37, 99, 235, 0.2);
+}
+.log-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 12px;
+  background: #ffffff;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 180px;
+}
+.log-box-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.log-box-heading {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.log-box h4,
+.log-box-header h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+}
+.log-stats {
+  font-size: 12px;
+  font-weight: 600;
+  color: #1e293b;
+}
+.log-clear-btn {
+  padding: 4px 10px;
+  font-size: 11px;
+}
+.log-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  color: #475569;
+}
+.log-item {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 10px;
+  background: #f9fafb;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.log-item.ok {
+  background: #ecfdf5;
+  border-color: #bbf7d0;
+  color: #047857;
+}
+.log-item.fail {
+  background: #fef2f2;
+  border-color: #fecdd3;
+  color: #b91c1c;
+}
+.log-meta {
+  font-size: 11px;
+  color: #6b7280;
+}
+.log-text {
+  font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #1f2937;
+  word-break: break-all;
+}
+
+.inline-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1f2937;
+}
+.inline-field span {
+  font-weight: 600;
+}
+.inline-field input {
+  width: 64px;
+  padding: 6px 8px;
+  border: 1px solid #cbd5f5;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 13px;
+  font-family: inherit;
+  text-align: center;
+}
+.empty-hint {
+  margin-top: 32px;
+  text-align: center;
+  font-size: 14px;
+  color: #64748b;
+}
+.notice {
+  font-size: 12px;
+  font-weight: 600;
+}
+.notice.success { color: #047857; }
+.notice.error { color: #b91c1c; }
+
+.modal {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.48);
+  z-index: 50;
+  padding: 24px;
+}
+.modal.hidden { display: none; }
+.modal-card {
+  background: #ffffff;
+  border-radius: 18px;
+  width: min(900px, 95vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 20px 36px rgba(15, 23, 42, 0.25);
+}
+.modal-header {
+  padding: 18px 22px;
+  border-bottom: 1px solid #e2e8f0;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.modal-body {
+  padding: 18px 22px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.file-upload {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.file-upload input[type="file"] {
+  font-size: 13px;
+}
+.file-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.file-table th,
+.file-table td {
+  padding: 10px;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+  vertical-align: top;
+}
+.file-table th {
+  background: #f8fafc;
+  font-weight: 700;
+  color: #1e293b;
+}
+.file-ops {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.preview-box {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  background: #f8fafc;
+  padding: 12px;
+  font-family: "D2Coding", "Courier New", monospace;
+  font-size: 12px;
+  white-space: pre-wrap;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.modal-message {
+  font-size: 12px;
+  color: #dc2626;
+}
+.modal-message.success {
+  color: #047857;
+}
+
+.refresh-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.last-sync {
+  font-size: 12px;
+  color: #64748b;
+}
+
+@media (max-width: 960px) {
+  :root { --card-min-width: 180px; }
+}
+
+@media (max-width: 720px) {
+  body { padding: 16px; }
+  header { flex-direction: column; align-items: flex-start; }
+}
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>메일 발송 제어 대시보드</h1>
+    <div class="last-sync" id="lastSync"></div>
+  </div>
+  <div class="refresh-group">
+    <label class="inline-field" for="cardColumnsInput">
+      <span>카드 열 수</span>
+      <input type="number" id="cardColumnsInput" min="2" max="6" step="1" value="4">
+    </label>
+    <button class="secondary" id="refreshBtn">새로 고침</button>
+  </div>
+</header>
+
+<section class="summary" id="summaryBar">
+  <div class="summary-item">
+    총 디바이스
+    <span id="summaryTotal">0</span>
+  </div>
+  <div class="summary-item">
+    온라인
+    <span id="summaryOnline">0</span>
+  </div>
+</section>
+
+<div id="deviceContainer" class="device-grid"></div>
+<div id="emptyHint" class="empty-hint" style="display:none;">등록된 디바이스가 없습니다. 클라이언트에서 서버에 연결하면 여기에 표시됩니다.</div>
+
+<div id="fileModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div>
+        <h2 id="modalTitle">파일 관리</h2>
+        <div class="meta" id="modalSubtitle"></div>
+      </div>
+      <button class="ghost" id="modalCloseBtn">닫기</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-message" id="modalMessage"></div>
+      <div class="file-upload">
+        <label for="fileInput" class="field">
+          <span>새 DB 파일 업로드</span>
+          <input id="fileInput" type="file" accept=".db,.sqlite,.sqlite3,.txt">
+        </label>
+        <button id="fileUploadBtn">업로드</button>
+      </div>
+      <div id="fileListContainer"></div>
+      <div>
+        <h4 style="margin:16px 0 8px 0;font-size:13px;font-weight:600;">미리보기</h4>
+        <div id="previewBox" class="preview-box">파일을 선택하면 미리보기가 표시됩니다.</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+const state = {
+  devices: [],
+  lastSync: null,
+  modal: {
+    open: false,
+    deviceId: null,
+    domain: null,
+    deviceName: "",
+  },
+  pollingHandle: null,
+  successCounters: {},
+};
+
+const DOMAIN_LABELS = { naver: "네이버", daum: "다음" };
+const STATUS_LABELS = {
+  connected: "온라인",
+  disconnected: "오프라인",
+};
+const JOB_STATUS_LABELS = {
+  pending: "대기 중",
+  dispatched: "전송 준비",
+  running: "진행 중",
+  success: "완료",
+  failed: "실패",
+  cancelled: "중지됨",
+};
+const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
+
+const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "rcpt_to"];
+const CARD_COLUMNS_KEY = "dashboard.cardColumns";
+const CARD_COLUMNS_MIN = 2;
+const CARD_COLUMNS_MAX = 6;
+const CARD_COLUMNS_DEFAULT = 4;
+const BCC_MIN = 1;
+const BCC_MAX = 10;
+const fieldCache = {};
+const cardRegistry = {};
+
+function clampNumber(value, min, max, fallback) {
+  const parsed = typeof value === "number" ? value : parseInt(value, 10);
+  if (Number.isNaN(parsed)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, parsed));
+}
+
+function parseBccInput(value) {
+  if (value === undefined || value === null) return 0;
+  const trimmed = String(value).trim();
+  if (!trimmed) return 0;
+  if (trimmed === "0") return 0;
+  return clampNumber(trimmed, BCC_MIN, BCC_MAX, BCC_MIN);
+}
+
+function formatBccValue(value) {
+  const parsed = typeof value === "number" ? value : parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return "0";
+  }
+  return String(clampNumber(parsed, BCC_MIN, BCC_MAX, BCC_MIN));
+}
+
+function sanitizeSessionValue(value) {
+  const parsed = parseInt(String(value ?? "").trim(), 10);
+  if (Number.isNaN(parsed) || parsed < 1) {
+    return "1";
+  }
+  return String(parsed);
+}
+
+function sanitizeBccValue(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || trimmed === "0") {
+    return "0";
+  }
+  const parsed = parseInt(trimmed, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return "0";
+  }
+  return String(clampNumber(parsed, BCC_MIN, BCC_MAX, BCC_MIN));
+}
+
+function applyCardColumns(value) {
+  document.documentElement.style.setProperty("--card-columns", value);
+}
+
+function initCardColumnControl() {
+  const input = document.getElementById("cardColumnsInput");
+  if (!input) return;
+  const saved = clampNumber(localStorage.getItem(CARD_COLUMNS_KEY), CARD_COLUMNS_MIN, CARD_COLUMNS_MAX, CARD_COLUMNS_DEFAULT);
+  applyCardColumns(saved);
+  input.value = saved;
+  input.addEventListener("change", () => {
+    const next = clampNumber(input.value, CARD_COLUMNS_MIN, CARD_COLUMNS_MAX, CARD_COLUMNS_DEFAULT);
+    input.value = next;
+    applyCardColumns(next);
+    localStorage.setItem(CARD_COLUMNS_KEY, next);
+  });
+}
+
+function initialFieldValues(config) {
+  return {
+    helo: config?.helo || "",
+    mail_from: config?.mail_from || "",
+    header: config?.header || "",
+    session_count: sanitizeSessionValue(config?.session_count ?? "1"),
+    bcc_count: formatBccValue(config?.bcc_count ?? 0),
+    rcpt_to: config?.rcpt_to || "",
+  };
+}
+
+function ensureFieldCache(deviceId, domain, config) {
+  if (!fieldCache[deviceId]) {
+    fieldCache[deviceId] = {};
+  }
+  const store = fieldCache[deviceId];
+  const defaults = initialFieldValues(config);
+  if (!store[domain]) {
+    store[domain] = { values: defaults, dirty: false };
+  } else if (!store[domain].dirty) {
+    store[domain].values = defaults;
+  }
+  return store[domain];
+}
+
+function markFieldDirty(deviceId, domain, field, value) {
+  const entry = fieldCache[deviceId]?.[domain];
+  if (!entry) {
+    return;
+  }
+  entry.values[field] = value;
+  entry.dirty = true;
+}
+
+function resetFieldDirty(deviceId, domain, config) {
+  const entry = ensureFieldCache(deviceId, domain, config);
+  entry.dirty = false;
+}
+
+function collectConfigPayload(card, currentDevice, domain) {
+  const sessionInput = card.querySelector('[data-field="session_count"]');
+  const sessionValue = sanitizeSessionValue(sessionInput?.value ?? "1");
+  if (sessionInput && sessionInput.value !== sessionValue) {
+    sessionInput.value = sessionValue;
+  }
+
+  const bccInput = card.querySelector('[data-field="bcc_count"]');
+  const bccValue = sanitizeBccValue(bccInput?.value ?? "0");
+  if (bccInput && bccInput.value !== bccValue) {
+    bccInput.value = bccValue;
+  }
+
+  return {
+    payload: {
+      helo: card.querySelector('[data-field="helo"]').value.trim(),
+      smtp_host: (currentDevice.configs?.[domain]?.smtp_host || "").trim(),
+      mail_from: card.querySelector('[data-field="mail_from"]').value.trim(),
+      header: card.querySelector('[data-field="header"]').value,
+      session_count: Number(sessionValue) || 1,
+      bcc_count: parseBccInput(bccValue),
+      rcpt_to: card.querySelector('[data-field="rcpt_to"]').value.trim(),
+    },
+  };
+}
+
+async function saveConfig(card, currentDevice, domain) {
+  const { payload } = collectConfigPayload(card, currentDevice, domain);
+  const updated = await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/config`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+  currentDevice.configs = currentDevice.configs || {};
+  currentDevice.configs[domain] = updated;
+  card.__deviceData = { ...currentDevice };
+  resetFieldDirty(currentDevice.id, domain, updated);
+  populateConfigForm(card, currentDevice, domain);
+  return updated;
+}
+
+async function ensureConfigSynced(card, currentDevice, domain) {
+  const cacheEntry = fieldCache[currentDevice.id]?.[domain];
+  if (!cacheEntry?.dirty) {
+    return;
+  }
+  await saveConfig(card, currentDevice, domain);
+}
+
+function getActiveDomain(card, fallback) {
+  return card.dataset.activeDomain || fallback || "naver";
+}
+
+function formatDate(iso) {
+  if (!iso) return "정보 없음";
+  try {
+    const date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return iso;
+    const yyyy = date.getFullYear();
+    const mm = String(date.getMonth() + 1).padStart(2, "0");
+    const dd = String(date.getDate()).padStart(2, "0");
+    const hh = String(date.getHours()).padStart(2, "0");
+    const mi = String(date.getMinutes()).padStart(2, "0");
+    const ss = String(date.getSeconds()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd} ${hh}:${mi}:${ss}`;
+  } catch (err) {
+    return iso;
+  }
+}
+
+function formatCount(value) {
+  const numeric = Number(value) || 0;
+  return numeric.toLocaleString("ko-KR");
+}
+
+function parseSendLogPayload(payload) {
+  if (!payload || typeof payload !== "string") {
+    return null;
+  }
+  const parts = payload.split("|");
+  if (parts.length < 3) {
+    return null;
+  }
+  const rawLabel = parts[0] ?? "";
+  const rawCount = parts[1] ?? "";
+  const rawEmail = parts[2] ?? "";
+  let timestamp = null;
+  let metaStartIndex = 3;
+  if (parts.length >= 4) {
+    const candidate = (parts[3] ?? "").trim();
+    if (candidate && !candidate.includes("=")) {
+      timestamp = candidate;
+      metaStartIndex = 4;
+    } else {
+      metaStartIndex = 3;
+    }
+  }
+  const meta = {};
+  for (let i = metaStartIndex; i < parts.length; i += 1) {
+    const segment = parts[i];
+    if (!segment) continue;
+    const [key, value] = segment.split("=", 2);
+    if (!key) continue;
+    const normalizedKey = key.trim().toLowerCase();
+    if (!normalizedKey) continue;
+    meta[normalizedKey] = (value ?? "").trim();
+  }
+  const label = (rawLabel || "").trim();
+  const email = (rawEmail || "").trim();
+  const countValue = parseInt((rawCount || "").trim(), 10);
+  const count = Number.isNaN(countValue) ? null : countValue;
+  const primaryFlag = meta.primary ?? null;
+  const isPrimary = typeof primaryFlag === "string"
+    ? ["1", "true", "yes"].includes(primaryFlag.toLowerCase())
+    : false;
+  let bccCount = null;
+  if (typeof meta.bcc === "string" && meta.bcc) {
+    const parsedBcc = parseInt(meta.bcc, 10);
+    if (!Number.isNaN(parsedBcc) && parsedBcc > 0) {
+      bccCount = parsedBcc;
+    }
+  }
+  return { label, email, count, timestamp, meta, isPrimary, bccCount };
+}
+
+function buildLogDisplayText(entry) {
+  const parsed = parseSendLogPayload(entry?.response);
+  if (!parsed || !parsed.label || !parsed.email) {
+    return entry?.response || entry?.log || "-";
+  }
+  const suffix = (parsed.isPrimary && typeof parsed.bccCount === "number" && parsed.bccCount > 0)
+    ? ` 외 ${parsed.bccCount}`
+    : "";
+  return `${parsed.label} - ${parsed.email}${suffix}`;
+}
+
+
+function latestBatchJob(device) {
+  if (!device?.jobs?.length) {
+    return null;
+  }
+  const candidates = device.jobs.filter((job) => job.job_type === "batch_send");
+  if (!candidates.length) {
+    return null;
+  }
+  return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
+}
+
+function hasActiveBatchJob(device) {
+  if (!device?.jobs?.length) {
+    return false;
+  }
+  return device.jobs.some((job) => job.job_type === "batch_send" && (ACTIVE_JOB_STATES.has(job.status) || (job.status === "running" && job.cancel_requested)));
+}
+
+function updateBatchControls(card, device) {
+  const batchBtn = card.querySelector('button[data-action="batch"]');
+  const cancelBtn = card.querySelector('button[data-action="cancel-batch"]');
+  const job = latestBatchJob(device);
+  if (!job) {
+    if (batchBtn) {
+      batchBtn.disabled = false;
+      batchBtn.textContent = "전체 발송";
+    }
+    if (cancelBtn) {
+      cancelBtn.style.display = "none";
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = "중지";
+    }
+    card.dataset.currentBatchJobId = "";
+    return;
+  }
+  const cancelRequested = Boolean(job.cancel_requested);
+  const isActive = ACTIVE_JOB_STATES.has(job.status);
+  card.dataset.currentBatchJobId = (isActive || cancelRequested) ? (job.id || "") : "";
+  if (batchBtn) {
+    if (isActive || cancelRequested) {
+      batchBtn.disabled = true;
+      batchBtn.textContent = "전체 발송 진행 중...";
+    } else {
+      batchBtn.disabled = false;
+      batchBtn.textContent = "전체 발송";
+    }
+  }
+  if (cancelBtn) {
+    if (isActive && !cancelRequested) {
+      cancelBtn.style.display = "inline-flex";
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = "중지";
+    } else if (cancelRequested && isActive) {
+      cancelBtn.style.display = "inline-flex";
+      cancelBtn.disabled = true;
+      cancelBtn.textContent = "중지 요청됨";
+    } else {
+      cancelBtn.style.display = "none";
+      cancelBtn.disabled = false;
+      cancelBtn.textContent = "중지";
+    }
+  }
+}
+
+
+
+
+
+
+function renderDomainSummary(card, device, domain) {
+  const summaryEl = card.querySelector('[data-role="domainSummary"]');
+  const activeConfig = bestConfig(device, domain);
+  const activeTotal = Number(activeConfig?.client_total || 0);
+  if (summaryEl) {
+    const label = DOMAIN_LABELS[domain] || domain;
+    summaryEl.textContent = `${label} · 총 ${formatCount(activeTotal)}건`;
+  }
+  card.querySelectorAll('[data-role="domainCount"]').forEach((span) => {
+    const spanDomain = span.dataset.domain;
+    const domainConfig = bestConfig(device, spanDomain);
+    const total = Number(domainConfig?.client_total || 0);
+    span.textContent = formatCount(total);
+    const label = span.closest("label[data-domain]");
+    if (!label) {
+      return;
+    }
+    if (spanDomain === domain) {
+      label.classList.add("checked");
+    } else {
+      label.classList.remove("checked");
+    }
+  });
+}
+
+async function fetchJSON(url, options = {}) {
+  const response = await fetch(url, {
+    headers: { "Content-Type": "application/json" },
+    credentials: "same-origin",
+    ...options,
+  });
+  const contentType = response.headers.get("Content-Type") || "";
+  const isJSON = contentType.includes("application/json");
+  if (!response.ok) {
+    const message = isJSON ? await response.json() : await response.text();
+    const detail = message?.detail || message?.error || message;
+    throw new Error(detail || "요청에 실패했습니다.");
+  }
+  return isJSON ? response.json() : response.text();
+}
+
+function statusClass(status) {
+  if (status === "connected") return "status-chip status-connected";
+  if (status === "disconnected") return "status-chip status-disconnected";
+  return "status-chip status-unknown";
+}
+
+function bestConfig(device, domain) {
+  return device.configs?.[domain] || {
+    domain,
+    helo: "",
+    smtp_host: "",
+    smtp_port: 25,
+    mail_from: "",
+    header: "",
+    session_count: 1,
+    bcc_count: 0,
+    rcpt_to: "",
+    client_total: 0,
+  };
+}
+
+function renderSummary(counts) {
+  if (!counts) return;
+  document.getElementById("summaryTotal").textContent = counts.total ?? 0;
+  document.getElementById("summaryOnline").textContent = counts.online ?? 0;
+}
+
+function renderLastSync() {
+  const el = document.getElementById("lastSync");
+  if (!state.lastSync) {
+    el.textContent = "";
+    return;
+  }
+  el.textContent = `최근 새로고침: ${formatDate(state.lastSync)}`;
+}
+
+function renderLogList(device, container) {
+  const logs = device.logs || [];
+  const card = container.closest(".card");
+  const clearBtn = card?.querySelector('button[data-action="clear-logs"]');
+  if (clearBtn) {
+    clearBtn.disabled = !logs.length;
+  }
+  if (!logs.length) {
+    container.innerHTML = '<div class="meta">발송 로그가 없습니다.</div>';
+    return;
+  }
+  container.innerHTML = "";
+  logs.slice(0, 40).forEach((entry) => {
+    const item = document.createElement("div");
+    item.className = `log-item ${entry.success ? "ok" : "fail"}`;
+
+    const line = document.createElement("div");
+    line.className = "log-text";
+    line.textContent = buildLogDisplayText(entry);
+    item.appendChild(line);
+
+    const meta = document.createElement("div");
+    meta.className = "log-meta";
+    const label = DOMAIN_LABELS[entry.domain] || entry.domain || "-";
+    meta.textContent = `${label} · ${formatDate(entry.created_at)}`;
+    item.appendChild(meta);
+
+    container.appendChild(item);
+  });
+}
+
+function ensureSuccessTracker(deviceId) {
+  if (!deviceId) {
+    return null;
+  }
+  if (!state.successCounters[deviceId]) {
+    state.successCounters[deviceId] = {
+      lastBatchId: null,
+      resetCutoff: null,
+      value: 0,
+    };
+  }
+  return state.successCounters[deviceId];
+}
+
+function parseTimestampMs(value) {
+  if (!value) {
+    return NaN;
+  }
+  const ms = Date.parse(value);
+  return Number.isNaN(ms) ? NaN : ms;
+}
+
+function updateSuccessCounter(card, device) {
+  if (!card || !device) {
+    return;
+  }
+  const tracker = ensureSuccessTracker(device.id);
+  if (!tracker) {
+    return;
+  }
+  const job = latestBatchJob(device);
+  const jobId = job?.id || null;
+  if (jobId && tracker.lastBatchId !== jobId) {
+    tracker.lastBatchId = jobId;
+    tracker.value = 0;
+    const jobCreatedMs = parseTimestampMs(job?.created_at);
+    tracker.resetCutoff = Number.isNaN(jobCreatedMs) ? Date.now() : jobCreatedMs;
+  } else if (!jobId && tracker.lastBatchId === null && tracker.resetCutoff === undefined) {
+    tracker.resetCutoff = null;
+  }
+
+  if (jobId && tracker.resetCutoff === null) {
+    const jobCreatedMs = parseTimestampMs(job?.created_at);
+    tracker.resetCutoff = Number.isNaN(jobCreatedMs) ? Date.now() : jobCreatedMs;
+  }
+
+  const cutoffMs = typeof tracker.resetCutoff === "number" && !Number.isNaN(tracker.resetCutoff)
+    ? tracker.resetCutoff
+    : null;
+
+  let maxCount = 0;
+  (device.logs || []).forEach((entry) => {
+    if (!entry?.success) {
+      return;
+    }
+    if (cutoffMs !== null) {
+      const entryMs = parseTimestampMs(entry.created_at);
+      if (!Number.isNaN(entryMs) && entryMs < cutoffMs) {
+        return;
+      }
+    }
+    const parsed = parseSendLogPayload(entry.response);
+    if (!parsed || typeof parsed.count !== "number") {
+      return;
+    }
+    let candidate = parsed.count;
+    if (parsed.isPrimary && typeof parsed.bccCount === "number" && parsed.bccCount > 0) {
+      candidate = parsed.count + parsed.bccCount;
+    }
+    if (candidate > maxCount) {
+      maxCount = candidate;
+    }
+  });
+
+  tracker.value = maxCount;
+  const counterEl = card.querySelector('[data-role="successCounter"]');
+  if (counterEl) {
+    counterEl.textContent = `누적 성공: ${formatCount(maxCount)}건`;
+  }
+}
+
+function setNotice(card, message, type = "success") {
+  let notice = card.querySelector(".notice");
+  if (!notice) {
+    notice = document.createElement("div");
+    notice.className = "notice";
+    card.insertBefore(notice, card.firstChild.nextSibling);
+  }
+  notice.textContent = message;
+  notice.className = `notice ${type}`;
+  setTimeout(() => {
+    if (notice) {
+      notice.textContent = "";
+    }
+  }, 3500);
+}
+
+function populateConfigForm(card, device, domain) {
+  const config = bestConfig(device, domain);
+  const cache = ensureFieldCache(device.id, domain, config);
+  card.dataset.activeDomain = domain;
+  renderDomainSummary(card, device, domain);
+  const heloInput = card.querySelector('[data-field="helo"]');
+  if (heloInput && document.activeElement !== heloInput) heloInput.value = cache.values.helo;
+  const mailInput = card.querySelector('[data-field="mail_from"]');
+  if (mailInput && document.activeElement !== mailInput) mailInput.value = cache.values.mail_from;
+  const headerInput = card.querySelector('[data-field="header"]');
+  if (headerInput && document.activeElement !== headerInput) headerInput.value = cache.values.header;
+  const sessionInput = card.querySelector('[data-field="session_count"]');
+  if (sessionInput && document.activeElement !== sessionInput) sessionInput.value = cache.values.session_count;
+  const bccInput = card.querySelector('[data-field="bcc_count"]');
+  if (bccInput && document.activeElement !== bccInput) bccInput.value = cache.values.bcc_count;
+  const rcptInput = card.querySelector('[data-field="rcpt_to"]');
+  if (rcptInput && document.activeElement !== rcptInput) rcptInput.value = cache.values.rcpt_to;
+}
+
+function attachCardEvents(card) {
+  const getDevice = () => {
+    if (card.__deviceData) {
+      return card.__deviceData;
+    }
+    const name = card.querySelector('[data-role="deviceName"]')?.textContent || card.dataset.deviceId;
+    return { id: card.dataset.deviceId, active_domain: "naver", name, configs: {} };
+  };
+
+  card.querySelectorAll('[data-role="domainRadio"]').forEach((radio) => {
+    radio.addEventListener("change", async (evt) => {
+      if (!evt.target.checked) return;
+      const currentDevice = getDevice();
+      const domain = evt.target.value;
+      try {
+        await fetchJSON(`/api/devices/${currentDevice.id}/active-domain`, {
+          method: "POST",
+          body: JSON.stringify({ domain }),
+        });
+        currentDevice.active_domain = domain;
+        card.__deviceData = { ...currentDevice };
+        populateConfigForm(card, currentDevice, domain);
+        setNotice(card, `${DOMAIN_LABELS[domain]} 도메인으로 전환했습니다.`);
+      } catch (err) {
+        setNotice(card, err.message || "도메인 전환에 실패했습니다.", "error");
+      }
+    });
+  });
+
+  CONFIG_FIELDS.forEach((fieldName) => {
+    const el = card.querySelector(`[data-field="${fieldName}"]`);
+    if (!el) {
+      return;
+    }
+    el.addEventListener("input", (event) => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, fieldName, event.target.value);
+    });
+  });
+
+  const sessionInput = card.querySelector('[data-field="session_count"]');
+  if (sessionInput) {
+    sessionInput.addEventListener("blur", () => {
+      const sanitized = sanitizeSessionValue(sessionInput.value);
+      if (sessionInput.value !== sanitized) {
+        sessionInput.value = sanitized;
+      }
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, "session_count", sanitized);
+    });
+  }
+
+  const bccInput = card.querySelector('[data-field="bcc_count"]');
+  if (bccInput) {
+    bccInput.addEventListener("blur", () => {
+      const sanitized = sanitizeBccValue(bccInput.value);
+      if (bccInput.value !== sanitized) {
+        bccInput.value = sanitized;
+      }
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, "bcc_count", sanitized);
+    });
+  }
+
+  const saveBtn = card.querySelector('button[data-action="save"]');
+  saveBtn.addEventListener("click", async () => {
+    const currentDevice = getDevice();
+    const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
+    try {
+      await saveConfig(card, currentDevice, domain);
+      setNotice(card, "설정을 저장했습니다.");
+    } catch (err) {
+      setNotice(card, err.message || "설정 저장에 실패했습니다.", "error");
+    }
+  });
+
+  const singleBtn = card.querySelector('button[data-action="single"]');
+  singleBtn.addEventListener("click", async () => {
+    const currentDevice = getDevice();
+    const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
+    const rcpt = card.querySelector('[data-field="rcpt_to"]').value.trim();
+    try {
+      await ensureConfigSynced(card, currentDevice, domain);
+    } catch (err) {
+      setNotice(card, err.message || "설정 저장에 실패했습니다.", "error");
+      return;
+    }
+    const payload = { domain, rcpt_to: rcpt || null };
+    try {
+      await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-single`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      setNotice(card, "단일 발송 작업을 추가했습니다.");
+      await loadDevices();
+    } catch (err) {
+      setNotice(card, err.message || "단일 발송 예약에 실패했습니다.", "error");
+    }
+  });
+
+  const batchBtn = card.querySelector('button[data-action="batch"]');
+  batchBtn.addEventListener("click", async () => {
+    const currentDevice = getDevice();
+    const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
+    try {
+      await ensureConfigSynced(card, currentDevice, domain);
+    } catch (err) {
+      setNotice(card, err.message || "설정 저장에 실패했습니다.", "error");
+      return;
+    }
+    try {
+      await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-batch`, {
+        method: "POST",
+        body: JSON.stringify({ domain }),
+      });
+      setNotice(card, "전체 발송 작업을 추가했습니다.");
+      await loadDevices();
+    } catch (err) {
+      setNotice(card, err.message || "전체 발송 예약에 실패했습니다.", "error");
+    }
+  });
+
+  const fileButtons = card.querySelectorAll('button[data-action="files"]');
+  fileButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const currentDevice = getDevice();
+      const domain = btn.dataset.domain;
+      openFileModal(currentDevice, domain);
+    });
+  });
+
+  const clearBtn = card.querySelector('button[data-action="clear-logs"]');
+  if (clearBtn) {
+    clearBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      if (!currentDevice?.id) return;
+      clearBtn.disabled = true;
+      const activeDomain = getActiveDomain(card, currentDevice.active_domain);
+      try {
+        await fetchJSON(`/api/devices/${currentDevice.id}/logs/clear`, {
+          method: "POST",
+          body: JSON.stringify({ domain: activeDomain }),
+        });
+        const listEl = card.querySelector('[data-role="logList"]');
+        if (listEl) {
+          listEl.innerHTML = '<div class="meta">발송 로그가 없습니다.</div>';
+        }
+        if (card.__deviceData) {
+          card.__deviceData.logs = [];
+        }
+        setNotice(card, "로그를 삭제했습니다.");
+        await loadDevices();
+      } catch (err) {
+        clearBtn.disabled = false;
+        setNotice(card, err.message || "로그 삭제에 실패했습니다.", "error");
+      }
+    });
+  }
+
+  const cancelBtn = card.querySelector('button[data-action="cancel-batch"]');
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      const jobId = card.dataset.currentBatchJobId;
+      if (!currentDevice?.id || !jobId) {
+        return;
+      }
+      cancelBtn.disabled = true;
+      const originalText = cancelBtn.textContent;
+      cancelBtn.textContent = "중지 요청 중...";
+      try {
+        await fetchJSON(`/api/jobs/${jobId}/cancel`, {
+          method: "POST",
+          body: JSON.stringify({ device_id: currentDevice.id }),
+        });
+        setNotice(card, "중지 요청을 전송했습니다.");
+        await loadDevices({ silent: true });
+      } catch (err) {
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = originalText || "중지";
+        setNotice(card, err.message || "중지 요청에 실패했습니다.", "error");
+      }
+    });
+  }
+}
+
+function buildDeviceCard(device) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.dataset.deviceId = device.id;
+  card.innerHTML = `
+    <div class="card-header">
+      <div>
+        <div class="device-title" data-role="deviceName"></div>
+        <div class="meta">ID: <span data-role="deviceId"></span></div>
+        <div class="meta" data-role="lastSeen"></div>
+      </div>
+      <div class="status-chip" data-role="statusChip">
+        <span class="status-dot"></span>
+        <span data-role="statusText"></span>
+      </div>
+    </div>
+    <div class="domain-toggle">
+      <label data-role="domainLabel" data-domain="naver">
+        <input type="radio" data-role="domainRadio" value="naver"> 네이버
+        <span class="domain-count" data-role="domainCount" data-domain="naver">0</span>
+      </label>
+      <label data-role="domainLabel" data-domain="daum">
+        <input type="radio" data-role="domainRadio" value="daum"> 다음
+        <span class="domain-count" data-role="domainCount" data-domain="daum">0</span>
+      </label>
+    </div>
+    <div class="domain-summary" data-role="domainSummary">총 이메일 0건</div>
+    <div class="config-block">
+      <div class="field-row">
+        <label class="field">
+          <span>HELO</span>
+          <input type="text" data-field="helo">
+        </label>
+        <label class="field compact">
+          <span>세션 수</span>
+          <input type="number" class="input-compact" data-field="session_count" min="1">
+        </label>
+        <label class="field compact">
+          <span>BCC 수</span>
+          <input type="number" class="input-compact" data-field="bcc_count" min="0" max="10" step="1" placeholder="0~10">
+        </label>
+      </div>
+      <label class="field">
+        <span>MAIL FROM</span>
+        <input type="text" data-field="mail_from">
+      </label>
+      <label class="field">
+        <span>HEADER</span>
+        <textarea data-field="header" placeholder="헤더를 입력하세요"></textarea>
+      </label>
+      <div class="action-bar">
+        <label class="field rcpt-field">
+          <span>단일 발송 RCPT TO</span>
+          <input type="text" data-field="rcpt_to" placeholder="recipient@example.com">
+        </label>
+        <div class="action-buttons">
+          <button data-action="save">설정 저장</button>
+          <button class="secondary" data-action="single">단일 발송</button>
+          <button data-action="batch">전체 발송</button>
+          <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
+          <button class="ghost" data-action="files" data-domain="naver">네이버 DB 추가</button>
+          <button class="ghost" data-action="files" data-domain="daum">다음 DB 추가</button>
+        </div>
+      </div>
+    </div>
+    <div class="log-box">
+      <div class="log-box-header">
+        <div class="log-box-heading">
+          <h4>로그</h4>
+          <div class="log-stats" data-role="successCounter">누적 성공: 0건</div>
+        </div>
+        <button class="ghost log-clear-btn" data-action="clear-logs">로그 초기화</button>
+      </div>
+      <div class="log-list" data-role="logList"></div>
+    </div>
+  `;
+  return card;
+}
+
+function updateDeviceCard(card, device) {
+  card.__deviceData = device;
+  card.dataset.deviceId = device.id;
+  const activeDomain = device.active_domain || card.dataset.activeDomain || "naver";
+  card.dataset.activeDomain = activeDomain;
+
+  const nameEl = card.querySelector('[data-role="deviceName"]');
+  if (nameEl) nameEl.textContent = device.name;
+  const idEl = card.querySelector('[data-role="deviceId"]');
+  if (idEl) idEl.textContent = device.id;
+  const lastSeenEl = card.querySelector('[data-role="lastSeen"]');
+  if (lastSeenEl) lastSeenEl.textContent = `최근 연결: ${device.last_seen ? formatDate(device.last_seen) : "보고되지 않음"}`;
+  const statusChip = card.querySelector('[data-role="statusChip"]');
+  if (statusChip) statusChip.className = statusClass(device.status);
+  const statusText = card.querySelector('[data-role="statusText"]');
+  if (statusText) statusText.textContent = STATUS_LABELS[device.status] || device.status || "상태 미확인";
+
+  card.querySelectorAll('[data-role="domainRadio"]').forEach((radio) => {
+    radio.name = `domain-${device.id}`;
+    radio.checked = radio.value === activeDomain;
+  });
+
+  ensureFieldCache(device.id, "naver", bestConfig(device, "naver"));
+  ensureFieldCache(device.id, "daum", bestConfig(device, "daum"));
+  populateConfigForm(card, device, activeDomain);
+
+  const logListEl = card.querySelector('[data-role="logList"]');
+  if (logListEl) renderLogList(device, logListEl);
+  updateSuccessCounter(card, device);
+  updateBatchControls(card, device);
+}
+
+function renderDevices() {
+  const container = document.getElementById("deviceContainer");
+  const emptyHint = document.getElementById("emptyHint");
+  const seenIds = new Set();
+
+  state.devices.forEach((device) => {
+    let card = cardRegistry[device.id];
+    if (!card) {
+      card = buildDeviceCard(device);
+      cardRegistry[device.id] = card;
+      attachCardEvents(card);
+    }
+    if (card.parentNode !== container) {
+      container.appendChild(card);
+    }
+    updateDeviceCard(card, device);
+    seenIds.add(device.id);
+  });
+
+  Object.keys(cardRegistry).forEach((deviceId) => {
+    if (!seenIds.has(deviceId)) {
+      const card = cardRegistry[deviceId];
+      if (card?.parentNode) {
+        card.parentNode.removeChild(card);
+      }
+      delete cardRegistry[deviceId];
+      delete state.successCounters[deviceId];
+    }
+  });
+
+  if (!state.devices.length) {
+    emptyHint.style.display = "block";
+  } else {
+    emptyHint.style.display = "none";
+  }
+}
+
+async function loadDevices(options = {}) {
+  const { silent = false } = options;
+  if (state.pollingHandle) {
+    clearTimeout(state.pollingHandle);
+    state.pollingHandle = null;
+  }
+  try {
+    const data = await fetchJSON("/api/devices", { method: "GET" });
+    state.devices = data.devices || [];
+    renderSummary(data.counts || {});
+    state.lastSync = new Date().toISOString();
+    renderLastSync();
+    renderDevices();
+    const hasRunningBatch = (state.devices || []).some(hasActiveBatchJob);
+    scheduleAutoRefresh(hasRunningBatch);
+  } catch (err) {
+    console.error(err);
+    if (!silent) {
+      setNoticeMessage(err?.message || "디바이스 목록을 불러오지 못했습니다.");
+    }
+    scheduleAutoRefresh(false);
+  }
+}
+
+function scheduleAutoRefresh(hasActiveBatch) {
+  if (state.pollingHandle) {
+    clearTimeout(state.pollingHandle);
+  }
+  if (document.hidden) {
+    state.pollingHandle = null;
+    return;
+  }
+  const delay = hasActiveBatch ? 3000 : 5000;
+  state.pollingHandle = setTimeout(() => {
+    loadDevices({ silent: true });
+  }, delay);
+}
+
+function setNoticeMessage(message) {
+  if (!message) {
+    return;
+  }
+  console.warn(message);
+}
+
+function showModalMessage(message, type = "error") {
+  const el = document.getElementById("modalMessage");
+  el.textContent = message;
+  el.className = `modal-message ${type === "success" ? "success" : ""}`;
+  if (message) {
+    setTimeout(() => {
+      el.textContent = "";
+      el.className = "modal-message";
+    }, 4000);
+  }
+}
+
+async function loadFileList(deviceId, domain) {
+  const container = document.getElementById("fileListContainer");
+  container.innerHTML = '<div class="meta">파일 목록을 불러오는 중...</div>';
+  try {
+    const data = await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/files`);
+    const files = data.files || [];
+    if (!files.length) {
+      container.innerHTML = '<div class="meta">업로드된 파일이 없습니다.</div>';
+      return;
+    }
+    const table = document.createElement("table");
+    table.className = "file-table";
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th>파일명</th>
+          <th>버전</th>
+          <th>크기</th>
+          <th>최근 Inject</th>
+          <th>동작</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    `;
+    const tbody = table.querySelector("tbody");
+    files.forEach((file) => {
+      const row = document.createElement("tr");
+      row.dataset.fileId = file.id;
+      row.innerHTML = `
+        <td>
+          <div>${file.filename}</div>
+          <div class="meta">업로드: ${formatDate(file.uploaded_at)}</div>
+        </td>
+        <td>${file.version}</td>
+        <td>${(file.size / 1024).toFixed(1)} KB</td>
+        <td>
+          <div>${file.last_injected_status ? file.last_injected_status.toUpperCase() : "-"}</div>
+          <div class="meta">${file.last_injected_at ? formatDate(file.last_injected_at) : "-"}</div>
+        </td>
+        <td>
+          <div class="file-ops">
+            <button class="secondary" data-file-action="preview">미리보기</button>
+            <button class="secondary" data-file-action="download">다운로드</button>
+            <button data-file-action="inject">Inject</button>
+            <button class="danger" data-file-action="delete">삭제</button>
+          </div>
+        </td>
+      `;
+      tbody.appendChild(row);
+    });
+    container.innerHTML = "";
+    container.appendChild(table);
+  } catch (err) {
+    container.innerHTML = '<div class="meta">파일 목록을 불러오지 못했습니다.</div>';
+    showModalMessage(err.message || "파일 목록 요청 실패");
+  }
+}
+
+function openFileModal(device, domain) {
+  state.modal.open = true;
+  state.modal.deviceId = device.id;
+  state.modal.domain = domain;
+  state.modal.deviceName = device.name;
+  document.getElementById("modalTitle").textContent = `${device.name} · ${DOMAIN_LABELS[domain] || domain}`;
+  document.getElementById("modalSubtitle").textContent = `ID: ${device.id}`;
+  document.getElementById("fileModal").classList.remove("hidden");
+  document.getElementById("previewBox").textContent = "파일을 선택하면 미리보기가 표시됩니다.";
+  document.getElementById("modalMessage").textContent = "";
+  document.getElementById("fileInput").value = "";
+  loadFileList(device.id, domain);
+}
+
+function closeFileModal() {
+  state.modal.open = false;
+  state.modal.deviceId = null;
+  state.modal.domain = null;
+  document.getElementById("fileModal").classList.add("hidden");
+}
+
+async function handleFileAction(target) {
+  const action = target.dataset.fileAction;
+  if (!action) return;
+  const row = target.closest("tr");
+  if (!row) return;
+  const fileId = row.dataset.fileId;
+  const { deviceId, domain } = state.modal;
+  if (!deviceId || !domain) return;
+
+  if (action === "preview") {
+    try {
+      const data = await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/files/${fileId}/preview`);
+      const previewBox = document.getElementById("previewBox");
+      previewBox.textContent = data.preview?.length ? data.preview.join("\n") : "미리볼 내용이 없습니다.";
+      showModalMessage("미리보기 로드 성공", "success");
+    } catch (err) {
+      showModalMessage(err.message || "미리보기를 불러오지 못했습니다.");
+    }
+  }
+  if (action === "download") {
+    window.open(`/api/devices/${deviceId}/domains/${domain}/files/${fileId}/download`, "_blank");
+  }
+  if (action === "inject") {
+    try {
+      await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/files/${fileId}/inject`, { method: "POST" });
+      showModalMessage("Inject 작업을 예약했습니다.", "success");
+      await loadFileList(deviceId, domain);
+      await loadDevices();
+    } catch (err) {
+      showModalMessage(err.message || "Inject 작업 예약 실패");
+    }
+  }
+  if (action === "delete") {
+    if (!confirm("정말 삭제하시겠습니까?")) return;
+    try {
+      await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/files/${fileId}`, { method: "DELETE" });
+      showModalMessage("파일을 삭제했습니다.", "success");
+      await loadFileList(deviceId, domain);
+    } catch (err) {
+      showModalMessage(err.message || "파일 삭제에 실패했습니다.");
+    }
+  }
+}
+
+async function handleFileUpload() {
+  const input = document.getElementById("fileInput");
+  const file = input.files?.[0];
+  if (!file) {
+    showModalMessage("업로드할 파일을 선택하세요.");
+    return;
+  }
+  const { deviceId, domain } = state.modal;
+  if (!deviceId || !domain) return;
+  const formData = new FormData();
+  formData.append("file", file);
+  try {
+    const response = await fetch(`/api/devices/${deviceId}/domains/${domain}/files`, {
+      method: "POST",
+      body: formData,
+    });
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(text || "업로드 실패");
+    }
+    showModalMessage("파일을 업로드했습니다.", "success");
+    input.value = "";
+    await loadFileList(deviceId, domain);
+  } catch (err) {
+    showModalMessage(err.message || "파일 업로드에 실패했습니다.");
+  }
+}
+
+document.getElementById("fileUploadBtn").addEventListener("click", (event) => {
+  event.preventDefault();
+  handleFileUpload();
+});
+
+document.getElementById("fileListContainer").addEventListener("click", (event) => {
+  const target = event.target.closest("[data-file-action]");
+  if (!target) return;
+  handleFileAction(target);
+});
+
+document.getElementById("modalCloseBtn").addEventListener("click", () => {
+  closeFileModal();
+});
+
+document.getElementById("fileModal").addEventListener("click", (event) => {
+  if (event.target === document.getElementById("fileModal")) {
+    closeFileModal();
+  }
+});
+
+document.getElementById("refreshBtn").addEventListener("click", async () => {
+  await loadDevices();
+});
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    if (state.pollingHandle) {
+      clearTimeout(state.pollingHandle);
+      state.pollingHandle = null;
+    }
+  } else {
+    loadDevices({ silent: true });
+  }
+});
+
+initCardColumnControl();
+loadDevices();
+</script>
+</body>
+</html>

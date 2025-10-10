@@ -1,1003 +1,1441 @@
-# -*- coding: euc-kr -*-
+# -*- coding: utf-8 -*-
+import hashlib
 import json
 import sqlite3
 import threading
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
-from pydantic import BaseModel, Field, model_validator
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.templating import Jinja2Templates
+from pydantic import BaseModel, Field
 
+DOMAINS = ("naver", "daum")
 
-class EUCKRJSONResponse(Response):
-    media_type = "application/json; charset=euc-kr"
-
-    def render(self, content) -> bytes:
-        return json.dumps(
-            content,
-            ensure_ascii=False,
-            default=self._serialize_helper,
-        ).encode("euc-kr", errors="ignore")
-
-    @staticmethod
-    def _serialize_helper(value):
-        if isinstance(value, datetime):
-            return value.isoformat()
-        raise TypeError(f"Áö¿øµÇÁö ¾Ê´Â Å¸ÀÔ: {type(value)}")
+DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
+    "helo": "",
+    "smtp_host": "",
+    "smtp_port": 25,
+    "mail_from": "",
+    "header": "",
+    "session_count": 1,
+    "bcc_count": 0,
+    "rcpt_to": "",
+}
 
 
-class EUCKRHTMLResponse(Response):
-    media_type = "text/html; charset=euc-kr"
-
-    def render(self, content) -> bytes:
-        if isinstance(content, bytes):
-            return content
-        if isinstance(content, str):
-            return content.encode("euc-kr", errors="ignore")
-        raise TypeError("HTML ÀÀ´ä¿¡´Â ¹®ÀÚ¿­ÀÌ ÇÊ¿äÇÕ´Ï´Ù.")
-
-
-app = FastAPI(default_response_class=EUCKRJSONResponse)
+app = FastAPI(title="MailSender Control Server")
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "email_logs.db"
-_db_lock = threading.Lock()
+DB_PATH = BASE_DIR / "control.db"
+STORAGE_ROOT = BASE_DIR / "storage"
+
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+db_lock = threading.RLock()
+
+DEVICE_HEARTBEAT_TIMEOUT_SECONDS = 15
+JOB_STALE_GRACE_SECONDS = DEVICE_HEARTBEAT_TIMEOUT_SECONDS * 2
 
 
-STALE_SECONDS = 10
+def ensure_storage_root() -> None:
+    STORAGE_ROOT.mkdir(parents=True, exist_ok=True)
+    (STORAGE_ROOT / "devices").mkdir(exist_ok=True)
 
 
-def _now_local() -> datetime:
-    return datetime.now(timezone.utc).astimezone()
+ensure_storage_root()
 
 
-
-def _format_timestamp(value: datetime) -> str:
-    return value.strftime("%Y-%m-%d %H:%M:%S")
-
+def now_ts() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def _now_string() -> str:
-    return _format_timestamp(_now_local())
+def clamp_bcc_count(value: Any) -> int:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(10, count))
 
 
-def _normalize_text(value: Optional[str]) -> str:
-    if value is None:
-        return ''
-    return str(value).strip()
+def to_dict(row: sqlite3.Row) -> Dict[str, Any]:
+    return {key: row[key] for key in row.keys()}
 
 
-def _get_last_seen_dt(info: Dict[str, Optional[str]]) -> Optional[datetime]:
-    value = info.get("last_seen_ts")
-    if isinstance(value, datetime):
-        return value
-    raw = info.get("last_seen")
-    if raw:
-        try:
-            naive = datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            return None
-        tz = _now_local().tzinfo
-        return naive.replace(tzinfo=tz) if tz else naive
-    return None
+def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
-
-def _update_last_seen(info: Dict[str, Optional[str]]) -> None:
-    now = _now_local()
-    info["last_seen"] = _format_timestamp(now)
-    info["last_seen_ts"] = now
-    if info.get("status") == "¿¬°á ²÷±è":
-        info["status"] = "´ë±â"
-
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON")
+    return conn
 
 
 def _init_db() -> None:
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
+    with db_lock, get_conn() as conn:
+        conn.executescript(
             """
-            CREATE TABLE IF NOT EXISTS logs (
+            CREATE TABLE IF NOT EXISTS devices (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                active_domain TEXT NOT NULL DEFAULT 'naver',
+                status TEXT NOT NULL DEFAULT 'disconnected',
+                last_seen TEXT,
+                worker_state TEXT,
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS device_configs (
+                device_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                helo TEXT DEFAULT '',
+                smtp_host TEXT DEFAULT '',
+                smtp_port INTEGER DEFAULT 25,
+                mail_from TEXT DEFAULT '',
+                header TEXT DEFAULT '',
+                session_count INTEGER DEFAULT 1,
+                bcc_count INTEGER DEFAULT 0,
+                rcpt_to TEXT DEFAULT '',
+                client_db_version INTEGER DEFAULT 0,
+                client_total INTEGER DEFAULT 0,
+                client_pending INTEGER DEFAULT 0,
+                client_sent INTEGER DEFAULT 0,
+                client_failed INTEGER DEFAULT 0,
+                client_block INTEGER DEFAULT 0,
+                client_removed INTEGER DEFAULT 0,
+                client_updated_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, domain),
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS device_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 device_id TEXT NOT NULL,
-                device_name TEXT,
-                helo TEXT,
-                mail_from TEXT,
+                domain TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                stored_name TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                checksum TEXT,
+                version INTEGER NOT NULL,
+                uploaded_at TEXT NOT NULL,
+                uploaded_by TEXT,
+                last_injected_at TEXT,
+                last_injected_status TEXT,
+                last_injected_job_id TEXT,
+                preview_cache TEXT,
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+                UNIQUE (device_id, domain, filename, version)
+            );
+
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                device_id TEXT NOT NULL,
+                domain TEXT,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL,
+                payload TEXT,
+                result TEXT,
+                error TEXT,
+                created_at TEXT NOT NULL,
+                queued_at TEXT,
+                started_at TEXT,
+                finished_at TEXT,
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_jobs_device_status ON jobs(device_id, status);
+            CREATE INDEX IF NOT EXISTS idx_jobs_created ON jobs(created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS send_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                domain TEXT,
+                job_id TEXT,
                 rcpt_to TEXT,
-                header TEXT,
                 success INTEGER NOT NULL,
                 response TEXT,
-                created_at TEXT NOT NULL
-            )
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS job_progress_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT NOT NULL,
+                device_id TEXT NOT NULL,
+                domain TEXT,
+                status TEXT NOT NULL,
+                message TEXT,
+                data TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_job_progress_job
+                ON job_progress_logs(job_id, created_at DESC);
             """
         )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS device_defaults (
-                device_id TEXT PRIMARY KEY,
-                helo TEXT,
-                mail_from TEXT,
-                rcpt_to TEXT,
-                header TEXT
+        config_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(device_configs)").fetchall()
+        }
+        if "bcc_count" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN bcc_count INTEGER DEFAULT 0"
             )
-            """
-        )
+        job_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
+        }
+        if "cancel_requested" not in job_columns:
+            conn.execute(
+                "ALTER TABLE jobs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0"
+            )
         conn.commit()
 
 
+_init_db()
 
 
+def normalize_domain(domain: str) -> str:
+    lowered = (domain or "").strip().lower()
+    if lowered not in DOMAINS:
+        raise HTTPException(status_code=400, detail="ì§€ì›í•˜ì§€ ì•ŠëŠ” ë„ë©”ì¸ì…ë‹ˆë‹¤.")
+    return lowered
 
-def _insert_log(payload: Dict[str, Optional[str]]) -> None:
-    with _db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
+
+def ensure_device(device_id: str, name: str) -> Dict[str, Any]:
+    device_id = (device_id or "").strip() or uuid.uuid4().hex
+    name = (name or "").strip() or f"Device-{device_id[:6]}"
+    now = now_ts()
+    with db_lock, get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO devices (id, name, active_domain, status, last_seen, created_at, updated_at)
+            VALUES (?, ?, 'naver', 'connected', ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,
+                updated_at=excluded.updated_at
+            """,
+            (device_id, name, now, now, now),
+        )
+        for domain in DOMAINS:
             conn.execute(
                 """
-                INSERT INTO logs (
-                    device_id,
-                    device_name,
-                    helo,
-                    mail_from,
-                    rcpt_to,
-                    header,
-                    success,
-                    response,
-                    created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO device_configs (
+                    device_id, domain, helo, smtp_host, smtp_port,
+                    mail_from, header, session_count, bcc_count, rcpt_to, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(device_id, domain) DO NOTHING
                 """,
                 (
-                    payload.get("device_id"),
-                    payload.get("device_name"),
-                    payload.get("helo"),
-                    payload.get("mail_from"),
-                    payload.get("rcpt_to"),
-                    payload.get("header"),
-                    1 if payload.get("success") else 0,
-                    payload.get("response"),
-                    _now_string(),
+                    device_id,
+                    domain,
+                    DEFAULT_DOMAIN_CONFIG["helo"],
+                    DEFAULT_DOMAIN_CONFIG["smtp_host"],
+                    DEFAULT_DOMAIN_CONFIG["smtp_port"],
+                    DEFAULT_DOMAIN_CONFIG["mail_from"],
+                    DEFAULT_DOMAIN_CONFIG["header"],
+                    DEFAULT_DOMAIN_CONFIG["session_count"],
+                    DEFAULT_DOMAIN_CONFIG["bcc_count"],
+                    DEFAULT_DOMAIN_CONFIG["rcpt_to"],
+                    now,
                 ),
             )
-            conn.commit()
-
-
-def _get_device_defaults(device_id: str) -> Dict[str, Optional[str]]:
-    with _db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            row = conn.execute(
-                "SELECT helo, mail_from, rcpt_to, header FROM device_defaults WHERE device_id = ?",
-                (device_id,),
-            ).fetchone()
+        row = conn.execute(
+            "SELECT * FROM devices WHERE id=?",
+            (device_id,),
+        ).fetchone()
+        conn.commit()
     if not row:
-        return {"helo": "", "mail_from": "", "rcpt_to": "", "header": ""}
+        raise HTTPException(status_code=500, detail="ë””ë°”ì´ìŠ¤ ì •ë³´ë¥¼ ìƒì„±í•˜ì§€ ëª»í–ˆìŠµë‹ˆë‹¤.")
+    return to_dict(row)
+
+
+def get_device(device_id: str, *, conn: Optional[sqlite3.Connection] = None) -> Optional[Dict[str, Any]]:
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_conn()
+    assert conn is not None
+    row = conn.execute("SELECT * FROM devices WHERE id=?", (device_id,)).fetchone()
+    if owns_conn:
+        conn.close()
+    return to_dict(row) if row else None
+
+
+def load_device_configs(device_id: str, *, conn: Optional[sqlite3.Connection] = None) -> Dict[str, Dict[str, Any]]:
+    owns_conn = conn is None
+    if owns_conn:
+        conn = get_conn()
+    assert conn is not None
+    rows = conn.execute(
+        "SELECT * FROM device_configs WHERE device_id=?",
+        (device_id,),
+    ).fetchall()
+    if owns_conn:
+        conn.close()
+    result: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        result[row["domain"]] = to_dict(row)
+    return result
+
+
+def serialize_config(row: Dict[str, Any]) -> Dict[str, Any]:
+    raw_session = row.get("session_count", 1)
+    try:
+        session_value = int(raw_session)
+    except (TypeError, ValueError):
+        session_value = 1
+    session_value = max(1, session_value)
     return {
-        "helo": row[0] or "",
-        "mail_from": row[1] or "",
-        "rcpt_to": row[2] or "",
-        "header": row[3] or "",
+        "domain": row["domain"],
+        "helo": row.get("helo", ""),
+        "smtp_host": row.get("smtp_host", ""),
+        "smtp_port": row.get("smtp_port", 25),
+        "mail_from": row.get("mail_from", ""),
+        "header": row.get("header", ""),
+        "session_count": session_value,
+        "bcc_count": clamp_bcc_count(row.get("bcc_count", 0)),
+        "rcpt_to": row.get("rcpt_to", ""),
+        "updated_at": row.get("updated_at"),
+        "client_db_version": row.get("client_db_version", 0),
+        "client_total": row.get("client_total", 0),
+        "client_pending": row.get("client_pending", 0),
+        "client_sent": row.get("client_sent", 0),
+        "client_failed": row.get("client_failed", 0),
+        "client_block": row.get("client_block", 0),
+        "client_removed": row.get("client_removed", 0),
+        "client_updated_at": row.get("client_updated_at"),
     }
 
 
-def _save_device_defaults(device_id: str, data: Dict[str, Optional[str]]) -> None:
-    with _db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                """
-                INSERT INTO device_defaults (device_id, helo, mail_from, rcpt_to, header)
-                VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(device_id) DO UPDATE SET
-                    helo = excluded.helo,
-                    mail_from = excluded.mail_from,
-                    rcpt_to = excluded.rcpt_to,
-                    header = excluded.header
+def load_device_summary() -> Dict[str, Any]:
+    with db_lock, get_conn() as conn:
+        device_rows = [
+            to_dict(row)
+            for row in conn.execute(
+                "SELECT * FROM devices ORDER BY name COLLATE NOCASE"
+            ).fetchall()
+        ]
+        config_rows = conn.execute(
+            "SELECT * FROM device_configs"
+        ).fetchall()
+        recent_threshold = (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat()
+        job_rows = conn.execute(
+            """
+            SELECT *
+            FROM jobs
+            WHERE status IN ('pending','dispatched','running')
+               OR created_at >= ?
+            ORDER BY created_at DESC
+            """,
+            (recent_threshold,),
+        ).fetchall()
+        job_overrides: Dict[str, sqlite3.Row] = {}
+        job_ids = [row["id"] for row in job_rows]
+        progress_rows: List[sqlite3.Row] = []
+        if job_ids:
+            placeholders = ",".join(["?"] * len(job_ids))
+            progress_rows = conn.execute(
+                f"""
+                SELECT job_id, status, message, data, created_at
+                FROM job_progress_logs
+                WHERE job_id IN ({placeholders})
+                ORDER BY created_at DESC
+                LIMIT 500
                 """,
-                (
-                    device_id,
-                    (data.get("helo") or "").strip(),
-                    (data.get("mail_from") or "").strip(),
-                    (data.get("rcpt_to") or "").strip(),
-                    data.get("header") or "",
-                ),
+                job_ids,
+            ).fetchall()
+        log_rows = conn.execute(
+            """
+            SELECT *
+            FROM send_logs
+            WHERE created_at >= ?
+            ORDER BY created_at DESC
+            LIMIT 500
+            """,
+            (recent_threshold,),
+        ).fetchall()
+        file_rows = conn.execute(
+            """
+            SELECT device_id, domain, MAX(last_injected_at) AS last_injected_at,
+                   MAX(last_injected_status) AS last_injected_status
+            FROM device_files
+            GROUP BY device_id, domain
+            """
+        ).fetchall()
+        now_utc = datetime.now(timezone.utc)
+        stale_cutoff = now_utc - timedelta(seconds=DEVICE_HEARTBEAT_TIMEOUT_SECONDS)
+        stale_updates: List[str] = []
+        for device in device_rows:
+            last_seen_dt = _parse_iso_dt(device.get("last_seen"))
+            if last_seen_dt is None or last_seen_dt < stale_cutoff:
+                if device.get("status") != "disconnected":
+                    stale_updates.append(device["id"])
+                device["status"] = "disconnected"
+            elif not device.get("status"):
+                device["status"] = "connected"
+        if stale_updates:
+            stamp = now_ts()
+            conn.executemany(
+                "UPDATE devices SET status='disconnected', updated_at=? WHERE id=?",
+                [(stamp, device_id) for device_id in stale_updates],
             )
             conn.commit()
-
-
-
-
-
-class RegisterBody(BaseModel):
-    device_id: Optional[str] = Field(None, description="µğ¹ÙÀÌ½º ½Äº°ÀÚ")
-    name: Optional[str] = Field(None, description="µğ¹ÙÀÌ½º Ç¥½Ã ÀÌ¸§")
-
-    @model_validator(mode="before")
-    def _fill_defaults(cls, data):
-        if not isinstance(data, dict):
-            return data
-        raw_name = _normalize_text(data.get("name"))
-        raw_id = _normalize_text(data.get("device_id"))
-        if not raw_id and not raw_name:
-            raise ValueError("µğ¹ÙÀÌ½º ÀÌ¸§ÀÌ ÇÊ¿äÇÕ´Ï´Ù")
-        if not raw_id:
-            raw_id = raw_name or "device"
-        if not raw_name:
-            raw_name = raw_id
-        data["device_id"] = raw_id
-        data["name"] = raw_name
-        return data
-
-
-class SendCommandBody(BaseModel):
-    device_id: str
-    helo: str
-    mail_from: str
-    rcpt_to: str
-    header: str
-
-
-class ReportBody(BaseModel):
-    device_id: str
-    task_id: str
-    success: bool
-    response: str
-
-
-class CancelBody(BaseModel):
-    device_id: str
-
-
-_devices: Dict[str, Dict[str, Optional[str]]] = {}
-_pending: Dict[str, Dict[str, Optional[str]]] = {}
-
-
-@app.on_event("startup")
-async def on_startup() -> None:
-    _init_db()
-
-
-def _touch_device(device_id: str) -> None:
-    if device_id in _devices:
-        info = _devices[device_id]
-        if "defaults" not in info:
-            info["defaults"] = _get_device_defaults(device_id)
-        _update_last_seen(info)
-        return
-    defaults = _get_device_defaults(device_id)
-    now = _now_local()
-    base_command = None
-    if any(defaults.values()):
-        base_command = {
-            "helo": defaults.get("helo", ""),
-            "mail_from": defaults.get("mail_from", ""),
-            "rcpt_to": defaults.get("rcpt_to", ""),
-            "header": defaults.get("header", ""),
+        device_lookup = {device["id"]: device for device in device_rows}
+        stale_message = "ë””ë°”ì´ìŠ¤ ì—°ê²°ì´ ëŠê²¨ ì‘ì—…ì´ ì¤‘ë‹¨ë˜ì—ˆìŠµë‹ˆë‹¤."
+        for job_row in job_rows:
+            if job_row["status"] not in {"running", "dispatched"}:
+                continue
+            device_info = device_lookup.get(job_row["device_id"])
+            if not device_info or device_info.get("status") == "connected":
+                continue
+            last_seen_dt = _parse_iso_dt(device_info.get("last_seen"))
+            if last_seen_dt and now_utc - last_seen_dt <= timedelta(seconds=JOB_STALE_GRACE_SECONDS):
+                continue
+            updated_row = update_job_status(
+                conn,
+                job_row["device_id"],
+                job_row["id"],
+                "failed",
+                stale_message,
+                None,
+                stale_message,
+            )
+            if updated_row:
+                job_overrides[job_row["id"]] = updated_row
+                if updated_row["job_type"] in {"single_send", "batch_send"}:
+                    failure_report = JobReportPayload(
+                        job_id=updated_row["id"],
+                        status="failed",
+                        message=stale_message,
+                        result=None,
+                        error=stale_message,
+                    )
+                    handle_job_completion(conn, updated_row, failure_report)
+        if job_overrides:
+            conn.commit()
+    config_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for row in config_rows:
+        config_map.setdefault(row["device_id"], {})[row["domain"]] = serialize_config(to_dict(row))
+    file_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    for row in file_rows:
+        file_map.setdefault(row["device_id"], {})[row["domain"]] = {
+            "last_injected_at": row["last_injected_at"],
+            "last_injected_status": row["last_injected_status"],
         }
-    _devices[device_id] = {
-        "name": device_id,
-        "last_seen": _format_timestamp(now),
-        "last_seen_ts": now,
-        "status": "´ë±â",
-        "last_success": None,
-        "last_response": None,
-        "last_command": base_command,
-        "defaults": defaults,
+    progress_map: Dict[str, List[Dict[str, Any]]] = {}
+    for row in progress_rows:
+        data_payload: Optional[Dict[str, Any]] = None
+        if row["data"]:
+            try:
+                data_payload = json.loads(row["data"])
+            except json.JSONDecodeError:
+                data_payload = None
+        progress_map.setdefault(row["job_id"], []).append(
+            {
+                "status": row["status"],
+                "message": row["message"],
+                "data": data_payload,
+                "created_at": row["created_at"],
+            }
+        )
+    for job_id, entries in list(progress_map.items()):
+        trimmed = entries[:20]
+        progress_map[job_id] = list(reversed(trimmed))
+    job_map: Dict[str, List[Dict[str, Any]]] = {}
+    for original_row in job_rows:
+        row = job_overrides.get(original_row["id"], original_row)
+        payload: Optional[Dict[str, Any]] = None
+        try:
+            payload = json.loads(row["payload"]) if row["payload"] else None
+        except json.JSONDecodeError:
+            payload = None
+        result_payload: Optional[Dict[str, Any]] = None
+        try:
+            result_payload = json.loads(row["result"]) if row["result"] else None
+        except json.JSONDecodeError:
+            result_payload = None
+        row_keys = row.keys()
+        cancel_requested_flag = bool(row["cancel_requested"]) if "cancel_requested" in row_keys else False
+        job_map.setdefault(row["device_id"], []).append(
+            {
+                "id": row["id"],
+                "job_type": row["job_type"],
+                "domain": row["domain"],
+                "status": row["status"],
+                "payload": payload,
+                "result": result_payload,
+                "created_at": row["created_at"],
+                "queued_at": row["queued_at"],
+                "started_at": row["started_at"],
+                "finished_at": row["finished_at"],
+                "cancel_requested": cancel_requested_flag,
+                "error": row["error"],
+                "progress": progress_map.get(row["id"], []),
+            }
+        )
+    log_map: Dict[str, List[Dict[str, Any]]] = {}
+    for row in log_rows:
+        log_map.setdefault(row["device_id"], []).append(
+            {
+                "id": row["id"],
+                "domain": row["domain"],
+                "rcpt_to": row["rcpt_to"],
+                "success": bool(row["success"]),
+                "response": row["response"],
+                "created_at": row["created_at"],
+            }
+        )
+    devices: List[Dict[str, Any]] = []
+    online_count = 0
+    for device in device_rows:
+        configs = config_map.get(device["id"], {})
+        if device.get("status") == "connected":
+            online_count += 1
+        devices.append(
+            {
+                "id": device["id"],
+                "name": device["name"],
+                "active_domain": device["active_domain"],
+                "status": device["status"],
+                "last_seen": device.get("last_seen"),
+                "worker_state": device.get("worker_state"),
+                "last_error": device.get("last_error"),
+                "configs": configs,
+                "jobs": job_map.get(device["id"], []),
+                "files": file_map.get(device["id"], {}),
+                "logs": log_map.get(device["id"], [])[:40],
+            }
+        )
+    return {
+        "devices": devices,
+        "counts": {
+            "total": len(devices),
+            "online": online_count,
+        },
     }
 
 
-@app.post("/api/register")
-async def register_device(body: RegisterBody):
-    device_id = _normalize_text(body.device_id)
-    device_name = _normalize_text(body.name)
-    if not device_id:
-        raise HTTPException(status_code=400, detail="device_id ÇÊ¿ä")
-    if not device_name:
-        device_name = device_id
-    existing = _devices.get(device_id)
-    defaults = _get_device_defaults(device_id)
-    if existing:
-        existing["name"] = device_name
-        existing["defaults"] = defaults
-        if not existing.get("last_command") and any(defaults.values()):
-            existing["last_command"] = {
-                "helo": defaults.get("helo", ""),
-                "mail_from": defaults.get("mail_from", ""),
-                "rcpt_to": defaults.get("rcpt_to", ""),
-                "header": defaults.get("header", ""),
-            }
-        _update_last_seen(existing)
-    else:
-        base_command = None
-        if any(defaults.values()):
-            base_command = {
-                "helo": defaults.get("helo", ""),
-                "mail_from": defaults.get("mail_from", ""),
-                "rcpt_to": defaults.get("rcpt_to", ""),
-                "header": defaults.get("header", ""),
-            }
-        _devices[device_id] = {
-            "name": device_name,
-            "last_seen": _now_string(),
-            "status": "´ë±â",
-            "last_success": None,
-            "last_response": None,
-            "last_command": base_command,
-            "defaults": defaults,
-        }
-        _update_last_seen(_devices[device_id])
-    return {"message": "µî·Ï ¿Ï·á"}
+def get_next_file_version(conn: sqlite3.Connection, device_id: str, domain: str) -> int:
+    row = conn.execute(
+        """
+        SELECT MAX(version) AS max_version
+        FROM device_files
+        WHERE device_id=? AND domain=?
+        """,
+        (device_id, domain),
+    ).fetchone()
+    if not row or row["max_version"] is None:
+        return 1
+    return int(row["max_version"]) + 1
+
+
+def compute_checksum(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def build_storage_path(device_id: str, domain: str, stored_name: str) -> Path:
+    safe_device = device_id.replace("/", "_")
+    safe_domain = normalize_domain(domain)
+    device_root = STORAGE_ROOT / "devices" / safe_device / safe_domain
+    device_root.mkdir(parents=True, exist_ok=True)
+    return device_root / stored_name
+
+
+def create_job(
+    conn: sqlite3.Connection,
+    device_id: str,
+    domain: Optional[str],
+    job_type: str,
+    payload: Dict[str, Any],
+) -> Dict[str, Any]:
+    job_id = uuid.uuid4().hex
+    now = now_ts()
+    conn.execute(
+        """
+        INSERT INTO jobs (id, device_id, domain, job_type, status, payload, created_at)
+        VALUES (?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (
+            job_id,
+            device_id,
+            domain,
+            job_type,
+            json.dumps(payload, ensure_ascii=False),
+            now,
+        ),
+    )
+    return {
+        "id": job_id,
+        "device_id": device_id,
+        "domain": domain,
+        "job_type": job_type,
+        "status": "pending",
+        "payload": payload,
+        "created_at": now,
+    }
+
+
+def load_job_payload(row: sqlite3.Row) -> Dict[str, Any]:
+    if not row["payload"]:
+        return {}
+    try:
+        return json.loads(row["payload"])
+    except json.JSONDecodeError:
+        return {}
+
+
+def serialize_job_dispatch(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "job_id": row["id"],
+        "job_type": row["job_type"],
+        "domain": row["domain"],
+        "payload": load_job_payload(row),
+        "created_at": row["created_at"],
+    }
+
+
+def update_job_status(
+    conn: sqlite3.Connection,
+    device_id: str,
+    job_id: str,
+    status: str,
+    message: Optional[str],
+    result: Optional[Dict[str, Any]],
+    error: Optional[str],
+) -> Optional[sqlite3.Row]:
+    row = conn.execute(
+        "SELECT * FROM jobs WHERE id=? AND device_id=?",
+        (job_id, device_id),
+    ).fetchone()
+    if not row:
+        return None
+    now = now_ts()
+    fields: Dict[str, Any] = {"status": status}
+    if status == "running" and not row["started_at"]:
+        fields["started_at"] = now
+    if status in {"success", "failed", "cancelled"}:
+        fields["finished_at"] = now
+        fields["cancel_requested"] = 0
+    if status in {"success", "failed", "cancelled"}:
+        if result is not None:
+            fields["result"] = json.dumps(result, ensure_ascii=False)
+        elif message:
+            fields["result"] = json.dumps({"message": message}, ensure_ascii=False)
+    if error:
+        fields["error"] = error
+    assignments = ", ".join(f"{key}=?" for key in fields)
+    params = list(fields.values()) + [job_id]
+    conn.execute(f"UPDATE jobs SET {assignments} WHERE id=?", params)
+    updated = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    record_job_progress(conn, updated or row, status, message, result)
+    return updated
+
+
+def record_job_progress(
+    conn: sqlite3.Connection,
+    job_row: Optional[sqlite3.Row],
+    status: str,
+    message: Optional[str],
+    result: Optional[Dict[str, Any]],
+) -> None:
+    if not job_row:
+        return
+    if result and isinstance(result, dict):
+        logs_payload = result.get("logs")
+        if isinstance(logs_payload, list):
+            now_point = now_ts()
+            entries: List[Tuple[str, Optional[str], str, Optional[str], int, str, str]] = []
+            for item in logs_payload:
+                if not isinstance(item, dict):
+                    continue
+                log_line = str(item.get("log") or "").strip()
+                if not log_line:
+                    continue
+                email = item.get("email")
+                delivery = str(item.get("delivery_status") or "").lower()
+                success_flag = 1 if delivery == "sent" or log_line.lower().startswith("sent|") else 0
+                entries.append(
+                    (
+                        job_row["device_id"],
+                        job_row["domain"],
+                        job_row["id"],
+                        email,
+                        success_flag,
+                        log_line,
+                        now_point,
+                    )
+                )
+            if entries:
+                conn.executemany(
+                    """
+                    INSERT INTO send_logs (device_id, domain, job_id, rcpt_to, success, response, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    entries,
+                )
+    if job_row["job_type"] != "batch_send":
+        return
+    data_json: Optional[str] = None
+    if result is not None:
+        try:
+            if isinstance(result, dict):
+                filtered = {key: value for key, value in result.items() if key != "logs"}
+                data_json = json.dumps(filtered, ensure_ascii=False) if filtered else None
+            else:
+                data_json = json.dumps(result, ensure_ascii=False)
+        except (TypeError, ValueError):
+            data_json = None
+    conn.execute(
+        """
+        INSERT INTO job_progress_logs (job_id, device_id, domain, status, message, data, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_row["id"],
+            job_row["device_id"],
+            job_row["domain"],
+            status,
+            message,
+            data_json,
+            now_ts(),
+        ),
+    )
+
+
+def handle_job_completion(
+    conn: sqlite3.Connection,
+    job_row: sqlite3.Row,
+    report: "JobReportPayload",
+) -> None:
+    status = report.status.lower()
+    payload = load_job_payload(job_row)
+    now = now_ts()
+    if job_row["job_type"] == "inject_file":
+        file_id = payload.get("file_id")
+        if file_id:
+            conn.execute(
+                """
+                UPDATE device_files
+                SET last_injected_at=?,
+                    last_injected_status=?,
+                    last_injected_job_id=?
+                WHERE id=?
+                """,
+                (now, status, job_row["id"], file_id),
+            )
+    elif job_row["job_type"] in {"single_send", "batch_send"}:
+        has_logs = False
+        if report.result and isinstance(report.result, dict):
+            logs_payload = report.result.get("logs")
+            if isinstance(logs_payload, list) and logs_payload:
+                has_logs = True
+        if not has_logs:
+            rcpt_to = payload.get("rcpt_to")
+            if report.result and isinstance(report.result, dict):
+                rcpt_to = report.result.get("rcpt_to") or rcpt_to
+            conn.execute(
+                """
+                INSERT INTO send_logs (device_id, domain, job_id, rcpt_to, success, response, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job_row["device_id"],
+                    job_row["domain"],
+                    job_row["id"],
+                    rcpt_to,
+                    1 if status == "success" else 0,
+                    report.message or "",
+                    now,
+                ),
+            )
+
+
+class RegisterRequest(BaseModel):
+    device_name: str = Field(..., min_length=1)
+    device_id: Optional[str] = Field(default=None, description="ê¸°ì¡´ ë””ë°”ì´ìŠ¤ ID (ì„ íƒ)")
+
+
+class RegisterResponse(BaseModel):
+    device_id: str
+    name: str
+    active_domain: str
+    configs: Dict[str, Dict[str, Any]]
+
+
+class DeviceConfigPayload(BaseModel):
+    helo: Optional[str] = ""
+    smtp_host: Optional[str] = ""
+    smtp_port: Optional[int] = 25
+    mail_from: Optional[str] = ""
+    header: Optional[str] = ""
+    session_count: Optional[int] = 1
+    bcc_count: Optional[int] = 0
+    rcpt_to: Optional[str] = ""
+
+
+class UpdateConfigRequest(DeviceConfigPayload):
+    pass
+
+
+class ActiveDomainRequest(BaseModel):
+    domain: str
+
+
+class DomainStatePayload(BaseModel):
+    domain: str
+    local_db_version: Optional[int] = None
+    total: Optional[int] = None
+    pending: Optional[int] = None
+    sent: Optional[int] = None
+    failed: Optional[int] = None
+    block: Optional[int] = None
+    removed: Optional[int] = None
+
+
+class JobReportPayload(BaseModel):
+    job_id: str
+    status: str
+    message: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class HeartbeatRequest(BaseModel):
+    device_name: str
+    active_domain: Optional[str] = "naver"
+    domain_states: List[DomainStatePayload] = Field(default_factory=list)
+    job_reports: List[JobReportPayload] = Field(default_factory=list)
+
+
+class JobDispatchPayload(BaseModel):
+    job_id: str
+    job_type: str
+    domain: Optional[str]
+    payload: Dict[str, Any]
+    created_at: str
+
+
+class JobControlPayload(BaseModel):
+    job_id: str
+    cancel_requested: bool = False
+
+
+class HeartbeatResponse(BaseModel):
+    active_domain: str
+    configs: Dict[str, Dict[str, Any]]
+    jobs: List[JobDispatchPayload]
+    job_controls: List[JobControlPayload] = Field(default_factory=list)
+
+
+class SingleSendRequest(BaseModel):
+    domain: str
+    rcpt_to: Optional[str] = None
+    header_override: Optional[str] = None
+
+
+class BatchSendRequest(BaseModel):
+    domain: str
+
+
+class FileInfo(BaseModel):
+    id: int
+    filename: str
+    size: int
+    checksum: Optional[str]
+    version: int
+    uploaded_at: str
+    uploaded_by: Optional[str]
+    last_injected_at: Optional[str]
+    last_injected_status: Optional[str]
+    last_injected_job_id: Optional[str]
+
+
+class FileListResponse(BaseModel):
+    files: List[FileInfo]
+
+
+class ClearLogsRequest(BaseModel):
+    domain: Optional[str] = None
+
+
+class JobCancelRequest(BaseModel):
+    device_id: str
+    reason: Optional[str] = None
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard(request: Request) -> HTMLResponse:
+    return templates.TemplateResponse("dashboard.html", {"request": request})
 
 
 @app.get("/api/devices")
-async def list_devices():
-    result = []
-    now = _now_local()
-    to_remove = []
-    for device_id, info in list(_devices.items()):
-        pending = _pending.get(device_id)
-        defaults = info.get("defaults") or _get_device_defaults(device_id)
-        info["defaults"] = defaults
-        last_seen_dt = _get_last_seen_dt(info)
-        if last_seen_dt is None:
-            stale = True
-        else:
-            stale = (now - last_seen_dt) > timedelta(seconds=STALE_SECONDS)
-        if stale:
-            to_remove.append(device_id)
-            continue
-        if info.get("status") == "¿¬°á ²÷±è":
-            info["status"] = "´ë±â"
-        command_snapshot = info.get("last_command") or {
-            "helo": defaults.get("helo", ""),
-            "mail_from": defaults.get("mail_from", ""),
-            "rcpt_to": defaults.get("rcpt_to", ""),
-            "header": defaults.get("header", ""),
-        }
-        result.append(
-            {
-                "device_id": device_id,
-                "name": info.get("name", device_id),
-                "last_seen": info.get("last_seen"),
-                "status": info.get("status"),
-                "last_success": info.get("last_success"),
-                "last_response": info.get("last_response"),
-                "last_command": command_snapshot,
-                "defaults": defaults,
-                "pending": bool(pending),
-                "pending_task_id": pending.get("task_id") if pending else None,
-                "queued_at": pending.get("queued_at") if pending else None,
-                "connected": True,
-            }
-        )
-    for device_id in to_remove:
-        _devices.pop(device_id, None)
-        _pending.pop(device_id, None)
-    return {"devices": result}
+def list_devices() -> Dict[str, Any]:
+    return load_device_summary()
 
 
-@app.post("/api/send")
-async def queue_send(body: SendCommandBody):
-    device_id = _normalize_text(body.device_id)
-    if not device_id:
-        raise HTTPException(status_code=400, detail="µğ¹ÙÀÌ½º ½Äº°ÀÚ°¡ ÇÊ¿äÇÕ´Ï´Ù")
-    device = _devices.get(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="µğ¹ÙÀÌ½º¸¦ Ã£À» ¼ö ¾ø½À´Ï´Ù")
-    if device_id in _pending:
-        raise HTTPException(status_code=409, detail="ÀÌ µğ¹ÙÀÌ½º´Â ÀÌ¹Ì ´ë±â ÁßÀÔ´Ï´Ù")
-    task_id = str(uuid.uuid4())
-    command = {
-        "task_id": task_id,
-        "device_id": device_id,
-        "helo": body.helo,
-        "mail_from": body.mail_from,
-        "rcpt_to": body.rcpt_to,
-        "header": body.header,
-        "queued_at": _now_string(),
-        "status": "´ë±â",
-    }
-    _pending[device_id] = command
-    device["status"] = "¹ß¼Û ´ë±â"
-    snapshot = {
-        "helo": body.helo,
-        "mail_from": body.mail_from,
-        "rcpt_to": body.rcpt_to,
-        "header": body.header,
-    }
-    device["last_command"] = snapshot.copy()
-    device["defaults"] = snapshot.copy()
-    _save_device_defaults(device_id, snapshot)
-    return {"message": "¹ß¼Û ´ë±â¿­¿¡ µî·Ï", "task_id": task_id}
-
-
-@app.get("/api/send")
-async def poll_command(device_id: str):
-    device_id = _normalize_text(device_id)
-    if not device_id or device_id not in _devices:
-        raise HTTPException(status_code=404, detail="µî·ÏµÇÁö ¾ÊÀº µğ¹ÙÀÌ½º")
-    _touch_device(device_id)
-    command = _pending.get(device_id)
-    if not command:
-        return {"task": None}
-    if command["status"] == "´ë±â":
-        command["status"] = "Àü¼Û Áß"
-        _devices[device_id]["status"] = "Àü¼Û Áß"
-    if command["status"] == "Àü¼Û Áß":
-        return {
-            "task": {
-                "task_id": command["task_id"],
-                "helo": command["helo"],
-                "mail_from": command["mail_from"],
-                "rcpt_to": command["rcpt_to"],
-                "header": command["header"],
-            }
-        }
-    return {"task": None}
-
-
-@app.post("/api/report")
-async def report_result(body: ReportBody):
-    device_id = _normalize_text(body.device_id)
-    if not device_id:
-        raise HTTPException(status_code=400, detail="µğ¹ÙÀÌ½º ½Äº°ÀÚ°¡ ÇÊ¿äÇÕ´Ï´Ù")
-    device = _devices.get(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="µî·Ï ÇÊ¿ä")
-    command = _pending.get(device_id)
-    if command and command["task_id"] == body.task_id:
-        _pending.pop(device_id)
-    device["status"] = "´ë±â"
-    _update_last_seen(device)
-    device["last_success"] = "¼º°ø" if body.success else "½ÇÆĞ"
-    device["last_response"] = body.response
-    device_name = device.get("name", device_id)
-    _insert_log(
-        {
-            "device_id": device_id,
-            "device_name": device_name,
-            "helo": command.get("helo") if command else None,
-            "mail_from": command.get("mail_from") if command else None,
-            "rcpt_to": command.get("rcpt_to") if command else None,
-            "header": command.get("header") if command else None,
-            "success": body.success,
-            "response": body.response,
-        }
+@app.post("/api/devices/register", response_model=RegisterResponse)
+def register_device(payload: RegisterRequest) -> RegisterResponse:
+    device = ensure_device(payload.device_id or uuid.uuid4().hex, payload.device_name)
+    raw_configs = load_device_configs(device["id"])
+    configs = {domain: serialize_config(row) for domain, row in raw_configs.items()}
+    return RegisterResponse(
+        device_id=device["id"],
+        name=device["name"],
+        active_domain=device.get("active_domain", "naver"),
+        configs=configs,
     )
-    return {"message": "°á°ú ¼ö½Å"}
-
-@app.post("/api/cancel")
-async def cancel_command(body: CancelBody):
-    device_id = _normalize_text(body.device_id)
-    if not device_id:
-        raise HTTPException(status_code=400, detail="µğ¹ÙÀÌ½º ½Äº°ÀÚ°¡ ÇÊ¿äÇÕ´Ï´Ù")
-    device = _devices.get(device_id)
-    if not device:
-        raise HTTPException(status_code=404, detail="¹Ìµî·Ï µğ¹ÙÀÌ½º")
-    pending = _pending.pop(device_id, None)
-    if not pending:
-        return {"message": "´ë±â ÁßÀÎ ¹ß¼Û ¸í·ÉÀÌ ¾ø½À´Ï´Ù."}
-    device["status"] = "´ë±â"
-    device["last_command"] = device.get("defaults")
-    device["last_response"] = "»ç¿ëÀÚ ÁßÁö"
-    device["last_success"] = "ÁßÁö"
-    _update_last_seen(device)
-    return {"message": "¹ß¼Û ¸í·ÉÀ» ÁßÁöÇß½À´Ï´Ù."}
 
 
-@app.get("/api/logs")
-async def fetch_logs(device_id: Optional[str] = None, limit: int = 50):
-    limit = max(1, min(limit, 200))
-    base_query = "SELECT id, device_id, device_name, helo, mail_from, rcpt_to, header, success, response, created_at FROM logs"
-    params = []
-    if device_id:
-        base_query += " WHERE device_id = ?"
-        params.append(device_id)
-    base_query += " ORDER BY id DESC LIMIT ?"
-    params.append(limit)
-    with _db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            rows = conn.execute(base_query, params).fetchall()
-    logs = []
-    for row in rows:
-        logs.append(
-            {
-                "id": row[0],
-                "device_id": row[1],
-                "device_name": row[2],
-                "helo": row[3],
-                "mail_from": row[4],
-                "rcpt_to": row[5],
-                "header": row[6],
-                "success": bool(row[7]),
-                "response": row[8],
-                "created_at": row[9],
-            }
+@app.put("/api/devices/{device_id}/domains/{domain}/config")
+def update_device_config(device_id: str, domain: str, payload: UpdateConfigRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="ë””ë°”ì´ìŠ¤ë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+        now = now_ts()
+        sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, session_count=?, bcc_count=?, rcpt_to=?, updated_at=?
+            WHERE device_id=? AND domain=?
+            """,
+            (
+                payload.helo or "",
+                payload.smtp_host or "",
+                int(payload.smtp_port or 25),
+                payload.mail_from or "",
+                payload.header or "",
+                max(1, int(payload.session_count or 1)),
+                sanitized_bcc,
+                payload.rcpt_to or "",
+                now,
+                device_id,
+                normalized,
+            ),
         )
-    return {"logs": logs}
+        conn.commit()
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+    if not config_row:
+        raise HTTPException(status_code=404, detail="ë„ë©”ì¸ ì„¤ì •ì„ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+    return serialize_config(to_dict(config_row))
 
 
-@app.delete("/api/logs")
-async def clear_logs(device_id: Optional[str] = None):
-    with _db_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            if device_id:
-                conn.execute("DELETE FROM logs WHERE device_id = ?", (device_id,))
-            else:
-                conn.execute("DELETE FROM logs")
+@app.post("/api/devices/{device_id}/active-domain")
+def set_active_domain(device_id: str, payload: ActiveDomainRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(payload.domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="ë””ë°”ì´ìŠ¤ë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+        conn.execute(
+            "UPDATE devices SET active_domain=?, updated_at=? WHERE id=?",
+            (normalized, now_ts(), device_id),
+        )
+        conn.commit()
+    return {"device_id": device_id, "active_domain": normalized}
+
+
+def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Dict[str, Any]:
+    base = configs.get(domain) or {}
+    bcc_count = clamp_bcc_count(base.get("bcc_count", 0))
+    raw_session = base.get("session_count", 1)
+    try:
+        session_count = int(raw_session)
+    except (TypeError, ValueError):
+        session_count = 1
+    session_count = max(1, session_count)
+    return {
+        "helo": base.get("helo", ""),
+        "smtp_host": base.get("smtp_host", ""),
+        "smtp_port": base.get("smtp_port", 25),
+        "mail_from": base.get("mail_from", ""),
+        "header": base.get("header", ""),
+        "session_count": session_count,
+        "bcc_count": bcc_count,
+        "rcpt_to": base.get("rcpt_to", ""),
+    }
+
+
+@app.post("/api/devices/{device_id}/actions/send-single")
+def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str, Any]:
+    domain = normalize_domain(payload.domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="ë””ë°”ì´ìŠ¤ë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+        configs = load_device_configs(device_id, conn=conn)
+        config_snapshot = build_config_snapshot(configs, domain)
+        rcpt_to = (payload.rcpt_to or "").strip() or config_snapshot.get("rcpt_to")
+        if not rcpt_to:
+            raise HTTPException(status_code=400, detail="RCPT TO ì£¼ì†Œê°€ í•„ìš”í•©ë‹ˆë‹¤.")
+        if payload.header_override:
+            config_snapshot["header"] = payload.header_override
+        job = create_job(
+            conn,
+            device_id,
+            domain,
+            "single_send",
+            {
+                "rcpt_to": rcpt_to,
+                "config": config_snapshot,
+            },
+        )
+        conn.commit()
+    return {"job": job}
+
+
+@app.post("/api/devices/{device_id}/actions/send-batch")
+def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, Any]:
+    domain = normalize_domain(payload.domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="ë””ë°”ì´ìŠ¤ë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+        configs = load_device_configs(device_id, conn=conn)
+        config_snapshot = build_config_snapshot(configs, domain)
+        job = create_job(
+            conn,
+            device_id,
+            domain,
+            "batch_send",
+            {"config": config_snapshot},
+        )
+        conn.commit()
+    return {"job": job}
+
+
+@app.post("/api/jobs/{job_id}/cancel")
+def cancel_job(job_id: str, payload: JobCancelRequest) -> Dict[str, Any]:
+    cancel_message = payload.reason or "ì‚¬ìš©ìê°€ ì‘ì—… ì¤‘ì§€ë¥¼ ìš”ì²­í–ˆìŠµë‹ˆë‹¤."
+    with db_lock, get_conn() as conn:
+        job_row = conn.execute(
+            "SELECT * FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if not job_row:
+            raise HTTPException(status_code=404, detail="ì‘ì—…ì„ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+        if job_row["device_id"] != payload.device_id:
+            raise HTTPException(status_code=400, detail="ë””ë°”ì´ìŠ¤ IDê°€ ì¼ì¹˜í•˜ì§€ ì•ŠìŠµë‹ˆë‹¤.")
+        device_row = conn.execute(
+            "SELECT status, last_seen FROM devices WHERE id=?",
+            (payload.device_id,),
+        ).fetchone()
+        device_connected = bool(device_row and device_row["status"] == "connected")
+        status = job_row["status"]
+        if status in {"success", "failed", "cancelled"}:
+            return {
+                "job_id": job_id,
+                "status": status,
+                "cancel_requested": False,
+            }
+        if status == "pending":
+            updated_row = update_job_status(
+                conn,
+                payload.device_id,
+                job_id,
+                "cancelled",
+                cancel_message,
+                None,
+                cancel_message,
+            )
+            if updated_row:
+                pseudo_report = JobReportPayload(
+                    job_id=job_id,
+                    status="cancelled",
+                    message=cancel_message,
+                    result=None,
+                    error=cancel_message,
+                )
+                handle_job_completion(conn, updated_row, pseudo_report)
             conn.commit()
-    message = "¼±ÅÃÇÑ µğ¹ÙÀÌ½º ·Î±×¸¦ »èÁ¦Çß½À´Ï´Ù." if device_id else "·Î±×¸¦ ¸ğµÎ »èÁ¦Çß½À´Ï´Ù."
-    return {"message": message}
-
-
-
-
-HTML_PAGE = """<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="euc-kr">
-<title>´ÙÁß µğ¹ÙÀÌ½º ¸ŞÀÏ ¿¡ÀÌÀüÆ®</title>
-<style>
-:root { color-scheme: light; }
-body { font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif; background: #f4f7fb; margin: 0; padding: 24px; color: #1f2937; }
-h1 { margin: 0 0 16px; font-size: 26px; font-weight: 700; }
-#summary { margin-bottom: 16px; font-size: 14px; color: #4b5563; }
-.device-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
-.card { background: #ffffff; border-radius: 16px; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.12); padding: 18px; display: flex; flex-direction: column; gap: 14px; }
-.card-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
-.device-name { font-size: 18px; font-weight: 700; color: #111827; }
-.meta-line { font-size: 13px; color: #6b7280; }
-.status-chip { padding: 4px 12px; border-radius: 999px; font-size: 12px; font-weight: 600; }
-.status-idle { background: #ecfdf5; color: #047857; }
-.status-queue { background: #fef3c7; color: #92400e; }
-.status-running { background: #e0f2fe; color: #0369a1; }
-.status-off { background: #fee2e2; color: #b91c1c; }
-.actions { display: flex; gap: 10px; }
-button { padding: 8px 14px; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; background: #2563eb; color: #fff; transition: transform 0.1s ease, box-shadow 0.2s ease; }
-button:disabled { cursor: not-allowed; background: #cbd5f5; color: #475569; box-shadow: none; transform: none; }
-button.secondary { background: #f3f4f6; color: #1f2937; }
-button.secondary:hover { background: #e5e7eb; }
-button.danger { background: #ef4444; color: #fff; }
-button.danger:hover { background: #dc2626; }
-button:hover { transform: translateY(-1px); box-shadow: 0 8px 16px rgba(37, 99, 235, 0.18); }
-.field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #374151; }
-.field > span { font-weight: 600; }
-.form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
-.field.textarea { grid-column: 1 / -1; }
-input[type=text], textarea { border: 1px solid #d1d5db; border-radius: 8px; padding: 8px 10px; font-size: 13px; background: #f9fafb; color: #111827; }
-textarea { height: 140px; resize: vertical; font-family: 'D2Coding', 'Courier New', monospace; }
-.result-box { border-radius: 10px; padding: 10px 12px; font-size: 13px; background: #f9fafb; color: #1f2937; }
-.result-box.success { border-left: 4px solid #10b981; }
-.result-box.failure { border-left: 4px solid #ef4444; }
-.result-box.neutral { border-left: 4px solid #9ca3af; }
-.badge { display: inline-block; margin-left: 6px; padding: 2px 6px; border-radius: 6px; font-size: 12px; background: #e5e7eb; color: #374151; }
-.log-section { margin-top: 32px; background: #ffffff; padding: 20px; border-radius: 16px; box-shadow: 0 10px 24px rgba(15, 23, 42, 0.12); }
-.log-controls { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; font-size: 13px; color: #374151; }
-.log-controls label { display: flex; align-items: center; gap: 6px; }
-.log-controls select { border: 1px solid #d1d5db; border-radius: 6px; padding: 6px 8px; font-size: 13px; }
-.log-table { width: 100%; border-collapse: collapse; margin-top: 16px; font-size: 12px; }
-.log-table th, .log-table td { border: 1px solid #e5e7eb; padding: 8px; text-align: left; vertical-align: top; }
-.log-table th { background: #f3f4f6; font-weight: 700; }
-.log-table tr:nth-child(even) { background: #f9fafb; }
-.log-response { max-width: 420px; white-space: pre-line; }
-@media (max-width: 720px) {
-  body { padding: 16px; }
-}
-</style>
-</head>
-<body>
-<h1>´ÙÁß µğ¹ÙÀÌ½º ¸ŞÀÏ ¿¡ÀÌÀüÆ®</h1>
-<div id="summary"></div>
-<div id="devices" class="device-grid"></div>
-<section class="log-section">
-  <div class="log-controls">
-    <label>µğ¹ÙÀÌ½º
-      <select id="logDevice">
-        <option value="all">ÀüÃ¼</option>
-      </select>
-    </label>
-    <label>Ç¥½Ã ¼ö
-      <select id="logLimit">
-        <option value="20">20</option>
-        <option value="50">50</option>
-        <option value="100">100</option>
-      </select>
-    </label>
-    <button class="secondary" id="refreshLogsBtn">·Î±× »õ·Î°íÄ§</button>
-    <button class="secondary danger" id="clearLogsBtn">·Î±× ÀüÃ¼ »èÁ¦</button>
-  </div>
-  <table class="log-table">
-    <thead>
-      <tr>
-        <th>½Ã°£</th>
-        <th>µğ¹ÙÀÌ½º</th>
-        <th>MAIL FROM</th>
-        <th>RCPT TO</th>
-        <th>°á°ú</th>
-        <th>ÀÀ´ä</th>
-      </tr>
-    </thead>
-    <tbody id="logRows"></tbody>
-  </table>
-</section>
-<script>
-const POLL_MS = 1500;
-const LOG_POLL_MS = 6000;
-const decoder = new TextDecoder('euc-kr');
-const fieldCache = {};
-const state = { devices: [] };
-
-function baseTemplate() {
-  return { helo: '', mail_from: '', rcpt_to: '', header: '', _dirty: false };
-}
-
-function ensureCache(deviceId, defaults) {
-  const base = baseTemplate();
-  base.helo = (defaults?.helo || '').trim();
-  base.mail_from = (defaults?.mail_from || '').trim();
-  base.rcpt_to = (defaults?.rcpt_to || '').trim();
-  base.header = defaults?.header || '';
-  if (!fieldCache[deviceId]) {
-    fieldCache[deviceId] = { ...base };
-    fieldCache[deviceId]._dirty = false;
-  } else if (!fieldCache[deviceId]._dirty) {
-    Object.assign(fieldCache[deviceId], base);
-  }
-  return fieldCache[deviceId];
-}
-
-function markDirty(cache) {
-  cache._dirty = true;
-}
-
-async function requestJson(url, options) {
-  const res = await fetch(url, options);
-  const buffer = await res.arrayBuffer();
-  const text = decoder.decode(buffer);
-  if (!res.ok) {
-    throw new Error(text || '¿äÃ»¿¡ ½ÇÆĞÇß½À´Ï´Ù');
-  }
-  return text ? JSON.parse(text) : {};
-}
-
-function statusClass(status) {
-  switch (status) {
-    case '¹ß¼Û ´ë±â':
-      return 'status-chip status-queue';
-    case 'Àü¼Û Áß':
-      return 'status-chip status-running';
-    case '¿¬°á ²÷±è':
-      return 'status-chip status-off';
-    default:
-      return 'status-chip status-idle';
-  }
-}
-
-function createInputField(label, value) {
-  const wrapper = document.createElement('label');
-  wrapper.className = 'field';
-  const span = document.createElement('span');
-  span.textContent = label;
-  const input = document.createElement('input');
-  input.type = 'text';
-  input.value = value || '';
-  wrapper.append(span, input);
-  return { wrapper, input };
-}
-
-function createTextareaField(label, value) {
-  const wrapper = document.createElement('label');
-  wrapper.className = 'field textarea';
-  const span = document.createElement('span');
-  span.textContent = label;
-  const area = document.createElement('textarea');
-  area.value = value || '';
-  wrapper.append(span, area);
-  return { wrapper, area };
-}
-
-function updateSummary() {
-  const total = state.devices.length;
-  const connected = state.devices.filter((dev) => dev.connected).length;
-  const pending = state.devices.filter((dev) => dev.pending).length;
-  const summary = document.getElementById('summary');
-  summary.textContent = `ÃÑ ${total}´ë ¡¤ ¿¬°á ${connected}´ë ¡¤ ´ë±â Áß ${pending}°Ç`;
-}
-
-function updateDeviceOptions() {
-  const select = document.getElementById('logDevice');
-  const current = select.value;
-  select.innerHTML = '<option value="all">ÀüÃ¼</option>';
-  state.devices.forEach((dev) => {
-    const option = document.createElement('option');
-    option.value = dev.device_id;
-    option.textContent = dev.name || dev.device_id;
-    select.appendChild(option);
-  });
-  if ([...select.options].some((opt) => opt.value === current)) {
-    select.value = current;
-  }
-}
-
-function renderDevices(data) {
-  state.devices = data.devices || [];
-  updateSummary();
-  updateDeviceOptions();
-  const container = document.getElementById('devices');
-  const activeElement = document.activeElement;
-  let activeInfo = null;
-  if (activeElement && container.contains(activeElement) && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
-    activeInfo = {
-      deviceId: activeElement.dataset.deviceId || null,
-      field: activeElement.dataset.field || null,
-      selectionStart: activeElement.selectionStart,
-      selectionEnd: activeElement.selectionEnd,
-    };
-  }
-  container.innerHTML = '';
-  const fragment = document.createDocumentFragment();
-  state.devices.forEach((dev) => {
-    const defaults = dev.defaults || baseTemplate();
-    const command = dev.last_command || defaults;
-    const cache = ensureCache(dev.device_id, command);
-    if (!dev.pending && !cache._dirty) {
-      Object.assign(cache, { ...command, _dirty: false });
+            return {
+                "job_id": job_id,
+                "status": "cancelled",
+                "cancel_requested": False,
+            }
+        if not device_connected:
+            updated_row = update_job_status(
+                conn,
+                payload.device_id,
+                job_id,
+                "cancelled",
+                cancel_message,
+                None,
+                cancel_message,
+            )
+            if updated_row:
+                pseudo_report = JobReportPayload(
+                    job_id=job_id,
+                    status="cancelled",
+                    message=cancel_message,
+                    result=None,
+                    error=cancel_message,
+                )
+                handle_job_completion(conn, updated_row, pseudo_report)
+            conn.commit()
+            return {
+                "job_id": job_id,
+                "status": "cancelled",
+                "cancel_requested": False,
+            }
+        if job_row["cancel_requested"]:
+            conn.commit()
+            return {
+                "job_id": job_id,
+                "status": status,
+                "cancel_requested": True,
+            }
+        conn.execute(
+            "UPDATE jobs SET cancel_requested=1 WHERE id=?",
+            (job_id,),
+        )
+        record_job_progress(conn, job_row, "cancel_requested", cancel_message, None)
+        conn.commit()
+    return {
+        "job_id": job_id,
+        "status": status,
+        "cancel_requested": True,
     }
 
-    const card = document.createElement('div');
-    card.className = 'card';
 
-    const header = document.createElement('div');
-    header.className = 'card-header';
+def fetch_device_file(conn: sqlite3.Connection, device_id: str, domain: str, file_id: int) -> sqlite3.Row:
+    row = conn.execute(
+        """
+        SELECT *
+        FROM device_files
+        WHERE id=? AND device_id=? AND domain=?
+        """,
+        (file_id, device_id, domain),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="íŒŒì¼ì„ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+    return row
 
-    const titleWrap = document.createElement('div');
-    const title = document.createElement('div');
-    title.className = 'device-name';
-    title.textContent = dev.name || dev.device_id;
-    titleWrap.append(title);
 
-    const statusText = dev.connected ? (dev.status || '´ë±â') : '¿¬°á ²÷±è';
-    const status = document.createElement('span');
-    status.className = statusClass(statusText);
-    status.textContent = statusText;
+@app.get("/api/devices/{device_id}/domains/{domain}/files", response_model=FileListResponse)
+def list_domain_files(device_id: str, domain: str) -> FileListResponse:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM device_files
+            WHERE device_id=? AND domain=?
+            ORDER BY uploaded_at DESC
+            """,
+            (device_id, normalized),
+        ).fetchall()
+    files = [
+        FileInfo(
+            id=row["id"],
+            filename=row["filename"],
+            size=row["size"],
+            checksum=row["checksum"],
+            version=row["version"],
+            uploaded_at=row["uploaded_at"],
+            uploaded_by=row["uploaded_by"],
+            last_injected_at=row["last_injected_at"],
+            last_injected_status=row["last_injected_status"],
+            last_injected_job_id=row["last_injected_job_id"],
+        )
+        for row in rows
+    ]
+    return FileListResponse(files=files)
 
-    header.append(titleWrap, status);
-    card.append(header);
 
-    const connectionLine = document.createElement('div');
-    connectionLine.className = 'meta-line';
-    const connectionText = dev.connected ? '¿¬°á Áß' : '¿¬°á ²÷±è';
-    connectionLine.textContent = `¿¬°á: ${connectionText} ¡¤ ÃÖ±Ù Á¢¼Ó: ${dev.last_seen || '±â·Ï ¾øÀ½'}`;
-    card.append(connectionLine);
-
-    const form = document.createElement('div');
-    form.className = 'form-grid';
-
-    const heloField = createInputField('HELO', cache.helo);
-    heloField.input.dataset.deviceId = dev.device_id;
-    heloField.input.dataset.field = 'helo';
-    heloField.input.addEventListener('input', () => { cache.helo = heloField.input.value; markDirty(cache); });
-
-    const mailField = createInputField('MAIL FROM', cache.mail_from);
-    mailField.input.dataset.deviceId = dev.device_id;
-    mailField.input.dataset.field = 'mail_from';
-    mailField.input.addEventListener('input', () => { cache.mail_from = mailField.input.value; markDirty(cache); });
-
-    const rcptField = createInputField('RCPT TO', cache.rcpt_to);
-    rcptField.input.dataset.deviceId = dev.device_id;
-    rcptField.input.dataset.field = 'rcpt_to';
-    rcptField.input.addEventListener('input', () => { cache.rcpt_to = rcptField.input.value; markDirty(cache); });
-
-    const headerField = createTextareaField('HEADER', cache.header);
-    headerField.area.dataset.deviceId = dev.device_id;
-    headerField.area.dataset.field = 'header';
-    headerField.area.addEventListener('input', () => { cache.header = headerField.area.value; markDirty(cache); });
-
-    form.append(heloField.wrapper, mailField.wrapper, rcptField.wrapper, headerField.wrapper);
-    card.append(form);
-
-    const actions = document.createElement('div');
-    actions.className = 'actions';
-
-    const sendBtn = document.createElement('button');
-    sendBtn.textContent = dev.pending ? '¹ß¼Û ´ë±â Áß' : '¹ß¼Û';
-    sendBtn.disabled = !!dev.pending;
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'ÁßÁö';
-    cancelBtn.className = 'secondary';
-    cancelBtn.disabled = !dev.pending;
-
-    sendBtn.addEventListener('click', () => {
-      queueSend(dev.device_id, {
-        helo: heloField.input.value,
-        mail_from: mailField.input.value,
-        rcpt_to: rcptField.input.value,
-        header: headerField.area.value,
-      }, sendBtn, cancelBtn, cache);
-    });
-
-    cancelBtn.addEventListener('click', () => {
-      cancelSend(dev.device_id, cancelBtn, sendBtn);
-    });
-
-    actions.append(sendBtn, cancelBtn);
-    card.append(actions);
-
-    const resultBox = document.createElement('div');
-    const successState = dev.last_success;
-    if (successState === '¼º°ø') {
-      resultBox.className = 'result-box success';
-      resultBox.textContent = `°á°ú: ${dev.last_response || '¼º°ø'}`;
-    } else if (successState === '½ÇÆĞ') {
-      resultBox.className = 'result-box failure';
-      resultBox.textContent = `°á°ú: ${dev.last_response || '½ÇÆĞ'}`;
-    } else if (successState === 'ÁßÁö') {
-      resultBox.className = 'result-box neutral';
-      resultBox.textContent = dev.last_response || '»ç¿ëÀÚ ÁßÁö';
-    } else {
-      resultBox.className = 'result-box neutral';
-      resultBox.textContent = 'ÃÖ±Ù °á°ú ¾øÀ½';
+@app.post("/api/devices/{device_id}/logs/clear")
+def clear_device_logs(device_id: str, payload: ClearLogsRequest) -> Dict[str, Any]:
+    normalized_domain: Optional[str] = None
+    if payload.domain:
+        normalized_domain = normalize_domain(payload.domain)
+    with db_lock, get_conn() as conn:
+        if normalized_domain:
+            cursor = conn.execute(
+                "DELETE FROM send_logs WHERE device_id=? AND domain=?",
+                (device_id, normalized_domain),
+            )
+        else:
+            cursor = conn.execute(
+                "DELETE FROM send_logs WHERE device_id=?",
+                (device_id,),
+            )
+        deleted = cursor.rowcount if cursor.rowcount is not None else 0
+        conn.commit()
+    return {
+        "device_id": device_id,
+        "domain": normalized_domain,
+        "cleared": deleted,
     }
 
-    if (dev.pending && dev.pending_task_id) {
-      const badge = document.createElement('span');
-      badge.className = 'badge';
-      badge.textContent = `ÀÛ¾÷ ID: ${dev.pending_task_id}`;
-      resultBox.appendChild(badge);
+
+@app.post("/api/devices/{device_id}/domains/{domain}/files")
+async def upload_domain_file(
+    device_id: str,
+    domain: str,
+    file: UploadFile = File(...),
+) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="íŒŒì¼ì´ ë¹„ì–´ ìˆìŠµë‹ˆë‹¤.")
+    stored_name = f"{uuid.uuid4().hex}_{file.filename}"
+    checksum = compute_checksum(data)
+    now = now_ts()
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="ë””ë°”ì´ìŠ¤ë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+        version = get_next_file_version(conn, device_id, normalized)
+        storage_path = build_storage_path(device_id, normalized, stored_name)
+        storage_path.write_bytes(data)
+        conn.execute(
+            """
+            INSERT INTO device_files (
+                device_id, domain, filename, stored_name, size, checksum,
+                version, uploaded_at, uploaded_by
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                device_id,
+                normalized,
+                file.filename,
+                stored_name,
+                len(data),
+                checksum,
+                version,
+                now,
+                "dashboard",
+            ),
+        )
+        conn.commit()
+    return {
+        "filename": file.filename,
+        "size": len(data),
+        "checksum": checksum,
+        "version": version,
+        "uploaded_at": now,
     }
 
-    card.append(resultBox);
-    fragment.append(card);
-  });
-  container.append(fragment);
-  if (activeInfo && activeInfo.deviceId && activeInfo.field) {
-    const selector = `[data-device-id="${activeInfo.deviceId}"][data-field="${activeInfo.field}"]`;
-    const nextActive = container.querySelector(selector);
-    if (nextActive) {
-      nextActive.focus();
-      if (typeof activeInfo.selectionStart === 'number' && typeof activeInfo.selectionEnd === 'number') {
-        nextActive.setSelectionRange(activeInfo.selectionStart, activeInfo.selectionEnd);
-      }
+
+@app.get("/api/devices/{device_id}/domains/{domain}/files/{file_id}/preview")
+def preview_domain_file(device_id: str, domain: str, file_id: int) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        row = fetch_device_file(conn, device_id, normalized, file_id)
+    storage_path = build_storage_path(device_id, normalized, row["stored_name"])
+    if not storage_path.exists():
+        raise HTTPException(status_code=404, detail="íŒŒì¼ì´ ì„œë²„ì— ì¡´ì¬í•˜ì§€ ì•ŠìŠµë‹ˆë‹¤.")
+    preview_lines: List[str] = []
+    try:
+        with storage_path.open("r", encoding="utf-8") as fp:
+            for idx, line in enumerate(fp):
+                preview_lines.append(line.rstrip("\n"))
+                if idx >= 99:
+                    break
+    except UnicodeDecodeError:
+        with storage_path.open("r", encoding="euc-kr", errors="ignore") as fp:
+            for idx, line in enumerate(fp):
+                preview_lines.append(line.rstrip("\n"))
+                if idx >= 99:
+                    break
+    return {
+        "preview": preview_lines,
+        "filename": row["filename"],
+        "size": row["size"],
+        "version": row["version"],
     }
-  }
-}
 
-async function refresh() {
-  try {
-    const data = await requestJson('/api/devices');
-    renderDevices(data);
-  } catch (err) {
-    console.error('µğ¹ÙÀÌ½º ¸ñ·Ï Á¶È¸ ½ÇÆĞ', err);
-  }
-}
 
-async function queueSend(deviceId, payload, sendButton, cancelButton, cache) {
-  sendButton.disabled = true;
-  cancelButton.disabled = true;
-  try {
-    await requestJson('/api/send', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json; charset=euc-kr' },
-      body: JSON.stringify({
-        device_id: deviceId,
-        helo: payload.helo,
-        mail_from: payload.mail_from,
-        rcpt_to: payload.rcpt_to,
-        header: payload.header,
-      }),
-    });
-    cache._dirty = false;
-    cache.helo = payload.helo;
-    cache.mail_from = payload.mail_from;
-    cache.rcpt_to = payload.rcpt_to;
-    cache.header = payload.header;
-    await refresh();
-    await refreshLogs(false);
-  } catch (err) {
-    alert(err.message || err);
-  } finally {
-    sendButton.disabled = false;
-  }
-}
+@app.get("/api/devices/{device_id}/domains/{domain}/files/{file_id}/download")
+def download_domain_file(device_id: str, domain: str, file_id: int) -> FileResponse:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        row = fetch_device_file(conn, device_id, normalized, file_id)
+    storage_path = build_storage_path(device_id, normalized, row["stored_name"])
+    if not storage_path.exists():
+        raise HTTPException(status_code=404, detail="íŒŒì¼ì´ ì„œë²„ì— ì¡´ì¬í•˜ì§€ ì•ŠìŠµë‹ˆë‹¤.")
+    return FileResponse(
+        storage_path,
+        media_type="application/octet-stream",
+        filename=row["filename"],
+    )
 
-async function cancelSend(deviceId, cancelButton, sendButton) {
-  cancelButton.disabled = true;
-  try {
-    await requestJson('/api/cancel', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json; charset=euc-kr' },
-      body: JSON.stringify({ device_id: deviceId }),
-    });
-    await refresh();
-    await refreshLogs(false);
-  } catch (err) {
-    alert(err.message || err);
-  } finally {
-    cancelButton.disabled = false;
-    sendButton.disabled = false;
-  }
-}
 
-function renderLogs(data) {
-  const tbody = document.getElementById('logRows');
-  tbody.innerHTML = '';
-  (data.logs || []).forEach((log) => {
-    const row = document.createElement('tr');
+@app.delete("/api/devices/{device_id}/domains/{domain}/files/{file_id}")
+def delete_domain_file(device_id: str, domain: str, file_id: int) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        row = fetch_device_file(conn, device_id, normalized, file_id)
+        storage_path = build_storage_path(device_id, normalized, row["stored_name"])
+        conn.execute(
+            "DELETE FROM device_files WHERE id=?",
+            (file_id,),
+        )
+        conn.commit()
+    if storage_path.exists():
+        storage_path.unlink()
+    return {"deleted": file_id}
 
-    const created = document.createElement('td');
-    created.textContent = log.created_at || '';
 
-    const device = document.createElement('td');
-    device.textContent = log.device_name || log.device_id || '';
+@app.post("/api/devices/{device_id}/domains/{domain}/files/{file_id}/inject")
+def enqueue_inject_file(device_id: str, domain: str, file_id: int) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="ë””ë°”ì´ìŠ¤ë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+        row = fetch_device_file(conn, device_id, normalized, file_id)
+        job = create_job(
+            conn,
+            device_id,
+            normalized,
+            "inject_file",
+            {
+                "file_id": row["id"],
+                "filename": row["filename"],
+                "version": row["version"],
+                "download_path": f"/api/devices/{device_id}/domains/{normalized}/files/{row['id']}/download",
+            },
+        )
+        conn.execute(
+            """
+            UPDATE device_files
+            SET last_injected_status='pending',
+                last_injected_job_id=?,
+                last_injected_at=NULL
+            WHERE id=?
+            """,
+            (job["id"], row["id"]),
+        )
+        conn.commit()
+    return {"job": job}
 
-    const mailFrom = document.createElement('td');
-    mailFrom.textContent = log.mail_from || '';
 
-    const rcpt = document.createElement('td');
-    rcpt.textContent = log.rcpt_to || '';
+@app.post("/api/devices/{device_id}/heartbeat", response_model=HeartbeatResponse)
+def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
+    normalized_active = normalize_domain(payload.active_domain or "naver")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="ë””ë°”ì´ìŠ¤ë¥¼ ì°¾ì„ ìˆ˜ ì—†ìŠµë‹ˆë‹¤.")
+        now = now_ts()
+        conn.execute(
+            """
+            UPDATE devices
+            SET name=?, active_domain=?, status='connected', last_seen=?, updated_at=?
+            WHERE id=?
+            """,
+            (payload.device_name, normalized_active, now, now, device_id),
+        )
+        for state in payload.domain_states:
+            domain = normalize_domain(state.domain)
+            conn.execute(
+                """
+                UPDATE device_configs
+                SET client_db_version=COALESCE(?, client_db_version),
+                    client_total=COALESCE(?, client_total),
+                    client_pending=COALESCE(?, client_pending),
+                    client_sent=COALESCE(?, client_sent),
+                    client_failed=COALESCE(?, client_failed),
+                    client_block=COALESCE(?, client_block),
+                    client_removed=COALESCE(?, client_removed),
+                    client_updated_at=?
+                WHERE device_id=? AND domain=?
+                """,
+                (
+                    state.local_db_version,
+                    state.total,
+                    state.pending,
+                    state.sent,
+                    state.failed,
+                    state.block,
+                    state.removed,
+                    now,
+                    device_id,
+                    domain,
+                ),
+            )
+        dispatched_jobs: List[JobDispatchPayload] = []
+        for report in payload.job_reports:
+            updated_row = update_job_status(
+                conn,
+                device_id,
+                report.job_id,
+                report.status.lower(),
+                report.message,
+                report.result,
+                report.error,
+            )
+            if updated_row and report.status.lower() in {"success", "failed", "cancelled"}:
+                handle_job_completion(conn, updated_row, report)
+        pending_jobs = conn.execute(
+            """
+            SELECT *
+            FROM jobs
+            WHERE device_id=? AND status='pending' AND cancel_requested=0
+            ORDER BY created_at ASC
+            """,
+            (device_id,),
+        ).fetchall()
+        for row in pending_jobs:
+            conn.execute(
+                "UPDATE jobs SET status='dispatched', queued_at=? WHERE id=?",
+                (now, row["id"]),
+            )
+            dispatched_jobs.append(JobDispatchPayload(**serialize_job_dispatch(row)))
+        control_rows = conn.execute(
+            """
+            SELECT id, cancel_requested
+            FROM jobs
+            WHERE device_id=? AND cancel_requested=1 AND status IN ('dispatched', 'running')
+            """,
+            (device_id,),
+        ).fetchall()
+        config_rows = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=?",
+            (device_id,),
+        ).fetchall()
+        device_row = conn.execute(
+            "SELECT active_domain FROM devices WHERE id=?",
+            (device_id,),
+        ).fetchone()
+        conn.commit()
+    active_domain = device_row["active_domain"] if device_row else normalized_active
+    configs = {row["domain"]: serialize_config(to_dict(row)) for row in config_rows}
+    job_controls = [
+        JobControlPayload(job_id=row["id"], cancel_requested=bool(row["cancel_requested"]))
+        for row in control_rows
+        if row["cancel_requested"]
+    ]
+    return HeartbeatResponse(
+        active_domain=active_domain,
+        configs=configs,
+        jobs=dispatched_jobs,
+        job_controls=job_controls,
+    )
 
-    const result = document.createElement('td');
-    result.textContent = log.success ? '¼º°ø' : '½ÇÆĞ';
 
-    const response = document.createElement('td');
-    response.className = 'log-response';
-    response.textContent = (log.response || '').slice(0, 400);
+if __name__ == "__main__":
+    import uvicorn
 
-    row.append(created, device, mailFrom, rcpt, result, response);
-    tbody.append(row);
-  });
-}
-
-async function clearLogs() {
-  const deviceSelect = document.getElementById('logDevice');
-  const deviceId = deviceSelect.value;
-  const scope = deviceId && deviceId !== 'all' ? '¼±ÅÃÇÑ µğ¹ÙÀÌ½º ·Î±×¸¦' : '¸ğµç ·Î±×¸¦';
-  if (!confirm(`${scope} »èÁ¦ÇÏ½Ã°Ú½À´Ï±î?`)) {
-    return;
-  }
-  const url = deviceId && deviceId !== 'all' ? `/api/logs?device_id=${encodeURIComponent(deviceId)}` : '/api/logs';
-  try {
-    await requestJson(url, { method: 'DELETE' });
-    await refreshLogs(true);
-  } catch (err) {
-    alert(err.message || err);
-  }
-}
-
-async function refreshLogs(showAlert = false) {
-  try {
-    const deviceSelect = document.getElementById('logDevice');
-    const limitSelect = document.getElementById('logLimit');
-    const deviceId = deviceSelect.value;
-    const limit = parseInt(limitSelect.value, 10) || 20;
-    let url = `/api/logs?limit=${limit}`;
-    if (deviceId && deviceId !== 'all') {
-      url += `&device_id=${encodeURIComponent(deviceId)}`;
-    }
-    const data = await requestJson(url);
-    renderLogs(data);
-  } catch (err) {
-    if (showAlert) {
-      alert(err.message || err);
-    } else {
-      console.error('·Î±× Á¶È¸ ½ÇÆĞ', err);
-    }
-  }
-}
-
-document.getElementById('refreshLogsBtn').addEventListener('click', () => refreshLogs(true));
-document.getElementById('clearLogsBtn').addEventListener('click', () => clearLogs());
-document.getElementById('logLimit').addEventListener('change', () => refreshLogs());
-document.getElementById('logDevice').addEventListener('change', () => refreshLogs());
-
-refresh();
-refreshLogs();
-setInterval(refresh, POLL_MS);
-setInterval(() => refreshLogs(), LOG_POLL_MS);
-</script>
-</body>
-</html>
-"""
-
-@app.get("/")
-async def index():
-    return EUCKRHTMLResponse(content=HTML_PAGE)
+    uvicorn.run(app, host="0.0.0.0", port=8000)

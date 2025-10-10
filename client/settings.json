@@ -1,9 +1,12 @@
 {
   "server_url": "http://127.0.0.1:8000",
-  "device_name": "phone1",
-  "device_key": "phone1_id",
+  "device_name": "Phone1",
+  "device_id": "ec6746ec40e341d4b8c86835305312ae",
   "interval": 5,
   "timeout": 15,
-  "smtp_host": "smtp.example.com",
-  "smtp_port": 25
+  "active_domain": "naver",
+  "local_versions": {
+    "naver": 1,
+    "daum": null
+  }
 }

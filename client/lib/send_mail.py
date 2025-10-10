@@ -1,4 +1,4 @@
-# -*- coding: euc-kr -*-
+# -*- coding: utf-8 -*-
 import random
 import smtplib
 import telnetlib
@@ -78,9 +78,9 @@ def send_mail(
                 [recipient_email],
                 _encode_euc_kr(message),
             )
-        return True, "ÀÌ¸ŞÀÏ Àü¼Û ¼º°ø"
+        return True, "ì´ë©”ì¼ ì „ì†¡ ì„±ê³µ"
     except Exception as exc:  # pylint: disable=broad-except
-        return False, f"ÀÌ¸ŞÀÏ Àü¼Û ½ÇÆĞ: {exc}"
+        return False, f"ì´ë©”ì¼ ì „ì†¡ ì‹¤íŒ¨: {exc}"
 
 
 def send_mail_telnet(
@@ -146,13 +146,13 @@ def send_mail_telnet(
 
         return "\n".join(filter(None, responses))
     except Exception as exc:  # pylint: disable=broad-except
-        return f"ÅÚ³İÀ» ÅëÇÑ ÀÌ¸ŞÀÏ Àü¼Û ½ÇÆĞ: {exc}"
+        return f"í…”ë„·ì„ í†µí•œ ì´ë©”ì¼ ì „ì†¡ ì‹¤íŒ¨: {exc}"
 
 
 if __name__ == "__main__":
     sender = "mobile2@elite-watch.com"
     recipient = "nanagame2@naver.com"
-    subject = "ÅÚ³İ »ùÇÃ"
+    subject = "í…”ë„· ìƒ˜í”Œ"
     header_text = (
         f"From: {sender}\r\n"
         f"To: {recipient}\r\n"
@@ -161,11 +161,11 @@ if __name__ == "__main__":
         "Content-Type: text/plain; charset=euc-kr\r\n"
         "Content-Transfer-Encoding: 8bit\r\n"
         "\r\n"
-        "ÅÚ³İ Àü¼Û Å×½ºÆ® º»¹®ÀÔ´Ï´Ù.\r\n"
+        "í…”ë„· ì „ì†¡ í…ŒìŠ¤íŠ¸ ë³¸ë¬¸ì…ë‹ˆë‹¤.\r\n"
     )
-    print("¸ŞÀÏ Àü¼ÛÀ» ½ÃÀÛÇÕ´Ï´Ù...")
+    print("ë©”ì¼ ì „ì†¡ì„ ì‹œì‘í•©ë‹ˆë‹¤...")
     server_host = get_mx_server_for_email(recipient)
-    print(f"¼±ÅÃµÈ SMTP ¼­¹ö: {server_host}")
+    print(f"ì„ íƒëœ SMTP ì„œë²„: {server_host}")
     result = send_mail_telnet(
         smtp_server=server_host,
         sender_email=sender,
