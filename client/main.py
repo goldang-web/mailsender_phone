@@ -941,14 +941,15 @@ class MailClient:
             print(display_line)
         else:
             label = "Block" if delivery_status == "block" else "Fail"
-            for recipient in recipients:
+            for index, recipient in enumerate(recipients):
+                is_primary = index == 0
                 log_line = self._format_dispatch_log_line(label, 0, recipient)
                 display_line = self._format_dispatch_display_line(
                     label,
                     recipient,
+                    bcc_total if is_primary else 0,
                     0,
-                    0,
-                    False,
+                    is_primary,
                     self.device_name,
                 )
                 dispatch_logs.append(
@@ -959,9 +960,9 @@ class MailClient:
                         "sequence": 0,
                         "delivery_status": delivery_status,
                         "detail": detail_line or status_line,
-                        "bcc_total": 0,
+                        "bcc_total": bcc_total if is_primary else 0,
                         "anchor_total": 0,
-                        "is_primary": False,
+                        "is_primary": is_primary,
                     }
                 )
         if delivery_status != "sent":
@@ -1432,14 +1433,15 @@ class MailClient:
                         is_block = outcome.delivery_status == "block"
                         label = "Block" if is_block else "Fail"
                         for offset, recipient in enumerate(recipient_emails, start=1):
+                            is_primary = offset == 1
                             sequence_for_log = processed - group_size_actual + offset
                             log_line = self._format_dispatch_log_line(label, sequence_for_log, recipient)
                             display_line = self._format_dispatch_display_line(
                                 label,
                                 recipient,
-                                0,
-                                0,
-                                False,
+                                bcc_count if is_primary else 0,
+                                anchor_count if is_primary else 0,
+                                is_primary,
                                 self.device_name,
                             )
                             dispatch_logs.append(
@@ -1450,9 +1452,9 @@ class MailClient:
                                     "sequence": sequence_for_log,
                                     "delivery_status": "throttle" if throttle_detected else outcome.delivery_status,
                                     "detail": detail_for_log,
-                                    "bcc_total": 0,
-                                    "anchor_total": 0,
-                                    "is_primary": False,
+                                    "bcc_total": bcc_count if is_primary else 0,
+                                    "anchor_total": anchor_count if is_primary else 0,
+                                    "is_primary": is_primary,
                                 }
                             )
                             print(display_line)
