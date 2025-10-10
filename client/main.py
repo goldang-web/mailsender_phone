@@ -1017,6 +1017,7 @@ class MailClient:
         last_error: Optional[str] = None
         bcc_processed = 0
         anchor_processed = 0
+        anchor_retry_pending = 0
         dispatched_db_total = 0
         progress_interval = min(3.0, max(1.0, float(self.interval or 3)))
         last_report_at = time.monotonic()
@@ -1281,18 +1282,25 @@ class MailClient:
                     )
 
                 def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
-                    nonlocal dispatched_db_total
+                    nonlocal dispatched_db_total, anchor_retry_pending
                     if not group:
                         return group
                     group.injected = []
                     group_db_size = 1 + len(group.bcc)
                     start_total = dispatched_db_total
                     end_total = start_total + group_db_size
+                    if not anchor_enabled:
+                        anchor_retry_pending = 0
+                        dispatched_db_total = end_total
+                        return group
                     anchors_needed = 0
-                    if anchor_enabled and anchor_interval > 0:
+                    if anchor_interval > 0:
                         anchors_needed = (end_total // anchor_interval) - (start_total // anchor_interval)
-                        if anchors_needed > 0 and anchor_email:
-                            group.injected = [anchor_email] * anchors_needed
+                    if anchor_retry_pending > 0:
+                        anchors_needed = max(anchors_needed, anchor_retry_pending)
+                    if anchors_needed > 0 and anchor_email:
+                        group.injected = [anchor_email] * anchors_needed
+                        anchor_retry_pending = max(0, anchor_retry_pending - len(group.injected))
                     dispatched_db_total = end_total
                     return group
 
@@ -1312,6 +1320,7 @@ class MailClient:
                 def process_future(future: Future, group: DispatchGroup) -> None:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
                     nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
+                    nonlocal anchor_retry_pending
                     try:
                         outcome = future.result()
                     except Exception as exc:  # pylint: disable=broad-except
@@ -1479,7 +1488,10 @@ class MailClient:
                     if group.bcc:
                         print(f"  ↳ BCC 대상 {len(group.bcc)}건 포함")
                     if group.injected:
-                        anchor_processed += len(group.injected)
+                        if outcome.delivery_status == "sent":
+                            anchor_processed += len(group.injected)
+                        else:
+                            anchor_retry_pending += len(group.injected)
                         anchor_display = f"  ↳ 알박기 대상 {len(group.injected)}건 포함"
                         print(anchor_display)
                         anchor_log_line = self._format_dispatch_log_line(
