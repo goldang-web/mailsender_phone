@@ -18,9 +18,10 @@ from urllib3.util.retry import Retry
 
 from smtp_utils import send_via_telnet
 from urllib.parse import urlparse, urlunparse
+from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.3"
+APP_VERSION = "0.0.4"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -266,6 +267,8 @@ class MailClient:
         self.job_controls: Dict[str, Dict[str, object]] = {}
         self._state_errors: Dict[str, str] = {}
         self._recovery_failures: Dict[str, str] = {}
+        self.public_ip: Optional[str] = None
+        self._last_ip_refresh: float = 0.0
 
     # ------------------------------------------------------------------ #
     # 설정/환경 관리
@@ -293,6 +296,22 @@ class MailClient:
             pass
         self.session = requests.Session()
         self._configure_session()
+
+    def refresh_public_ip(self, force: bool = False) -> Optional[str]:
+        now = time.time()
+        if not force and self.public_ip and (now - self._last_ip_refresh) < 60:
+            return self.public_ip
+        try:
+            ip = get_public_ipv4()
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[IP 조회 오류] {exc}")
+            ip = None
+        self._last_ip_refresh = now
+        if ip:
+            if ip != self.public_ip:
+                print(f"[공인 IP] {ip}")
+            self.public_ip = ip
+        return self.public_ip
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         url = join_url(self.server_url, path)
@@ -484,9 +503,11 @@ class MailClient:
         }
 
     def register(self) -> None:
+        self.refresh_public_ip(force=True)
         payload = {
             "device_name": self.device_name,
             "device_id": self.device_id or None,
+            "public_ip": self.public_ip,
         }
         response = self._request("post", "/api/devices/register", json=payload)
         response.raise_for_status()
@@ -494,6 +515,8 @@ class MailClient:
         self.device_id = data["device_id"]
         self.device_name = data.get("name", self.device_name)
         self.active_domain = data.get("active_domain", self.active_domain)
+        if data.get("public_ip"):
+            self.public_ip = data["public_ip"]
         print(f"[등록] 디바이스 ID: {self.device_id}")
         self.persist()
 
@@ -505,6 +528,7 @@ class MailClient:
         domain_states: List[Dict[str, object]],
         job_reports: List[JobResult],
     ) -> Dict[str, object]:
+        self.refresh_public_ip()
         payload = {
             "device_name": self.device_name,
             "active_domain": self.active_domain,
@@ -519,11 +543,14 @@ class MailClient:
                 }
                 for report in job_reports
             ],
+            "public_ip": self.public_ip,
         }
         response = self._request("post", f"/api/devices/{self.device_id}/heartbeat", json=payload)
         response.raise_for_status()
         data = response.json()
         self.active_domain = data.get("active_domain", self.active_domain)
+        if data.get("public_ip"):
+            self.public_ip = data["public_ip"]
         controls = data.get("job_controls") or []
         if isinstance(controls, Iterable):
             self._update_job_controls(controls)
@@ -638,6 +665,8 @@ class MailClient:
             return self.handle_single_send(domain, payload, job_id)
         if job_type == "batch_send":
             return self.handle_batch_send(domain, payload, job_id)
+        if job_type == "change_ip":
+            return self.handle_change_ip(job_id)
         return JobResult(job_id=job_id, status="failed", message="지원하지 않는 작업 유형입니다.")
 
     def handle_inject(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
@@ -1192,6 +1221,26 @@ class MailClient:
             message=final_message,
             result=summary,
             error=error_message,
+        )
+
+    def handle_change_ip(self, job_id: str) -> JobResult:
+        print("[IP 변경] 비행기 모드 토글을 시작합니다.")
+        previous_ip = self.public_ip
+        try:
+            new_ip = change_mobile_ip_at_phone()
+        except Exception as exc:  # pylint: disable=broad-except
+            return JobResult(job_id=job_id, status="failed", message=f"IP 변경 중 예외: {exc}")
+        if not new_ip:
+            return JobResult(job_id=job_id, status="failed", message="새 공인 IP를 확인하지 못했습니다.")
+        self.public_ip = new_ip
+        self._last_ip_refresh = time.time()
+        message = f"공인 IP 변경 완료: {previous_ip or '-'} → {new_ip}"
+        print(f"[IP 변경 완료] {message}")
+        return JobResult(
+            job_id=job_id,
+            status="success",
+            message=message,
+            result={"public_ip": new_ip},
         )
 
     # ------------------------------------------------------------------ #
