@@ -20,7 +20,7 @@ from smtp_utils import send_via_telnet
 from urllib.parse import urlparse, urlunparse
 
 
-APP_VERSION = "0.0.2"
+APP_VERSION = "0.0.3"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -297,7 +297,6 @@ class MailClient:
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
         url = join_url(self.server_url, path)
         timeout = kwargs.pop("timeout", self.timeout)
-        print(f"[HTTP {method.upper()}] {url}")
         max_attempts = 3
         attempt = 0
         last_exc: Optional[requests.RequestException] = None
@@ -318,11 +317,6 @@ class MailClient:
             if last_exc:
                 raise last_exc
             raise RuntimeError("알 수 없는 HTTP 요청 오류가 발생했습니다.")
-        print(f"[HTTP {method.upper()}] 응답 {response.status_code}")
-        content_type = response.headers.get("content-type", "")
-        if response.content and ("json" in content_type or content_type.startswith("text/")):
-            preview = response.text[:150]
-            print(f"[HTTP {method.upper()}] 응답 본문 미리보기: {preview}")
         return response
 
     @staticmethod
