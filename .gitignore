@@ -1,0 +1,35 @@
+# macOS
+.DS_Store
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+*/.venv/
+env/
+*/env/
+
+# Local environment files
+.env
+*.env
+
+# SQLite databases generated at runtime
+*.db-shm
+*.db-wal
+
+# Client runtime artifacts
+client/data/
+client/logs/
+
+# Server runtime artifacts
+server/control.db
+server/email_logs.db
+server/domains/
+server/storage/
+
+# Misc
+*.log
+*.tmp
