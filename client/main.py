@@ -917,7 +917,14 @@ class MailClient:
             if bcc_total > 0:
                 meta_items.append(("bcc", bcc_total))
             log_line = self._format_dispatch_log_line("Sent", 1, rcpt_to, meta_items)
-            display_line = self._format_dispatch_display_line("Sent", rcpt_to, bcc_total, 0, True)
+            display_line = self._format_dispatch_display_line(
+                "Sent",
+                rcpt_to,
+                bcc_total,
+                0,
+                True,
+                self.device_name,
+            )
             dispatch_logs.append(
                 {
                     "log": log_line,
@@ -936,7 +943,14 @@ class MailClient:
             label = "Block" if delivery_status == "block" else "Fail"
             for recipient in recipients:
                 log_line = self._format_dispatch_log_line(label, 0, recipient)
-                display_line = self._format_dispatch_display_line(label, recipient, 0, 0, False)
+                display_line = self._format_dispatch_display_line(
+                    label,
+                    recipient,
+                    0,
+                    0,
+                    False,
+                    self.device_name,
+                )
                 dispatch_logs.append(
                     {
                         "log": log_line,
@@ -1396,6 +1410,7 @@ class MailClient:
                             bcc_count,
                             anchor_count,
                             True,
+                            self.device_name,
                         )
                         dispatch_logs.append(
                             {
@@ -1419,7 +1434,14 @@ class MailClient:
                         for offset, recipient in enumerate(recipient_emails, start=1):
                             sequence_for_log = processed - group_size_actual + offset
                             log_line = self._format_dispatch_log_line(label, sequence_for_log, recipient)
-                            display_line = self._format_dispatch_display_line(label, recipient, 0, 0, False)
+                            display_line = self._format_dispatch_display_line(
+                                label,
+                                recipient,
+                                0,
+                                0,
+                                False,
+                                self.device_name,
+                            )
                             dispatch_logs.append(
                                 {
                                     "log": log_line,
@@ -1791,6 +1813,7 @@ class MailClient:
         bcc_total: int,
         anchor_total: int,
         is_primary: bool,
+        device_name: Optional[str] = None,
     ) -> str:
         safe_label = (label or "").strip() or "Sent"
         target = (email or "").strip() or "-"
@@ -1800,6 +1823,9 @@ class MailClient:
                 display += f" 외 {bcc_total}"
             if anchor_total > 0:
                 display += f" + 알박기 {anchor_total}"
+        device_label = (device_name or "").strip()
+        if device_label:
+            display += f" | {device_label}"
         return display
 
     def _build_sqlite_from_emails(self, db_path: Path, emails: List[str], source_name: str) -> None:
