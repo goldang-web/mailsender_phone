@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import hashlib
+import shutil
 import json
 import sqlite3
 import threading
@@ -808,6 +809,22 @@ def load_device_summary() -> Dict[str, Any]:
     }
 
 
+def remove_device(device_id: str) -> None:
+    safe_device = device_id.replace("/", "_")
+    device_root = STORAGE_ROOT / "devices" / safe_device
+    with db_lock, get_conn() as conn:
+        row = conn.execute(
+            "SELECT id FROM devices WHERE id=?",
+            (device_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        conn.execute("DELETE FROM devices WHERE id=?", (device_id,))
+        conn.commit()
+    if device_root.exists():
+        shutil.rmtree(device_root, ignore_errors=True)
+
+
 def get_next_file_version(conn: sqlite3.Connection, device_id: str, domain: str) -> int:
     row = conn.execute(
         """
@@ -1307,6 +1324,12 @@ def register_device(payload: RegisterRequest) -> RegisterResponse:
         configs=configs,
         public_ip=device.get("public_ip"),
     )
+
+
+@app.delete("/api/devices/{device_id}")
+def delete_device_endpoint(device_id: str) -> Dict[str, Any]:
+    remove_device(device_id)
+    return {"device_id": device_id, "deleted": True}
 
 
 @app.put("/api/devices/{device_id}/domains/{domain}/config")
