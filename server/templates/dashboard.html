@@ -652,13 +652,15 @@ const JOB_STATUS_LABELS = {
 };
 const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
 
-const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "rcpt_to"];
+const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 6;
 const CARD_COLUMNS_DEFAULT = 4;
 const BCC_MIN = 1;
 const BCC_MAX = 30;
+const ANCHOR_MIN = 1;
+const ANCHOR_MAX = 1000;
 const fieldCache = {};
 const cardRegistry = {};
 
@@ -686,6 +688,22 @@ function formatBccValue(value) {
   return String(clampNumber(parsed, BCC_MIN, BCC_MAX, BCC_MIN));
 }
 
+function parseAnchorInput(value) {
+  if (value === undefined || value === null) return 0;
+  const trimmed = String(value).trim();
+  if (!trimmed) return 0;
+  if (trimmed === "0") return 0;
+  return clampNumber(trimmed, ANCHOR_MIN, ANCHOR_MAX, ANCHOR_MIN);
+}
+
+function formatAnchorValue(value) {
+  const parsed = typeof value === "number" ? value : parseInt(value, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return "0";
+  }
+  return String(clampNumber(parsed, ANCHOR_MIN, ANCHOR_MAX, ANCHOR_MIN));
+}
+
 function sanitizeSessionValue(value) {
   const parsed = parseInt(String(value ?? "").trim(), 10);
   if (Number.isNaN(parsed) || parsed < 1) {
@@ -704,6 +722,18 @@ function sanitizeBccValue(value) {
     return "0";
   }
   return String(clampNumber(parsed, BCC_MIN, BCC_MAX, BCC_MIN));
+}
+
+function sanitizeAnchorValue(value) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || trimmed === "0") {
+    return "0";
+  }
+  const parsed = parseInt(trimmed, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return "0";
+  }
+  return String(clampNumber(parsed, ANCHOR_MIN, ANCHOR_MAX, ANCHOR_MIN));
 }
 
 function applyCardColumns(value) {
@@ -731,6 +761,8 @@ function initialFieldValues(config) {
     header: config?.header || "",
     session_count: sanitizeSessionValue(config?.session_count ?? "1"),
     bcc_count: formatBccValue(config?.bcc_count ?? 0),
+    anchor_interval: formatAnchorValue(config?.anchor_interval ?? 0),
+    anchor_email: config?.anchor_email || "",
     rcpt_to: config?.rcpt_to || "",
   };
 }
@@ -776,6 +808,15 @@ function collectConfigPayload(card, currentDevice, domain) {
     bccInput.value = bccValue;
   }
 
+  const anchorIntervalInput = card.querySelector('[data-field="anchor_interval"]');
+  const anchorIntervalValue = sanitizeAnchorValue(anchorIntervalInput?.value ?? "0");
+  if (anchorIntervalInput && anchorIntervalInput.value !== anchorIntervalValue) {
+    anchorIntervalInput.value = anchorIntervalValue;
+  }
+
+  const anchorEmailInput = card.querySelector('[data-field="anchor_email"]');
+  const anchorEmailValue = anchorEmailInput?.value?.trim() ?? "";
+
   return {
     payload: {
       helo: card.querySelector('[data-field="helo"]').value.trim(),
@@ -784,6 +825,8 @@ function collectConfigPayload(card, currentDevice, domain) {
       header: card.querySelector('[data-field="header"]').value,
       session_count: Number(sessionValue) || 1,
       bcc_count: parseBccInput(bccValue),
+      anchor_interval: parseAnchorInput(anchorIntervalValue),
+      anchor_email: anchorEmailValue,
       rcpt_to: card.querySelector('[data-field="rcpt_to"]').value.trim(),
     },
   };
@@ -1278,6 +1321,10 @@ function populateConfigForm(card, device, domain) {
   if (sessionInput && document.activeElement !== sessionInput) sessionInput.value = cache.values.session_count;
   const bccInput = card.querySelector('[data-field="bcc_count"]');
   if (bccInput && document.activeElement !== bccInput) bccInput.value = cache.values.bcc_count;
+  const anchorIntervalInput = card.querySelector('[data-field="anchor_interval"]');
+  if (anchorIntervalInput && document.activeElement !== anchorIntervalInput) anchorIntervalInput.value = cache.values.anchor_interval;
+  const anchorEmailInput = card.querySelector('[data-field="anchor_email"]');
+  if (anchorEmailInput && document.activeElement !== anchorEmailInput) anchorEmailInput.value = cache.values.anchor_email;
   const rcptInput = card.querySelector('[data-field="rcpt_to"]');
   if (rcptInput && document.activeElement !== rcptInput) rcptInput.value = cache.values.rcpt_to;
 }
@@ -1368,6 +1415,19 @@ function attachCardEvents(card) {
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       markFieldDirty(currentDevice.id, domain, "bcc_count", sanitized);
+    });
+  }
+
+  const anchorIntervalInput = card.querySelector('[data-field="anchor_interval"]');
+  if (anchorIntervalInput) {
+    anchorIntervalInput.addEventListener("blur", () => {
+      const sanitized = sanitizeAnchorValue(anchorIntervalInput.value);
+      if (anchorIntervalInput.value !== sanitized) {
+        anchorIntervalInput.value = sanitized;
+      }
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, "anchor_interval", sanitized);
     });
   }
 
@@ -1540,6 +1600,16 @@ function buildDeviceCard(device) {
         <label class="field compact">
           <span>BCC 수</span>
           <input type="number" class="input-compact" data-field="bcc_count" min="0" max="30" step="1" placeholder="0~30">
+        </label>
+      </div>
+      <div class="field-row">
+        <label class="field compact">
+          <span>알박기 간격</span>
+          <input type="number" class="input-compact" data-field="anchor_interval" min="0" max="1000" step="1" placeholder="0=비활성">
+        </label>
+        <label class="field">
+          <span>알박기 메일</span>
+          <input type="text" data-field="anchor_email" placeholder="test@example.com">
         </label>
       </div>
       <label class="field">

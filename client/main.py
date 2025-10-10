@@ -8,7 +8,7 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.5"
+APP_VERSION = "0.0.6"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -228,6 +228,7 @@ class DispatchEmail:
 class DispatchGroup:
     primary: DispatchEmail
     bcc: List[DispatchEmail]
+    injected: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -374,6 +375,25 @@ class MailClient:
         except (TypeError, ValueError):
             return 0
         return max(0, min(30, count))
+
+    @staticmethod
+    def _sanitize_anchor_interval(value: object) -> int:
+        try:
+            interval = int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+        return max(0, min(1000, interval))
+
+    @staticmethod
+    def _sanitize_anchor_email(value: object) -> Optional[str]:
+        if value is None:
+            return None
+        candidate = str(value).strip()
+        if not candidate:
+            return None
+        if not EMAIL_PATTERN.fullmatch(candidate):
+            return None
+        return candidate.lower()
 
     @staticmethod
     def _sanitize_session_count(value: object) -> int:
@@ -826,6 +846,9 @@ class MailClient:
         session_count = max(1, self._sanitize_session_count(config.get("session_count")))
         bcc_count = self._sanitize_bcc_count(config.get("bcc_count"))
         group_size = max(1, 1 + bcc_count)
+        anchor_interval = self._sanitize_anchor_interval(config.get("anchor_interval"))
+        anchor_email = self._sanitize_anchor_email(config.get("anchor_email"))
+        anchor_enabled = bool(anchor_interval and anchor_email)
 
         processed = 0
         sent_count = 0
@@ -833,6 +856,8 @@ class MailClient:
         failed_count = 0
         last_error: Optional[str] = None
         bcc_processed = 0
+        anchor_processed = 0
+        dispatched_db_total = 0
         progress_interval = min(3.0, max(1.0, float(self.interval or 3)))
         last_report_at = time.monotonic()
         domain_totals: Dict[str, int] = {status: 0 for status in EMAIL_STATUSES}
@@ -844,12 +869,13 @@ class MailClient:
                 "failed": failed_count,
                 "block": block_count,
                 "bcc": bcc_processed,
+                "anchor": anchor_processed,
             }
 
         def format_summary(prefix: str) -> str:
             return (
                 f"{prefix} 처리={processed} 성공={sent_count} "
-                f"실패={failed_count} 차단={block_count} BCC={bcc_processed}"
+                f"실패={failed_count} 차단={block_count} BCC={bcc_processed} 알박기={anchor_processed}"
             )
 
         def emit_progress(force: bool = False) -> None:
@@ -861,7 +887,7 @@ class MailClient:
             progress_message = (
                 f"[진행] {domain_label} 처리={summary_snapshot['processed']} "
                 f"성공={summary_snapshot['sent']} 실패={summary_snapshot['failed']} "
-                f"차단={summary_snapshot['block']} BCC={summary_snapshot['bcc']}"
+                f"차단={summary_snapshot['block']} BCC={summary_snapshot['bcc']} 알박기={summary_snapshot['anchor']}"
             )
             domain_state = self._build_domain_state_snapshot(normalized, domain_totals.copy())
             self.send_job_report(
@@ -1037,6 +1063,9 @@ class MailClient:
                 def deliver_group(group: DispatchGroup) -> DispatchOutcome:
                     rcpt_to = group.primary.email
                     bcc_emails = [item.email for item in group.bcc if item.email]
+                    injected_emails = [email for email in (group.injected or []) if email]
+                    if injected_emails:
+                        bcc_emails.extend(injected_emails)
                     success, response_text = send_via_telnet(
                         smtp_host=config.get("smtp_host", ""),
                         smtp_port=int(config.get("smtp_port") or 25),
@@ -1057,6 +1086,22 @@ class MailClient:
                         detail_line=detail_line,
                     )
 
+                def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
+                    nonlocal dispatched_db_total
+                    if not group:
+                        return group
+                    group.injected = []
+                    group_db_size = 1 + len(group.bcc)
+                    start_total = dispatched_db_total
+                    end_total = start_total + group_db_size
+                    anchors_needed = 0
+                    if anchor_enabled and anchor_interval > 0:
+                        anchors_needed = (end_total // anchor_interval) - (start_total // anchor_interval)
+                        if anchors_needed > 0 and anchor_email:
+                            group.injected = [anchor_email] * anchors_needed
+                    dispatched_db_total = end_total
+                    return group
+
                 initial_rows = reserve_candidates(fetch_batch_size)
                 if not initial_rows:
                     empty_summary = build_summary()
@@ -1072,7 +1117,7 @@ class MailClient:
 
                 def process_future(future: Future, group: DispatchGroup) -> None:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
-                    nonlocal stop_requested, fatal_error, stop_reason, bcc_processed
+                    nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
                     try:
                         outcome = future.result()
                     except Exception as exc:  # pylint: disable=broad-except
@@ -1157,13 +1202,17 @@ class MailClient:
                     if outcome.delivery_status == "sent":
                         sent_base = sent_count
                         sent_count += group_size_actual
-                        bcc_total = len(group.bcc)
+                        bcc_total = len(group.bcc) + len(group.injected)
                         for offset, recipient in enumerate(recipient_emails, start=1):
                             sequence = sent_base + offset
                             is_primary = offset == 1
                             meta_items: List[Tuple[str, object]] = []
-                            if is_primary and bcc_total > 0:
-                                meta_items = [("bcc", bcc_total), ("primary", 1)]
+                            if is_primary and (group.bcc or group.injected):
+                                meta_items = [("primary", 1)]
+                                if group.bcc:
+                                    meta_items.append(("bcc", len(group.bcc)))
+                                if group.injected:
+                                    meta_items.append(("anchor", len(group.injected)))
                             log_line = self._format_dispatch_log_line("Sent", sequence, recipient, meta_items)
                             display_line = self._format_dispatch_display_line("Sent", recipient, bcc_total, is_primary)
                             dispatch_logs.append(
@@ -1209,6 +1258,29 @@ class MailClient:
                             last_error = detail_for_log
                     if group.bcc:
                         print(f"  ↳ BCC 대상 {len(group.bcc)}건 포함")
+                    if group.injected:
+                        anchor_processed += len(group.injected)
+                        anchor_display = f"  ↳ 알박기 대상 {len(group.injected)}건 포함"
+                        print(anchor_display)
+                        anchor_log_line = self._format_dispatch_log_line(
+                            "Anchor",
+                            processed,
+                            group.injected[0] if group.injected else None,
+                            [("count", len(group.injected))],
+                        )
+                        dispatch_logs.append(
+                            {
+                                "log": anchor_log_line,
+                                "display": anchor_display,
+                                "email": group.injected[0] if group.injected else None,
+                                "sequence": processed,
+                                "delivery_status": outcome.delivery_status,
+                                "detail": detail_for_log,
+                                "bcc_total": 0,
+                                "is_primary": False,
+                                "anchor": list(group.injected),
+                            }
+                        )
                     if throttle_detected:
                         throttle_notice = matched_message or "네이버 발송 제한 응답 감지"
                         info_message = f"{throttle_notice} · IP 변경 시도"
@@ -1307,6 +1379,7 @@ class MailClient:
                             group = next_group()
                             if not group:
                                 break
+                            group = prepare_group_for_dispatch(group)
                             future = executor.submit(deliver_group, group)
                             inflight[future] = group
                         while inflight:

@@ -23,6 +23,8 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "header": "",
     "session_count": 1,
     "bcc_count": 0,
+    "anchor_interval": 0,
+    "anchor_email": "",
     "rcpt_to": "",
 }
 
@@ -60,6 +62,23 @@ def clamp_bcc_count(value: Any) -> int:
     except (TypeError, ValueError):
         return 0
     return max(0, min(30, count))
+
+
+def clamp_anchor_interval(value: Any) -> int:
+    try:
+        interval = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(1000, interval))
+
+
+def normalize_anchor_email(value: Any) -> str:
+    if value is None:
+        return ""
+    candidate = str(value).strip()
+    if not candidate:
+        return ""
+    return candidate
 
 
 def to_dict(row: sqlite3.Row) -> Dict[str, Any]:
@@ -279,6 +298,14 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN bcc_count INTEGER DEFAULT 0"
             )
+        if "anchor_interval" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN anchor_interval INTEGER DEFAULT 0"
+            )
+        if "anchor_email" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN anchor_email TEXT DEFAULT ''"
+            )
         job_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
@@ -322,9 +349,10 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                 """
                 INSERT INTO device_configs (
                     device_id, domain, helo, smtp_host, smtp_port,
-                    mail_from, header, session_count, bcc_count, rcpt_to, updated_at
+                    mail_from, header, session_count, bcc_count,
+                    anchor_interval, anchor_email, rcpt_to, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(device_id, domain) DO NOTHING
                 """,
                 (
@@ -337,6 +365,8 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG["header"],
                     DEFAULT_DOMAIN_CONFIG["session_count"],
                     DEFAULT_DOMAIN_CONFIG["bcc_count"],
+                    DEFAULT_DOMAIN_CONFIG["anchor_interval"],
+                    DEFAULT_DOMAIN_CONFIG["anchor_email"],
                     DEFAULT_DOMAIN_CONFIG["rcpt_to"],
                     now,
                 ),
@@ -395,6 +425,8 @@ def serialize_config(row: Dict[str, Any]) -> Dict[str, Any]:
         "header": row.get("header", ""),
         "session_count": session_value,
         "bcc_count": clamp_bcc_count(row.get("bcc_count", 0)),
+        "anchor_interval": clamp_anchor_interval(row.get("anchor_interval", 0)),
+        "anchor_email": normalize_anchor_email(row.get("anchor_email", "")),
         "rcpt_to": row.get("rcpt_to", ""),
         "updated_at": row.get("updated_at"),
         "client_db_version": row.get("client_db_version", 0),
@@ -876,6 +908,8 @@ class DeviceConfigPayload(BaseModel):
     header: Optional[str] = ""
     session_count: Optional[int] = 1
     bcc_count: Optional[int] = 0
+    anchor_interval: Optional[int] = 0
+    anchor_email: Optional[str] = ""
     rcpt_to: Optional[str] = ""
 
 
@@ -1075,10 +1109,12 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         now = now_ts()
         sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
+        sanitized_interval = clamp_anchor_interval(payload.anchor_interval or 0)
+        sanitized_anchor = normalize_anchor_email(payload.anchor_email or "")
         conn.execute(
             """
             UPDATE device_configs
-            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, session_count=?, bcc_count=?, rcpt_to=?, updated_at=?
+            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?, updated_at=?
             WHERE device_id=? AND domain=?
             """,
             (
@@ -1089,6 +1125,8 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
                 payload.header or "",
                 max(1, int(payload.session_count or 1)),
                 sanitized_bcc,
+                sanitized_interval,
+                sanitized_anchor,
                 payload.rcpt_to or "",
                 now,
                 device_id,
@@ -1129,6 +1167,8 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
     except (TypeError, ValueError):
         session_count = 1
     session_count = max(1, session_count)
+    anchor_interval = clamp_anchor_interval(base.get("anchor_interval", 0))
+    anchor_email = normalize_anchor_email(base.get("anchor_email", ""))
     return {
         "helo": base.get("helo", ""),
         "smtp_host": base.get("smtp_host", ""),
@@ -1137,6 +1177,8 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
         "header": base.get("header", ""),
         "session_count": session_count,
         "bcc_count": bcc_count,
+        "anchor_interval": anchor_interval,
+        "anchor_email": anchor_email,
         "rcpt_to": base.get("rcpt_to", ""),
     }
 
@@ -1184,6 +1226,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
         config_snapshot["bcc_count"] = 0
+        config_snapshot["anchor_interval"] = 0
         rcpt_to = (payload.rcpt_to or "").strip() or config_snapshot.get("rcpt_to")
         if not rcpt_to:
             raise HTTPException(status_code=400, detail="RCPT TO 주소가 필요합니다.")
