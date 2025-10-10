@@ -22,7 +22,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.6"
+APP_VERSION = "0.0.7"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -40,6 +40,7 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "timeout": 15,
     "active_domain": "naver",
     "local_versions": {},
+    "domain_cycles": {},
 }
 
 DOMAIN_DB_SCHEMA = """
@@ -285,6 +286,20 @@ class MailClient:
         }
         for domain in DOMAINS:
             self.local_versions.setdefault(domain, None)
+        raw_cycle_config = config.get("domain_cycles") or {}
+        self.domain_cycles: Dict[str, Dict[str, object]] = {}
+        for domain in DOMAINS:
+            entry = raw_cycle_config.get(domain) or {}
+            cycles_value = entry.get("cycles", 0)
+            try:
+                cycles_count = int(cycles_value)
+            except (TypeError, ValueError):
+                cycles_count = 0
+            self.domain_cycles[domain] = {
+                "cycles": max(0, cycles_count),
+                "last_completed_at": entry.get("last_completed_at"),
+                "last_processed": entry.get("last_processed"),
+            }
         self.session = requests.Session()
         self._configure_session()
         self.domain_paths: Dict[str, Path] = {
@@ -380,6 +395,55 @@ class MailClient:
         )
         return any(signature in message for signature in retry_signatures)
 
+    def _get_cycle_entry(self, domain: str) -> Dict[str, object]:
+        normalized = (domain or "").lower()
+        entry = self.domain_cycles.get(normalized)
+        if not isinstance(entry, dict):
+            entry = {"cycles": 0, "last_completed_at": None}
+        cycles_value = entry.get("cycles", 0)
+        try:
+            cycles_count = int(cycles_value)
+        except (TypeError, ValueError):
+            cycles_count = 0
+        entry["cycles"] = max(0, cycles_count)
+        if "last_completed_at" not in entry:
+            entry["last_completed_at"] = entry.get("last_completed_at")
+        if entry.get("last_processed") is not None:
+            try:
+                entry["last_processed"] = int(entry.get("last_processed"))
+            except (TypeError, ValueError):
+                entry["last_processed"] = None
+        self.domain_cycles[normalized] = entry
+        return entry
+
+    def _record_cycle_completion(self, domain: str, processed_total: int) -> Dict[str, object]:
+        entry = self._get_cycle_entry(domain)
+        entry["cycles"] = int(entry.get("cycles", 0) or 0) + 1
+        entry["last_completed_at"] = now_iso()
+        try:
+            entry["last_processed"] = int(processed_total)
+        except (TypeError, ValueError):
+            entry["last_processed"] = processed_total
+        return entry
+
+    def _reset_cycle_stats(self, domain: str) -> Dict[str, object]:
+        entry = self._get_cycle_entry(domain)
+        entry["cycles"] = 0
+        entry["last_completed_at"] = None
+        entry.pop("last_processed", None)
+        return entry
+
+    def _cycle_snapshot(self, domain: str) -> Dict[str, object]:
+        entry = self._get_cycle_entry(domain)
+        cycles_count = int(entry.get("cycles", 0) or 0)
+        last_completed = entry.get("last_completed_at")
+        return {
+            "cycle_count": cycles_count,
+            "last_cycle_completed_at": last_completed,
+            "last_cycle_processed": entry.get("last_processed"),
+            "cycle_completed": cycles_count > 0,
+        }
+
     def persist(self) -> None:
         snapshot = self.config.copy()
         snapshot["server_url"] = self.server_url
@@ -389,6 +453,7 @@ class MailClient:
         snapshot["timeout"] = self.timeout
         snapshot["active_domain"] = self.active_domain
         snapshot["local_versions"] = self.local_versions
+        snapshot["domain_cycles"] = self.domain_cycles
         save_config(snapshot)
 
     # ------------------------------------------------------------------ #
@@ -537,15 +602,26 @@ class MailClient:
     ) -> Dict[str, object]:
         total_count = sum(totals.values())
         normalized = (domain or "").lower()
+        pending = totals.get("pending", 0)
+        reserved = totals.get("reserved", 0)
+        block = totals.get("block", 0)
+        remaining = pending + reserved + block
+        cycle_info = self._cycle_snapshot(normalized)
         return {
             "domain": normalized,
             "local_db_version": self.local_versions.get(normalized),
             "total": total_count,
             "pending": totals.get("pending", 0),
+            "reserved": reserved,
             "sent": totals.get("sent", 0),
             "failed": totals.get("failed", 0),
             "block": totals.get("block", 0),
             "removed": totals.get("removed", 0),
+            "remaining": remaining,
+            "cycle_completed": cycle_info.get("cycle_completed"),
+            "cycle_count": cycle_info.get("cycle_count"),
+            "last_cycle_completed_at": cycle_info.get("last_cycle_completed_at"),
+            "last_cycle_processed": cycle_info.get("last_cycle_processed"),
         }
 
     def register(self) -> None:
@@ -637,41 +713,18 @@ class MailClient:
     def collect_domain_states(self) -> List[Dict[str, object]]:
         states: List[Dict[str, object]] = []
         for domain, db_path in self.domain_paths.items():
+            totals: Dict[str, int] = {status: 0 for status in EMAIL_STATUSES}
             if not db_path.exists():
-                states.append(
-                    {
-                        "domain": domain,
-                        "local_db_version": self.local_versions.get(domain),
-                        "total": 0,
-                        "pending": 0,
-                        "sent": 0,
-                        "failed": 0,
-                        "block": 0,
-                        "removed": 0,
-                    }
-                )
+                states.append(self._build_domain_state_snapshot(domain, totals))
                 continue
             try:
                 with sqlite3.connect(db_path) as conn:
                     conn.row_factory = sqlite3.Row
-                    total_row = conn.execute("SELECT COUNT(*) AS cnt FROM emails").fetchone()
-                    totals = {status: 0 for status in EMAIL_STATUSES}
                     for row in conn.execute(
                         "SELECT status, COUNT(*) AS cnt FROM emails GROUP BY status"
                     ):
                         totals[row["status"]] = row["cnt"]
-                    states.append(
-                        {
-                            "domain": domain,
-                            "local_db_version": self.local_versions.get(domain),
-                            "total": total_row["cnt"] if total_row else 0,
-                            "pending": totals.get("pending", 0),
-                            "sent": totals.get("sent", 0),
-                            "failed": totals.get("failed", 0),
-                            "block": totals.get("block", 0),
-                            "removed": totals.get("removed", 0),
-                        }
-                    )
+                    states.append(self._build_domain_state_snapshot(domain, totals))
                     if domain in self._state_errors:
                         self._state_errors.pop(domain, None)
             except sqlite3.Error as error:
@@ -682,18 +735,7 @@ class MailClient:
                 if self._state_errors.get(domain) != message:
                     print(f"[오류] {message}")
                     self._state_errors[domain] = message
-                states.append(
-                    {
-                        "domain": domain,
-                        "local_db_version": self.local_versions.get(domain),
-                        "total": 0,
-                        "pending": 0,
-                        "sent": 0,
-                        "failed": 0,
-                        "block": 0,
-                        "removed": 0,
-                    }
-                )
+                states.append(self._build_domain_state_snapshot(domain, totals))
         return states
 
     # ------------------------------------------------------------------ #
@@ -707,6 +749,8 @@ class MailClient:
         print(f"[작업 수신] {job_type} (ID: {job_id})")
         if job_type == "inject_file":
             return self.handle_inject(domain, payload, job_id)
+        if job_type == "purge_domain":
+            return self.handle_purge_domain(domain, payload, job_id)
         if job_type == "single_send":
             return self.handle_single_send(domain, payload, job_id)
         if job_type == "batch_send":
@@ -745,6 +789,7 @@ class MailClient:
             return JobResult(job_id=job_id, status="failed", message=f"DB 갱신 실패: {error}")
 
         self.local_versions[normalized] = version
+        self._reset_cycle_stats(normalized)
         self.persist()
         print(f"[Inject 완료] {filename} -> {target_path}")
 
@@ -770,6 +815,76 @@ class MailClient:
             message=message,
             result=result_payload,
         )
+
+    def handle_purge_domain(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
+        if not domain:
+            return JobResult(job_id=job_id, status="failed", message="도메인 정보가 없습니다.")
+        normalized = domain.lower()
+        domain_label = DOMAIN_LABELS.get(normalized, normalized)
+        db_path = self.domain_paths.get(normalized)
+        if not db_path or not db_path.exists():
+            self.local_versions[normalized] = None
+            self._reset_cycle_stats(normalized)
+            cycle_snapshot = self._cycle_snapshot(normalized)
+            self.persist()
+            message = f"{domain_label} DB가 존재하지 않아 초기화할 항목이 없습니다."
+            return JobResult(
+                job_id=job_id,
+                status="success",
+                message=message,
+                result={
+                    "domain": normalized,
+                    "cleared_emails": 0,
+                    "cleared_meta": 0,
+                    "remaining": 0,
+                    "cycles_completed": cycle_snapshot.get("cycle_count"),
+                },
+            )
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                email_row = conn.execute("SELECT COUNT(*) AS cnt FROM emails").fetchone()
+                meta_row = conn.execute("SELECT COUNT(*) AS cnt FROM injection_meta").fetchone()
+                email_total = int(email_row["cnt"] if email_row else 0)
+                meta_total = int(meta_row["cnt"] if meta_row else 0)
+                conn.execute("DELETE FROM emails")
+                conn.execute("DELETE FROM injection_meta")
+                try:
+                    conn.execute("DELETE FROM sqlite_sequence WHERE name IN ('emails','injection_meta')")
+                except sqlite3.Error:
+                    pass
+                conn.commit()
+            try:
+                with sqlite3.connect(db_path) as vacuum_conn:
+                    vacuum_conn.execute("VACUUM")
+            except sqlite3.Error:
+                pass
+            self.local_versions[normalized] = None
+            self._reset_cycle_stats(normalized)
+            cycle_snapshot = self._cycle_snapshot(normalized)
+            self.persist()
+            message = (
+                f"{domain_label} DB 전체 삭제 완료 (이메일 {email_total}건, 메타 {meta_total}건 제거)"
+            )
+            return JobResult(
+                job_id=job_id,
+                status="success",
+                message=message,
+                result={
+                    "domain": normalized,
+                    "cleared_emails": email_total,
+                    "cleared_meta": meta_total,
+                    "remaining": 0,
+                    "cycles_completed": cycle_snapshot.get("cycle_count"),
+                },
+            )
+        except sqlite3.Error as exc:
+            return JobResult(
+                job_id=job_id,
+                status="failed",
+                message=f"{domain_label} DB 삭제 실패: {exc}",
+                error=str(exc),
+            )
 
     def handle_single_send(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
         config = payload.get("config") or {}
@@ -890,7 +1005,14 @@ class MailClient:
         last_report_at = time.monotonic()
         domain_totals: Dict[str, int] = {status: 0 for status in EMAIL_STATUSES}
 
-        def build_summary() -> Dict[str, int]:
+        def build_summary() -> Dict[str, object]:
+            remaining_count = (
+                domain_totals.get("pending", 0)
+                + domain_totals.get("reserved", 0)
+                + domain_totals.get("block", 0)
+            )
+            total_candidates = sum(domain_totals.values())
+            cycle_snapshot = self._cycle_snapshot(normalized)
             return {
                 "processed": processed,
                 "sent": sent_count,
@@ -898,13 +1020,31 @@ class MailClient:
                 "block": block_count,
                 "bcc": bcc_processed,
                 "anchor": anchor_processed,
+                "remaining": remaining_count,
+                "total": total_candidates,
+                "reserved": domain_totals.get("reserved", 0),
+                "cycles_completed": cycle_snapshot.get("cycle_count"),
+                "last_cycle_at": cycle_snapshot.get("last_cycle_completed_at"),
             }
 
-        def format_summary(prefix: str) -> str:
-            return (
-                f"{prefix} 처리={processed} 성공={sent_count} "
-                f"실패={failed_count} 차단={block_count} BCC={bcc_processed} 알박기={anchor_processed}"
+        def format_summary(prefix: str, snapshot: Optional[Dict[str, object]] = None) -> str:
+            summary_snapshot = snapshot or build_summary()
+            processed_count = int(summary_snapshot.get("processed") or 0)
+            sent_total = int(summary_snapshot.get("sent") or 0)
+            failed_total = int(summary_snapshot.get("failed") or 0)
+            block_total = int(summary_snapshot.get("block") or 0)
+            bcc_total = int(summary_snapshot.get("bcc") or 0)
+            anchor_total = int(summary_snapshot.get("anchor") or 0)
+            remaining_total = int(summary_snapshot.get("remaining") or 0)
+            cycles_completed = int(summary_snapshot.get("cycles_completed") or 0)
+            message = (
+                f"{prefix} 처리={processed_count} 성공={sent_total} "
+                f"실패={failed_total} 차단={block_total} BCC={bcc_total} "
+                f"알박기={anchor_total} 잔여={remaining_total}"
             )
+            if cycles_completed > 0:
+                message = f"{message} · {cycles_completed}회 순환 완료"
+            return message
 
         def emit_progress(force: bool = False) -> None:
             nonlocal last_report_at
@@ -912,11 +1052,7 @@ class MailClient:
             if not force and now_point - last_report_at < progress_interval:
                 return
             summary_snapshot = build_summary()
-            progress_message = (
-                f"[진행] {domain_label} 처리={summary_snapshot['processed']} "
-                f"성공={summary_snapshot['sent']} 실패={summary_snapshot['failed']} "
-                f"차단={summary_snapshot['block']} BCC={summary_snapshot['bcc']} 알박기={summary_snapshot['anchor']}"
-            )
+            progress_message = format_summary(f"[진행] {domain_label}", summary_snapshot)
             domain_state = self._build_domain_state_snapshot(normalized, domain_totals.copy())
             self.send_job_report(
                 JobResult(job_id=job_id, status="running", message=progress_message, result=summary_snapshot),
@@ -986,10 +1122,15 @@ class MailClient:
                     domain_totals["pending"] = domain_totals.get("pending", 0) + reset_total
                     domain_totals["sent"] = max(0, domain_totals.get("sent", 0) - sent_total)
                     domain_totals["failed"] = max(0, domain_totals.get("failed", 0) - failed_total)
+                    domain_totals["reserved"] = 0
+                    cycle_entry = self._record_cycle_completion(normalized, reset_total)
+                    cycle_count = int(cycle_entry.get("cycles", 0) or 0)
+                    cycle_label = "1회 순환 완료" if cycle_count == 1 else f"{cycle_count}회 순환 완료"
                     restart_message = (
-                        f"{domain_label} 발송 대상 재가동: sent {sent_total}건, failed {failed_total}건을 pending으로 전환"
+                        f"{domain_label} {cycle_label} · sent {sent_total}건, failed {failed_total}건을 pending으로 전환"
                     )
                     print(f"[배치 발송] {restart_message}")
+                    self.persist()
                     try:
                         self.send_job_report(
                             JobResult(
@@ -1034,6 +1175,10 @@ class MailClient:
                         )
                         for row in rows
                     ]
+                    for row in rows:
+                        status_key = (row["status"] or "pending").lower()
+                        domain_totals[status_key] = max(0, domain_totals.get(status_key, 0) - 1)
+                    domain_totals["reserved"] = domain_totals.get("reserved", 0) + len(rows)
                     conn.executemany(
                         """
                         UPDATE emails
@@ -1067,6 +1212,10 @@ class MailClient:
                         ],
                     )
                     conn.commit()
+                    for record in release_list:
+                        domain_totals["reserved"] = max(0, domain_totals.get("reserved", 0) - 1)
+                        previous_status = (record.previous_status or "pending").lower()
+                        domain_totals[previous_status] = domain_totals.get(previous_status, 0) + 1
 
                 def next_group() -> Optional[DispatchGroup]:
                     if stop_requested:
@@ -1197,12 +1346,13 @@ class MailClient:
                     throttle_detected = matched_marker in throttle_marker_messages if matched_marker else False
                     error_text = None if outcome.delivery_status == "sent" else (detail_for_log or outcome.status_line or "")[-500:]
                     for prev_status in previous_statuses:
-                        if prev_status:
-                            domain_totals[prev_status] = max(0, domain_totals.get(prev_status, 0) - 1)
+                        status_key = (prev_status or "pending").lower()
+                        domain_totals[status_key] = max(0, domain_totals.get(status_key, 0) - 1)
                     for record in recipients:
                         persist_status = outcome.delivery_status
                         if persist_status == "block" or throttle_detected:
                             persist_status = "pending"
+                        status_key = (persist_status or "pending").lower()
                         conn.execute(
                             """
                             UPDATE emails
@@ -1221,7 +1371,7 @@ class MailClient:
                                 record.id,
                             ),
                         )
-                        domain_totals[persist_status] = domain_totals.get(persist_status, 0) + 1
+                        domain_totals[status_key] = domain_totals.get(status_key, 0) + 1
                     conn.commit()
                     group_size_actual = len(recipients)
                     processed += group_size_actual
@@ -1435,7 +1585,7 @@ class MailClient:
         emit_progress(force=True)
         summary = build_summary()
         if cancel_requested:
-            final_message = format_summary("사용자 요청으로 배치 발송 중단")
+            final_message = format_summary("사용자 요청으로 배치 발송 중단", summary)
             print(f"[배치 발송] {domain_label} · {final_message}")
             return JobResult(
                 job_id=job_id,
@@ -1446,7 +1596,7 @@ class MailClient:
             )
         success = failed_count == 0 and fatal_error is None
         base_message = "배치 발송 완료" if success else "배치 발송 중 오류"
-        final_message = format_summary(base_message)
+        final_message = format_summary(base_message, summary)
         error_message = None
         if fatal_error:
             error_message = fatal_error

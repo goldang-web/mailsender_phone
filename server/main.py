@@ -306,6 +306,30 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN anchor_email TEXT DEFAULT ''"
             )
+        if "client_reserved" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN client_reserved INTEGER DEFAULT 0"
+            )
+        if "client_remaining" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN client_remaining INTEGER DEFAULT 0"
+            )
+        if "client_cycle_completed" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN client_cycle_completed INTEGER DEFAULT 0"
+            )
+        if "client_cycle_count" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN client_cycle_count INTEGER DEFAULT 0"
+            )
+        if "client_last_cycle_at" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN client_last_cycle_at TEXT"
+            )
+        if "client_last_cycle_processed" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN client_last_cycle_processed INTEGER DEFAULT 0"
+            )
         job_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
@@ -436,6 +460,12 @@ def serialize_config(row: Dict[str, Any]) -> Dict[str, Any]:
         "client_failed": row.get("client_failed", 0),
         "client_block": row.get("client_block", 0),
         "client_removed": row.get("client_removed", 0),
+        "client_reserved": row.get("client_reserved", 0),
+        "client_remaining": row.get("client_remaining", 0),
+        "client_cycle_completed": bool(row.get("client_cycle_completed", 0)),
+        "client_cycle_count": row.get("client_cycle_count", 0),
+        "client_last_cycle_at": row.get("client_last_cycle_at"),
+        "client_last_cycle_processed": row.get("client_last_cycle_processed", 0),
         "client_updated_at": row.get("client_updated_at"),
     }
 
@@ -926,10 +956,16 @@ class DomainStatePayload(BaseModel):
     local_db_version: Optional[int] = None
     total: Optional[int] = None
     pending: Optional[int] = None
+    reserved: Optional[int] = None
     sent: Optional[int] = None
     failed: Optional[int] = None
     block: Optional[int] = None
     removed: Optional[int] = None
+    remaining: Optional[int] = None
+    cycle_completed: Optional[bool] = None
+    cycle_count: Optional[int] = None
+    last_cycle_completed_at: Optional[str] = None
+    last_cycle_processed: Optional[int] = None
 
 
 class JobReportPayload(BaseModel):
@@ -1646,6 +1682,24 @@ def enqueue_inject_file(device_id: str, domain: str, file_id: int) -> Dict[str, 
     return {"job": job}
 
 
+@app.post("/api/devices/{device_id}/domains/{domain}/actions/purge")
+def enqueue_domain_purge(device_id: str, domain: str) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        job = create_job(
+            conn,
+            device_id,
+            normalized,
+            "purge_domain",
+            {"domain": normalized},
+        )
+        conn.commit()
+    return {"job": job}
+
+
 @app.post("/api/devices/{device_id}/heartbeat", response_model=HeartbeatResponse)
 def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
     normalized_active = normalize_domain(payload.active_domain or "naver")
@@ -1670,6 +1724,11 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
         )
         for state in payload.domain_states:
             domain = normalize_domain(state.domain)
+            cycle_completed_value: Optional[int]
+            if state.cycle_completed is None:
+                cycle_completed_value = None
+            else:
+                cycle_completed_value = 1 if state.cycle_completed else 0
             conn.execute(
                 """
                 UPDATE device_configs
@@ -1680,6 +1739,12 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     client_failed=COALESCE(?, client_failed),
                     client_block=COALESCE(?, client_block),
                     client_removed=COALESCE(?, client_removed),
+                    client_reserved=COALESCE(?, client_reserved),
+                    client_remaining=COALESCE(?, client_remaining),
+                    client_cycle_completed=COALESCE(?, client_cycle_completed),
+                    client_cycle_count=COALESCE(?, client_cycle_count),
+                    client_last_cycle_at=COALESCE(?, client_last_cycle_at),
+                    client_last_cycle_processed=COALESCE(?, client_last_cycle_processed),
                     client_updated_at=?
                 WHERE device_id=? AND domain=?
                 """,
@@ -1691,6 +1756,12 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     state.failed,
                     state.block,
                     state.removed,
+                    state.reserved,
+                    state.remaining,
+                    cycle_completed_value,
+                    state.cycle_count,
+                    state.last_cycle_completed_at,
+                    state.last_cycle_processed,
                     now,
                     device_id,
                     domain,

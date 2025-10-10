@@ -219,10 +219,43 @@ header {
   background: #2563eb;
   color: #ffffff;
 }
+.domain-count.complete {
+  background: #dcfce7;
+  color: #047857;
+}
+.domain-toggle label.checked .domain-count.complete {
+  background: #dcfce7;
+  color: #047857;
+}
 .domain-summary {
   font-size: 12px;
   color: #475569;
   margin: 4px 0 0 0;
+}
+.domain-cycle {
+  font-size: 12px;
+  color: #047857;
+  margin: 2px 0 0 0;
+  display: none;
+  align-items: center;
+  gap: 6px;
+}
+.domain-cycle.active {
+  display: inline-flex;
+}
+.cycle-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #dcfce7;
+  color: #047857;
+  font-weight: 600;
+  font-size: 11px;
+}
+.cycle-meta {
+  font-size: 11px;
+  color: #64748b;
 }
 .config-block {
   display: flex;
@@ -606,6 +639,7 @@ button:not(:disabled):hover {
           <input id="fileInput" type="file" accept=".db,.sqlite,.sqlite3,.txt">
         </label>
         <button id="fileUploadBtn">업로드</button>
+        <button class="danger" id="purgeDbBtn">DB 전체 삭제</button>
       </div>
       <div id="fileListContainer"></div>
       <div>
@@ -1116,17 +1150,49 @@ function updateIpControls(card, device) {
 
 function renderDomainSummary(card, device, domain) {
   const summaryEl = card.querySelector('[data-role="domainSummary"]');
+  const cycleEl = card.querySelector('[data-role="domainCycle"]');
   const activeConfig = bestConfig(device, domain);
-  const activeTotal = Number(activeConfig?.client_total || 0);
+  const activeTotal = Number(activeConfig?.client_total ?? 0);
+  const activeRemaining = Number(
+    activeConfig?.client_remaining ??
+    activeConfig?.client_pending ??
+    0,
+  );
   if (summaryEl) {
     const label = DOMAIN_LABELS[domain] || domain;
-    summaryEl.textContent = `${label} · 총 ${formatCount(activeTotal)}건`;
+    summaryEl.textContent = `${label} · 총 ${formatCount(activeTotal)}건 · 잔여 ${formatCount(activeRemaining)}건`;
+  }
+  if (cycleEl) {
+    cycleEl.innerHTML = "";
+    const cycleCount = Number(activeConfig?.client_cycle_count ?? 0);
+    if (cycleCount > 0) {
+      cycleEl.classList.add("active");
+      const badge = document.createElement("span");
+      badge.className = "cycle-badge";
+      badge.textContent = cycleCount === 1 ? "1회 순환 완료" : `${cycleCount}회 순환 완료`;
+      cycleEl.appendChild(badge);
+      const completedAt = activeConfig?.client_last_cycle_at;
+      if (completedAt) {
+        const meta = document.createElement("span");
+        meta.className = "cycle-meta";
+        meta.textContent = formatDate(completedAt);
+        cycleEl.appendChild(meta);
+      }
+    } else {
+      cycleEl.classList.remove("active");
+    }
   }
   card.querySelectorAll('[data-role="domainCount"]').forEach((span) => {
     const spanDomain = span.dataset.domain;
     const domainConfig = bestConfig(device, spanDomain);
-    const total = Number(domainConfig?.client_total || 0);
-    span.textContent = formatCount(total);
+    const remaining = Number(domainConfig?.client_remaining ?? 0);
+    span.textContent = formatCount(remaining);
+    span.title = `잔여 ${formatCount(remaining)}건`;
+    if (remaining === 0 && Number(domainConfig?.client_total ?? 0) > 0) {
+      span.classList.add("complete");
+    } else {
+      span.classList.remove("complete");
+    }
     const label = span.closest("label[data-domain]");
     if (!label) {
       return;
@@ -1173,6 +1239,17 @@ function bestConfig(device, domain) {
     bcc_count: 0,
     rcpt_to: "",
     client_total: 0,
+    client_pending: 0,
+    client_sent: 0,
+    client_failed: 0,
+    client_block: 0,
+    client_removed: 0,
+    client_reserved: 0,
+    client_remaining: 0,
+    client_cycle_completed: false,
+    client_cycle_count: 0,
+    client_last_cycle_at: null,
+    client_last_cycle_processed: 0,
   };
 }
 
@@ -1599,7 +1676,8 @@ function buildDeviceCard(device) {
         <span class="domain-count" data-role="domainCount" data-domain="daum">0</span>
       </label>
     </div>
-    <div class="domain-summary" data-role="domainSummary">총 이메일 0건</div>
+    <div class="domain-summary" data-role="domainSummary">총 이메일 0건 · 잔여 0건</div>
+    <div class="domain-cycle" data-role="domainCycle"></div>
     <div class="config-block">
       <div class="field-row">
         <label class="field">
@@ -1948,10 +2026,44 @@ async function handleFileUpload() {
   }
 }
 
+async function handleDomainPurge(button) {
+  const { deviceId, domain } = state.modal;
+  if (!deviceId || !domain) {
+    return;
+  }
+  if (!confirm("정말 해당 도메인의 DB를 모두 삭제하시겠습니까?")) {
+    return;
+  }
+  const targetButton = button;
+  if (targetButton) {
+    targetButton.disabled = true;
+  }
+  try {
+    await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/actions/purge`, { method: "POST" });
+    showModalMessage("도메인 DB를 초기화했습니다.", "success");
+    await loadDevices();
+    await loadFileList(deviceId, domain);
+  } catch (err) {
+    showModalMessage(err.message || "DB 전체 삭제에 실패했습니다.");
+  } finally {
+    if (targetButton) {
+      targetButton.disabled = false;
+    }
+  }
+}
+
 document.getElementById("fileUploadBtn").addEventListener("click", (event) => {
   event.preventDefault();
   handleFileUpload();
 });
+
+const purgeBtn = document.getElementById("purgeDbBtn");
+if (purgeBtn) {
+  purgeBtn.addEventListener("click", async (event) => {
+    event.preventDefault();
+    await handleDomainPurge(purgeBtn);
+  });
+}
 
 document.getElementById("globalApplyBtn").addEventListener("click", () => {
   handleGlobalApply();
