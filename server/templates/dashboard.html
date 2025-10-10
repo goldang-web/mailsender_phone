@@ -86,6 +86,32 @@ header {
   color: #64748b;
   line-height: 1.45;
 }
+.ip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  background: #f8fafc;
+  font-size: 13px;
+}
+.ip-row.offline {
+  opacity: 0.6;
+}
+.ip-label {
+  font-weight: 600;
+  color: #1f2937;
+}
+.ip-value {
+  font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
+  font-size: 13px;
+  color: #2563eb;
+}
+.ip-placeholder {
+  color: #94a3b8;
+}
 .status-chip {
   display: inline-flex;
   align-items: center;
@@ -213,6 +239,10 @@ button {
   background: #2563eb;
   color: #fff;
   transition: transform 0.12s ease, box-shadow 0.16s ease;
+}
+button.small {
+  padding: 6px 12px;
+  font-size: 12px;
 }
 button.secondary {
   background: #e2e8f0;
@@ -781,6 +811,17 @@ function buildLogDisplayText(entry) {
   return `${parsed.label} - ${parsed.email}${suffix}`;
 }
 
+function latestChangeIpJob(device) {
+  if (!device?.jobs?.length) {
+    return null;
+  }
+  const candidates = device.jobs.filter((job) => job.job_type === "change_ip");
+  if (!candidates.length) {
+    return null;
+  }
+  return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
+}
+
 
 function latestBatchJob(device) {
   if (!device?.jobs?.length) {
@@ -846,9 +887,39 @@ function updateBatchControls(card, device) {
   }
 }
 
-
-
-
+function updateIpControls(card, device) {
+  const publicIpEl = card.querySelector('[data-role="publicIp"]');
+  const changeBtn = card.querySelector('button[data-action="change-ip"]');
+  const ipRow = card.querySelector('[data-role="ipRow"]');
+  const ipValue = (device?.public_ip || "").trim();
+  const isOnline = device?.status === "connected";
+  if (publicIpEl) {
+    if (ipValue) {
+      publicIpEl.textContent = ipValue;
+      publicIpEl.classList.remove("ip-placeholder");
+    } else {
+      publicIpEl.textContent = isOnline ? "확인 중..." : "보고되지 않음";
+      publicIpEl.classList.add("ip-placeholder");
+    }
+  }
+  if (ipRow) {
+    ipRow.classList.toggle("offline", !isOnline);
+  }
+  if (changeBtn) {
+    const job = latestChangeIpJob(device);
+    const inProgress = job ? ACTIVE_JOB_STATES.has(job.status) : false;
+    if (!isOnline) {
+      changeBtn.disabled = true;
+      changeBtn.textContent = "IP 변경";
+    } else if (inProgress) {
+      changeBtn.disabled = true;
+      changeBtn.textContent = "변경 중...";
+    } else {
+      changeBtn.disabled = false;
+      changeBtn.textContent = "IP 변경";
+    }
+  }
+}
 
 
 function renderDomainSummary(card, device, domain) {
@@ -1084,6 +1155,28 @@ function attachCardEvents(card) {
     return { id: card.dataset.deviceId, active_domain: "naver", name, configs: {} };
   };
 
+  const changeIpBtn = card.querySelector('button[data-action="change-ip"]');
+  if (changeIpBtn) {
+    changeIpBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      if (!currentDevice?.id) {
+        return;
+      }
+      const originalText = changeIpBtn.textContent;
+      changeIpBtn.disabled = true;
+      changeIpBtn.textContent = "IP 변경 중...";
+      try {
+        await fetchJSON(`/api/devices/${currentDevice.id}/actions/change-ip`, { method: "POST" });
+        setNotice(card, "IP 변경 작업을 요청했습니다.");
+        await loadDevices({ silent: true });
+      } catch (err) {
+        changeIpBtn.disabled = false;
+        changeIpBtn.textContent = originalText || "IP 변경";
+        setNotice(card, err.message || "IP 변경 요청에 실패했습니다.", "error");
+      }
+    });
+  }
+
   card.querySelectorAll('[data-role="domainRadio"]').forEach((radio) => {
     radio.addEventListener("change", async (evt) => {
       if (!evt.target.checked) return;
@@ -1280,6 +1373,13 @@ function buildDeviceCard(device) {
         <span data-role="statusText"></span>
       </div>
     </div>
+    <div class="ip-row" data-role="ipRow">
+      <div>
+        <span class="ip-label">공인 IP</span>
+        <span class="ip-value ip-placeholder" data-role="publicIp">확인 중...</span>
+      </div>
+      <button class="ghost small" data-action="change-ip">IP 변경</button>
+    </div>
     <div class="domain-toggle">
       <label data-role="domainLabel" data-domain="naver">
         <input type="radio" data-role="domainRadio" value="naver"> 네이버
@@ -1368,6 +1468,7 @@ function updateDeviceCard(card, device) {
   ensureFieldCache(device.id, "naver", bestConfig(device, "naver"));
   ensureFieldCache(device.id, "daum", bestConfig(device, "daum"));
   populateConfigForm(card, device, activeDomain);
+  updateIpControls(card, device);
 
   const logListEl = card.querySelector('[data-role="logList"]');
   if (logListEl) renderLogList(device, logListEl);

@@ -92,6 +92,7 @@ def _init_db() -> None:
                 last_seen TEXT,
                 worker_state TEXT,
                 last_error TEXT,
+                public_ip TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             );
@@ -190,6 +191,12 @@ def _init_db() -> None:
             row["name"]
             for row in conn.execute("PRAGMA table_info(device_configs)").fetchall()
         }
+        device_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(devices)").fetchall()
+        }
+        if "public_ip" not in device_columns:
+            conn.execute("ALTER TABLE devices ADD COLUMN public_ip TEXT")
         if "bcc_count" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN bcc_count INTEGER DEFAULT 0"
@@ -215,20 +222,22 @@ def normalize_domain(domain: str) -> str:
     return lowered
 
 
-def ensure_device(device_id: str, name: str) -> Dict[str, Any]:
+def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) -> Dict[str, Any]:
     device_id = (device_id or "").strip() or uuid.uuid4().hex
     name = (name or "").strip() or f"Device-{device_id[:6]}"
+    public_ip = (public_ip or "").strip() or None
     now = now_ts()
     with db_lock, get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO devices (id, name, active_domain, status, last_seen, created_at, updated_at)
-            VALUES (?, ?, 'naver', 'connected', ?, ?, ?)
+            INSERT INTO devices (id, name, active_domain, status, last_seen, public_ip, created_at, updated_at)
+            VALUES (?, ?, 'naver', 'connected', ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 name=excluded.name,
+                public_ip=COALESCE(excluded.public_ip, devices.public_ip),
                 updated_at=excluded.updated_at
             """,
-            (device_id, name, now, now, now),
+            (device_id, name, now, public_ip, now, now),
         )
         for domain in DOMAINS:
             conn.execute(
@@ -514,6 +523,7 @@ def load_device_summary() -> Dict[str, Any]:
                 "last_seen": device.get("last_seen"),
                 "worker_state": device.get("worker_state"),
                 "last_error": device.get("last_error"),
+                "public_ip": device.get("public_ip"),
                 "configs": configs,
                 "jobs": job_map.get(device["id"], []),
                 "files": file_map.get(device["id"], {}),
@@ -767,6 +777,7 @@ def handle_job_completion(
 class RegisterRequest(BaseModel):
     device_name: str = Field(..., min_length=1)
     device_id: Optional[str] = Field(default=None, description="기존 디바이스 ID (선택)")
+    public_ip: Optional[str] = Field(default=None, description="현재 공인 IP 주소")
 
 
 class RegisterResponse(BaseModel):
@@ -774,6 +785,7 @@ class RegisterResponse(BaseModel):
     name: str
     active_domain: str
     configs: Dict[str, Dict[str, Any]]
+    public_ip: Optional[str] = None
 
 
 class DeviceConfigPayload(BaseModel):
@@ -819,6 +831,7 @@ class HeartbeatRequest(BaseModel):
     active_domain: Optional[str] = "naver"
     domain_states: List[DomainStatePayload] = Field(default_factory=list)
     job_reports: List[JobReportPayload] = Field(default_factory=list)
+    public_ip: Optional[str] = Field(default=None, description="현재 공인 IP 주소")
 
 
 class JobDispatchPayload(BaseModel):
@@ -839,6 +852,7 @@ class HeartbeatResponse(BaseModel):
     configs: Dict[str, Dict[str, Any]]
     jobs: List[JobDispatchPayload]
     job_controls: List[JobControlPayload] = Field(default_factory=list)
+    public_ip: Optional[str] = None
 
 
 class SingleSendRequest(BaseModel):
@@ -889,7 +903,7 @@ def list_devices() -> Dict[str, Any]:
 
 @app.post("/api/devices/register", response_model=RegisterResponse)
 def register_device(payload: RegisterRequest) -> RegisterResponse:
-    device = ensure_device(payload.device_id or uuid.uuid4().hex, payload.device_name)
+    device = ensure_device(payload.device_id or uuid.uuid4().hex, payload.device_name, payload.public_ip)
     raw_configs = load_device_configs(device["id"])
     configs = {domain: serialize_config(row) for domain, row in raw_configs.items()}
     return RegisterResponse(
@@ -897,6 +911,7 @@ def register_device(payload: RegisterRequest) -> RegisterResponse:
         name=device["name"],
         active_domain=device.get("active_domain", "naver"),
         configs=configs,
+        public_ip=device.get("public_ip"),
     )
 
 
@@ -1019,6 +1034,17 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             "batch_send",
             {"config": config_snapshot},
         )
+        conn.commit()
+    return {"job": job}
+
+
+@app.post("/api/devices/{device_id}/actions/change-ip")
+def enqueue_change_ip(device_id: str) -> Dict[str, Any]:
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        job = create_job(conn, device_id, None, "change_ip", {})
         conn.commit()
     return {"job": job}
 
@@ -1334,6 +1360,7 @@ def enqueue_inject_file(device_id: str, domain: str, file_id: int) -> Dict[str, 
 @app.post("/api/devices/{device_id}/heartbeat", response_model=HeartbeatResponse)
 def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
     normalized_active = normalize_domain(payload.active_domain or "naver")
+    public_ip = (payload.public_ip or "").strip() or None
     with db_lock, get_conn() as conn:
         device = get_device(device_id, conn=conn)
         if not device:
@@ -1342,10 +1369,15 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
         conn.execute(
             """
             UPDATE devices
-            SET name=?, active_domain=?, status='connected', last_seen=?, updated_at=?
+            SET name=?,
+                active_domain=?,
+                status='connected',
+                last_seen=?,
+                public_ip=COALESCE(?, public_ip),
+                updated_at=?
             WHERE id=?
             """,
-            (payload.device_name, normalized_active, now, now, device_id),
+            (payload.device_name, normalized_active, now, public_ip, now, device_id),
         )
         for state in payload.domain_states:
             domain = normalize_domain(state.domain)
@@ -1416,11 +1448,12 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             (device_id,),
         ).fetchall()
         device_row = conn.execute(
-            "SELECT active_domain FROM devices WHERE id=?",
+            "SELECT active_domain, public_ip FROM devices WHERE id=?",
             (device_id,),
         ).fetchone()
         conn.commit()
     active_domain = device_row["active_domain"] if device_row else normalized_active
+    public_ip_value = device_row["public_ip"] if device_row else public_ip
     configs = {row["domain"]: serialize_config(to_dict(row)) for row in config_rows}
     job_controls = [
         JobControlPayload(job_id=row["id"], cancel_requested=bool(row["cancel_requested"]))
@@ -1432,6 +1465,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
         configs=configs,
         jobs=dispatched_jobs,
         job_controls=job_controls,
+        public_ip=public_ip_value,
     )
 
 
