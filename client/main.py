@@ -6,6 +6,7 @@ import sqlite3
 import sys
 import time
 import uuid
+import os
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -114,6 +115,31 @@ def ensure_directories() -> None:
     LOG_DIR.mkdir(parents=True, exist_ok=True)
     for domain in DOMAINS:
         (DATA_DIR / domain).mkdir(parents=True, exist_ok=True)
+
+
+def acquire_wake_lock() -> bool:
+    """디스플레이가 꺼져도 연결을 유지하도록 웨이크락을 확보합니다."""
+    try:
+        result = os.system('su -c "echo \'email_sender\' > /sys/power/wake_lock"')
+        if result == 0:
+            print("웨이크락이 획득되었습니다.")
+            return True
+        print(f"웨이크락 획득 실패: exit code {result}")
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"웨이크락 획득 실패: {exc}")
+    return False
+
+
+def release_wake_lock() -> None:
+    """프로그램 종료 시 웨이크락을 해제합니다."""
+    try:
+        result = os.system('su -c "echo \'email_sender\' > /sys/power/wake_unlock"')
+        if result == 0:
+            print("웨이크락이 해제되었습니다.")
+        else:
+            print(f"웨이크락 해제 실패: exit code {result}")
+    except Exception as exc:  # pylint: disable=broad-except
+        print(f"웨이크락 해제 실패: {exc}")
 
 
 def join_url(base: str, path: str) -> str:
@@ -1767,36 +1793,42 @@ DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
 
 def main() -> None:
     config = load_config()
-    while True:
-        print("\n========================")
-        print(f" 메일 발송 클라이언트 v{APP_VERSION}")
-        print("========================")
-        print(f"1. 서버 연결 (현재: {config.get('server_url') or '미설정'})")
-        print(f"2. 서버 주소 설정")
-        print(f"3. 디바이스 이름 설정 (현재: {config.get('device_name') or '미설정'})")
-        print("0. 종료")
-        choice = input("선택> ").strip()
+    wake_acquired = acquire_wake_lock()
+    try:
+        while True:
+            print("\n========================")
+            print(f" 메일 발송 클라이언트 v{APP_VERSION}")
+            print("========================")
+            print(f"1. 서버 연결 (현재: {config.get('server_url') or '미설정'})")
+            print(f"2. 서버 주소 설정")
+            print(f"3. 디바이스 이름 설정 (현재: {config.get('device_name') or '미설정'})")
+            print("0. 종료")
+            choice = input("선택> ").strip()
 
-        if choice == "1":
-            config = ensure_required_config(config)
-            if not config.get("server_url") or not config.get("device_name"):
-                print("서버 주소와 디바이스 이름을 먼저 설정해야 합니다.")
-                continue
-            client = MailClient(config)
-            try:
-                client.run()
-            except KeyboardInterrupt:
-                print("\n연결을 종료했습니다.")
-            config = load_config()
-        elif choice == "2":
-            config = configure_server_url(config)
-        elif choice == "3":
-            config = configure_device_name(config)
-        elif choice in {"0", "q", "Q"}:
-            print("종료합니다.")
-            break
-        else:
-            print("알 수 없는 선택입니다. 다시 입력하세요.")
+            if choice == "1":
+                config = ensure_required_config(config)
+                if not config.get("server_url") or not config.get("device_name"):
+                    print("서버 주소와 디바이스 이름을 먼저 설정해야 합니다.")
+                    continue
+                client = MailClient(config)
+                try:
+                    client.run()
+                except KeyboardInterrupt:
+                    print("\n연결을 종료했습니다.")
+                config = load_config()
+            elif choice == "2":
+                config = configure_server_url(config)
+            elif choice == "3":
+                config = configure_device_name(config)
+            elif choice in {"0", "q", "Q"}:
+                print("종료합니다.")
+                break
+            else:
+                print("알 수 없는 선택입니다. 다시 입력하세요.")
+    finally:
+        if not wake_acquired:
+            print("웨이크락 상태가 불확실하여 해제를 시도합니다.")
+        release_wake_lock()
 
 
 if __name__ == "__main__":
