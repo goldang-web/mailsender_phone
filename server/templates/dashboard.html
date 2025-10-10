@@ -1460,7 +1460,7 @@ function renderLogList(device, container) {
     return;
   }
   container.innerHTML = "";
-  logs.slice(0, 40).forEach((entry) => {
+  logs.slice(0, 10).forEach((entry) => {
     const item = document.createElement("div");
     item.className = `log-item ${entry.success ? "ok" : "fail"}`;
 

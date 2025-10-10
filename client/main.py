@@ -22,7 +22,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.8"
+APP_VERSION = "0.0.9"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -941,30 +941,32 @@ class MailClient:
             print(display_line)
         else:
             label = "Block" if delivery_status == "block" else "Fail"
-            for index, recipient in enumerate(recipients):
-                is_primary = index == 0
-                log_line = self._format_dispatch_log_line(label, 0, recipient)
-                display_line = self._format_dispatch_display_line(
-                    label,
-                    recipient,
-                    bcc_total if is_primary else 0,
-                    0,
-                    is_primary,
-                    self.device_name,
-                )
-                dispatch_logs.append(
-                    {
-                        "log": log_line,
-                        "display": display_line,
-                        "email": recipient,
-                        "sequence": 0,
-                        "delivery_status": delivery_status,
-                        "detail": detail_line or status_line,
-                        "bcc_total": bcc_total if is_primary else 0,
-                        "anchor_total": 0,
-                        "is_primary": is_primary,
-                    }
-                )
+            meta_items: List[Tuple[str, object]] = [("primary", 1)]
+            if bcc_total > 0:
+                meta_items.append(("bcc", bcc_total))
+            log_line = self._format_dispatch_log_line(label, 1, rcpt_to, meta_items)
+            display_line = self._format_dispatch_display_line(
+                label,
+                rcpt_to,
+                bcc_total,
+                0,
+                True,
+                self.device_name,
+            )
+            dispatch_logs.append(
+                {
+                    "log": log_line,
+                    "display": display_line,
+                    "email": rcpt_to,
+                    "sequence": 1,
+                    "delivery_status": delivery_status,
+                    "detail": detail_line or status_line,
+                    "bcc_total": bcc_total,
+                    "anchor_total": 0,
+                    "is_primary": True,
+                    "bcc_recipients": list(bcc_emails),
+                }
+            )
         if delivery_status != "sent":
             for entry in dispatch_logs:
                 print(entry.get("display") or entry["log"])
@@ -1432,32 +1434,39 @@ class MailClient:
                     else:
                         is_block = outcome.delivery_status == "block"
                         label = "Block" if is_block else "Fail"
-                        for offset, recipient in enumerate(recipient_emails, start=1):
-                            is_primary = offset == 1
-                            sequence_for_log = processed - group_size_actual + offset
-                            log_line = self._format_dispatch_log_line(label, sequence_for_log, recipient)
-                            display_line = self._format_dispatch_display_line(
-                                label,
-                                recipient,
-                                bcc_count if is_primary else 0,
-                                anchor_count if is_primary else 0,
-                                is_primary,
-                                self.device_name,
-                            )
-                            dispatch_logs.append(
-                                {
-                                    "log": log_line,
-                                    "display": display_line,
-                                    "email": recipient,
-                                    "sequence": sequence_for_log,
-                                    "delivery_status": "throttle" if throttle_detected else outcome.delivery_status,
-                                    "detail": detail_for_log,
-                                    "bcc_total": bcc_count if is_primary else 0,
-                                    "anchor_total": anchor_count if is_primary else 0,
-                                    "is_primary": is_primary,
-                                }
-                            )
-                            print(display_line)
+                        primary_email = recipient_emails[0] if recipient_emails else "-"
+                        sequence_for_log = processed - group_size_actual + 1
+                        meta_items: List[Tuple[str, object]] = [("primary", 1)]
+                        if bcc_count > 0:
+                            meta_items.append(("bcc", bcc_count))
+                        if anchor_count > 0:
+                            meta_items.append(("anchor", anchor_count))
+                        log_line = self._format_dispatch_log_line(label, sequence_for_log, primary_email, meta_items)
+                        display_line = self._format_dispatch_display_line(
+                            label,
+                            primary_email,
+                            bcc_count,
+                            anchor_count,
+                            True,
+                            self.device_name,
+                        )
+                        dispatch_logs.append(
+                            {
+                                "log": log_line,
+                                "display": display_line,
+                                "email": primary_email,
+                                "sequence": sequence_for_log,
+                                "delivery_status": "throttle" if throttle_detected else outcome.delivery_status,
+                                "detail": detail_for_log,
+                                "bcc_total": bcc_count,
+                                "anchor_total": anchor_count,
+                                "is_primary": True,
+                                "bcc_recipients": [record.email for record in group.bcc],
+                                "anchor": list(group.injected),
+                                "failed_recipients": recipient_emails,
+                            }
+                        )
+                        print(display_line)
                         if detail_for_log and detail_for_log != outcome.status_line:
                             print(f"  ↳ {detail_for_log}")
                         if is_block:

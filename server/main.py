@@ -49,6 +49,7 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "session_count": 1,
 }
 GLOBAL_CONFIG_FIELDS = tuple(GLOBAL_CONFIG_DEFAULTS.keys())
+MAX_DEVICE_LOG_HISTORY = 10
 
 
 def ensure_storage_root() -> None:
@@ -107,6 +108,25 @@ def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
         return datetime.fromisoformat(value)
     except ValueError:
         return None
+
+
+def prune_device_logs(conn: sqlite3.Connection, device_id: str, limit: int = MAX_DEVICE_LOG_HISTORY) -> None:
+    if limit <= 0:
+        return
+    conn.execute(
+        """
+        DELETE FROM send_logs
+        WHERE device_id=?
+          AND id NOT IN (
+              SELECT id
+              FROM send_logs
+              WHERE device_id=?
+              ORDER BY id DESC
+              LIMIT ?
+          )
+        """,
+        (device_id, device_id, limit),
+    )
 
 
 def load_global_config(*, conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
@@ -697,7 +717,7 @@ def load_device_summary() -> Dict[str, Any]:
                 "configs": configs,
                 "jobs": job_map.get(device["id"], []),
                 "files": file_map.get(device["id"], {}),
-                "logs": log_map.get(device["id"], [])[:40],
+                "logs": log_map.get(device["id"], [])[:MAX_DEVICE_LOG_HISTORY],
             }
         )
     global_config = load_global_config()
@@ -869,6 +889,9 @@ def record_job_progress(
                     """,
                     entries,
                 )
+                device_ids = {entry[0] for entry in entries if entry and entry[0]}
+                for device_id in device_ids:
+                    prune_device_logs(conn, device_id)
     if job_row["job_type"] != "batch_send":
         return
     data_json: Optional[str] = None
@@ -944,6 +967,7 @@ def handle_job_completion(
                     now,
                 ),
             )
+            prune_device_logs(conn, job_row["device_id"])
 
 
 class RegisterRequest(BaseModel):
