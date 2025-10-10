@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Deque, Dict, Iterable, List, Optional, Tuple
 
 import requests
+from requests.adapters import HTTPAdapter
 
 from smtp_utils import send_via_telnet
 from urllib.parse import urlparse, urlunparse
@@ -256,6 +257,7 @@ class MailClient:
         for domain in DOMAINS:
             self.local_versions.setdefault(domain, None)
         self.session = requests.Session()
+        self._configure_session()
         self.domain_paths: Dict[str, Path] = {
             domain: DATA_DIR / domain / f"{domain}.db" for domain in DOMAINS
         }
@@ -267,6 +269,28 @@ class MailClient:
     # ------------------------------------------------------------------ #
     # 설정/환경 관리
     # ------------------------------------------------------------------ #
+    def _configure_session(self) -> None:
+        self.session.headers.update({"Connection": "keep-alive"})
+        adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=0)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+
+    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+        url = join_url(self.server_url, path)
+        timeout = kwargs.pop("timeout", self.timeout)
+        print(f"[HTTP {method.upper()}] {url}")
+        try:
+            response = self.session.request(method=method, url=url, timeout=timeout, **kwargs)
+        except requests.RequestException as exc:
+            print(f"[HTTP {method.upper()}] 요청 실패: {exc}")
+            raise
+        print(f"[HTTP {method.upper()}] 응답 {response.status_code}")
+        content_type = response.headers.get("content-type", "")
+        if response.content and ("json" in content_type or content_type.startswith("text/")):
+            preview = response.text[:150]
+            print(f"[HTTP {method.upper()}] 응답 본문 미리보기: {preview}")
+        return response
+
     def persist(self) -> None:
         snapshot = self.config.copy()
         snapshot["server_url"] = self.server_url
@@ -421,8 +445,7 @@ class MailClient:
             "device_name": self.device_name,
             "device_id": self.device_id or None,
         }
-        url = join_url(self.server_url, "/api/devices/register")
-        response = self.session.post(url, json=payload, timeout=self.timeout)
+        response = self._request("post", "/api/devices/register", json=payload)
         response.raise_for_status()
         data = response.json()
         self.device_id = data["device_id"]
@@ -454,8 +477,7 @@ class MailClient:
                 for report in job_reports
             ],
         }
-        url = join_url(self.server_url, f"/api/devices/{self.device_id}/heartbeat")
-        response = self.session.post(url, json=payload, timeout=self.timeout)
+        response = self._request("post", f"/api/devices/{self.device_id}/heartbeat", json=payload)
         response.raise_for_status()
         data = response.json()
         self.active_domain = data.get("active_domain", self.active_domain)
@@ -584,9 +606,8 @@ class MailClient:
         filename = payload.get("filename") or f"{normalized}.db"
         if not download_path:
             return JobResult(job_id=job_id, status="failed", message="다운로드 경로가 없습니다.")
-        url = join_url(self.server_url, str(download_path))
-        print(f"[Inject] 파일 다운로드: {url}")
-        response = self.session.get(url, timeout=max(self.timeout, 30))
+        print(f"[Inject] 파일 다운로드 경로: {download_path}")
+        response = self._request("get", str(download_path), timeout=max(self.timeout, 30))
         response.raise_for_status()
         data = response.content
         target_dir = DATA_DIR / normalized
@@ -1379,6 +1400,7 @@ class MailClient:
                     except Exception:
                         pass
                     self.session = requests.Session()
+                    self._configure_session()
                     self.connected = False
                     time.sleep(self.interval)
                 except KeyboardInterrupt:
