@@ -3,6 +3,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import sys
 import time
 import uuid
 from collections import deque
@@ -14,6 +15,7 @@ from typing import Deque, Dict, Iterable, List, Optional, Tuple
 import requests
 
 from smtp_utils import send_via_telnet
+from urllib.parse import urlparse, urlunparse
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -117,6 +119,42 @@ def join_url(base: str, path: str) -> str:
     return base.rstrip("/") + path
 
 
+def normalize_server_url(raw: str) -> str:
+    value = (raw or "").strip()
+    if not value:
+        return value
+    if "://" not in value:
+        value = f"http://{value}"
+    parsed = urlparse(value)
+    scheme = parsed.scheme or "http"
+    netloc = parsed.netloc
+    path = parsed.path or ""
+    if not netloc and parsed.path:
+        netloc = parsed.path
+        path = ""
+    hostname = parsed.hostname
+    port = parsed.port
+    userinfo = ""
+    if parsed.username:
+        userinfo = parsed.username
+        if parsed.password:
+            userinfo += f":{parsed.password}"
+    if hostname:
+        host_repr = hostname
+        if ":" in host_repr and not host_repr.startswith("["):
+            host_repr = f"[{host_repr}]"
+        if userinfo:
+            host_repr = f"{userinfo}@{host_repr}"
+        if port is None:
+            netloc = f"{host_repr}:8000"
+        else:
+            netloc = f"{host_repr}:{port}"
+    elif netloc and ":" not in netloc:
+        netloc = f"{netloc}:8000"
+    normalized = urlunparse((scheme, netloc, path, parsed.params, parsed.query, parsed.fragment))
+    return normalized
+
+
 def prompt_value(message: str, current: Optional[str] = None) -> Optional[str]:
     hint = f" (현재: {current})" if current else ""
     value = input(f"{message}{hint}> ").strip()
@@ -130,7 +168,8 @@ def configure_server_url(config: Dict[str, object]) -> Dict[str, object]:
         if not new_value:
             print("서버 주소는 비울 수 없습니다.")
         else:
-            config["server_url"] = new_value
+            normalized = normalize_server_url(new_value)
+            config["server_url"] = normalized
             save_config(config)
     return config
 
@@ -194,7 +233,12 @@ class DispatchOutcome:
 class MailClient:
     def __init__(self, config: Dict[str, object]) -> None:
         self.config = config
-        self.server_url = str(config.get("server_url") or "").rstrip("/")
+        raw_server_url = str(config.get("server_url") or "").strip()
+        normalized_server_url = normalize_server_url(raw_server_url) if raw_server_url else ""
+        if normalized_server_url and normalized_server_url != raw_server_url:
+            config["server_url"] = normalized_server_url
+            save_config(config)
+        self.server_url = normalized_server_url.rstrip("/")
         self.device_name = str(config.get("device_name") or "").strip() or "Device"
         self.device_id = str(config.get("device_id") or "").strip()
         self.interval = int(config.get("interval") or 5)
@@ -1289,7 +1333,14 @@ class MailClient:
         ensure_directories()
         if not self.device_id:
             self.device_id = uuid.uuid4().hex
-        self.register()
+        try:
+            self.register()
+        except requests.RequestException as exc:
+            print(f"[연결 실패] 서버({self.server_url or '-'})에 접속하지 못했습니다: {exc}")
+            print("서버가 실행 중인지, 방화벽 또는 네트워크 설정을 확인한 뒤 다시 실행하세요.")
+            self.connected = False
+            self.persist()
+            sys.exit(1)
 
         print("[시작] 서버와 동기화를 시작합니다. 중단: Ctrl+C")
         try:
