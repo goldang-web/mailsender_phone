@@ -42,9 +42,38 @@ header {
   padding: 16px 20px;
   box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 18px;
   margin-bottom: 20px;
+}
+.summary-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+}
+.summary-actions {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+.summary-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #1f2937;
+}
+.summary-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+}
+.summary-actions button.device-edit-active {
+  background: #fee2e2;
+  border-color: #fca5a5;
+  color: #b91c1c;
 }
 .global-panel {
   background: #ffffff;
@@ -244,6 +273,12 @@ header {
   flex-direction: column;
   gap: 12px;
 }
+.card.offline {
+  opacity: 0.6;
+}
+.card.online-hidden {
+  display: none;
+}
 .card-header {
   display: flex;
   justify-content: space-between;
@@ -254,25 +289,20 @@ header {
   align-items: center;
   gap: 8px;
 }
-button.card-hide-btn {
+button.card-delete-btn {
   display: none;
-  width: 28px;
-  height: 28px;
-  min-width: 28px;
-  padding: 0;
-  border-radius: 999px;
-  border: 1px solid #e2e8f0;
-  background: transparent;
-  color: #64748b;
-  font-size: 16px;
-  font-weight: 700;
-  line-height: 1;
+  padding: 6px 12px;
+  font-size: 12px;
 }
-button.card-hide-btn:hover {
-  background: #e2e8f0;
+button.card-delete-btn.danger {
+  background: #ef4444;
 }
-button.card-hide-btn:active {
-  background: #cbd5f5;
+button.card-delete-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+.card.editing button.card-delete-btn {
+  display: inline-flex;
 }
 .device-title {
   font-size: 16px;
@@ -829,13 +859,22 @@ button:not(:disabled):hover {
 </section>
 
 <section class="summary" id="summaryBar">
-  <div class="summary-item">
-    총 디바이스
-    <span id="summaryTotal">0</span>
+  <div class="summary-metrics">
+    <div class="summary-item">
+      총 디바이스
+      <span id="summaryTotal">0</span>
+    </div>
+    <div class="summary-item">
+      온라인
+      <span id="summaryOnline">0</span>
+    </div>
   </div>
-  <div class="summary-item">
-    온라인
-    <span id="summaryOnline">0</span>
+  <div class="summary-actions">
+    <label class="summary-toggle">
+      <input type="checkbox" id="onlineOnlyToggle">
+      온라인만 보기
+    </label>
+    <button type="button" class="ghost small" id="editDevicesBtn" title="디바이스 카드 삭제 모드를 켭니다." disabled>편집</button>
   </div>
 </section>
 
@@ -925,7 +964,13 @@ const state = {
     error: "",
     saving: false,
   },
+  deviceEditMode: false,
+  filterOnlineOnly: false,
+  deletingDevices: new Set(),
 };
+
+removeLegacyHiddenOfflinePreference();
+state.filterOnlineOnly = loadOnlineOnlyPreference();
 
 const DOMAIN_LABELS = { naver: "네이버", daum: "다음" };
 const STATUS_LABELS = {
@@ -953,8 +998,8 @@ const ANCHOR_MIN = 1;
 const ANCHOR_MAX = 1000;
 const fieldCache = {};
 const cardRegistry = {};
-const HIDDEN_OFFLINE_KEY = "dashboard.hiddenOfflineDevices";
-const hiddenOfflineDevices = loadHiddenOfflineDevices();
+const ONLINE_ONLY_KEY = "dashboard.onlineOnlyFilter";
+const LEGACY_HIDDEN_OFFLINE_KEY = "dashboard.hiddenOfflineDevices";
 
 function clampNumber(value, min, max, fallback) {
   const parsed = typeof value === "number" ? value : parseInt(value, 10);
@@ -964,29 +1009,29 @@ function clampNumber(value, min, max, fallback) {
   return Math.min(max, Math.max(min, parsed));
 }
 
-function loadHiddenOfflineDevices() {
+function loadOnlineOnlyPreference() {
   try {
-    const raw = localStorage.getItem(HIDDEN_OFFLINE_KEY);
-    if (!raw) {
-      return new Set();
-    }
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) {
-      return new Set();
-    }
-    return new Set(parsed.filter((value) => typeof value === "string" && value));
+    const stored = localStorage.getItem(ONLINE_ONLY_KEY);
+    return stored === "true";
   } catch (err) {
-    console.warn("숨김 오프라인 목록을 불러오지 못했습니다.", err);
-    return new Set();
+    console.warn("온라인 필터 설정을 불러오지 못했습니다.", err);
+    return false;
   }
 }
 
-function persistHiddenOfflineDevices() {
+function persistOnlineOnlyPreference(enabled) {
   try {
-    const serialized = JSON.stringify(Array.from(hiddenOfflineDevices));
-    localStorage.setItem(HIDDEN_OFFLINE_KEY, serialized);
+    localStorage.setItem(ONLINE_ONLY_KEY, enabled ? "true" : "false");
   } catch (err) {
-    console.warn("숨김 오프라인 목록 저장에 실패했습니다.", err);
+    console.warn("온라인 필터 설정 저장에 실패했습니다.", err);
+  }
+}
+
+function removeLegacyHiddenOfflinePreference() {
+  try {
+    localStorage.removeItem(LEGACY_HIDDEN_OFFLINE_KEY);
+  } catch (err) {
+    console.warn("이전 숨김 오프라인 설정 제거에 실패했습니다.", err);
   }
 }
 
@@ -2089,6 +2134,49 @@ function renderSummary(counts) {
   document.getElementById("summaryOnline").textContent = counts.online ?? 0;
 }
 
+function updateCardDeleteButton(card, device) {
+  const deleteBtn = card.querySelector('button[data-action="delete-device"]');
+  if (!deleteBtn) return;
+  const deviceId = device?.id || card.dataset.deviceId;
+  const isDeleting = state.deletingDevices?.has?.(deviceId);
+  deleteBtn.textContent = isDeleting ? "삭제 중..." : "삭제";
+  deleteBtn.disabled = Boolean(isDeleting);
+}
+
+function syncEditModeToCards() {
+  Object.values(cardRegistry).forEach((card) => {
+    const device = card.__deviceData || { id: card.dataset.deviceId };
+    card.classList.toggle("editing", state.deviceEditMode);
+    updateCardDeleteButton(card, device);
+  });
+}
+
+function setDeviceEditMode(enabled) {
+  if (state.deviceEditMode !== enabled) {
+    state.deviceEditMode = enabled;
+  }
+  syncEditModeToCards();
+  const btn = document.getElementById("editDevicesBtn");
+  if (btn) {
+    btn.textContent = enabled ? "완료" : "편집";
+    btn.classList.toggle("device-edit-active", enabled);
+  }
+  renderDevices();
+}
+
+function updateDeviceEditButton() {
+  const btn = document.getElementById("editDevicesBtn");
+  if (!btn) return;
+  const hasDevices = (state.devices || []).length > 0;
+  btn.disabled = !hasDevices;
+  btn.setAttribute("aria-disabled", hasDevices ? "false" : "true");
+  if (!hasDevices && state.deviceEditMode) {
+    setDeviceEditMode(false);
+  } else if (!state.deviceEditMode && !btn.classList.contains("device-edit-active")) {
+    btn.textContent = "편집";
+  }
+}
+
 function renderLastSync() {
   const el = document.getElementById("lastSync");
   if (!state.lastSync) {
@@ -2405,6 +2493,36 @@ function attachCardEvents(card) {
     });
   }
 
+  const deleteBtn = card.querySelector('button[data-action="delete-device"]');
+  if (deleteBtn) {
+    deleteBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      if (!currentDevice?.id) {
+        return;
+      }
+      if (!state.deviceEditMode) {
+        setDeviceEditMode(true);
+        return;
+      }
+      const confirmed = confirm(`'${currentDevice.name}' 디바이스를 삭제하시겠습니까? 관련 설정과 로그도 함께 제거됩니다.`);
+      if (!confirmed) {
+        return;
+      }
+      state.deletingDevices.add(currentDevice.id);
+      updateCardDeleteButton(card, currentDevice);
+      try {
+        await fetchJSON(`/api/devices/${currentDevice.id}`, { method: "DELETE" });
+        setGlobalStatus(`'${currentDevice.name}' 디바이스를 삭제했습니다.`, "success");
+        await loadDevices({ silent: true });
+      } catch (err) {
+        setGlobalStatus(err.message || "디바이스 삭제에 실패했습니다.", "error");
+      } finally {
+        state.deletingDevices.delete(currentDevice.id);
+        updateCardDeleteButton(card, currentDevice);
+      }
+    });
+  }
+
   card.querySelectorAll('[data-role="domainRadio"]').forEach((radio) => {
     radio.addEventListener("change", async (evt) => {
       if (!evt.target.checked) return;
@@ -2614,18 +2732,6 @@ function attachCardEvents(card) {
     });
   }
 
-  const hideBtn = card.querySelector('button[data-action="hide-offline"]');
-  if (hideBtn) {
-    hideBtn.addEventListener("click", () => {
-      const currentDevice = getDevice();
-      if (!currentDevice?.id) {
-        return;
-      }
-      hiddenOfflineDevices.add(currentDevice.id);
-      persistHiddenOfflineDevices();
-      renderDevices();
-    });
-  }
 }
 
 function buildDeviceCard(device) {
@@ -2644,7 +2750,7 @@ function buildDeviceCard(device) {
           <span class="status-dot"></span>
           <span data-role="statusText"></span>
         </div>
-        <button type="button" class="card-hide-btn" data-action="hide-offline" title="오프라인 디바이스 카드를 숨깁니다." aria-label="오프라인 카드 숨기기">&times;</button>
+        <button type="button" class="card-delete-btn danger small" data-action="delete-device" title="디바이스를 삭제합니다.">삭제</button>
       </div>
     </div>
     <div class="ip-row" data-role="ipRow">
@@ -2733,6 +2839,8 @@ function buildDeviceCard(device) {
 function updateDeviceCard(card, device) {
   card.__deviceData = device;
   card.dataset.deviceId = device.id;
+  const isOffline = device.status === "disconnected";
+  card.classList.toggle("offline", isOffline);
   const activeDomain = device.active_domain || card.dataset.activeDomain || "naver";
   card.dataset.activeDomain = activeDomain;
 
@@ -2746,10 +2854,6 @@ function updateDeviceCard(card, device) {
   if (statusChip) statusChip.className = statusClass(device.status);
   const statusText = card.querySelector('[data-role="statusText"]');
   if (statusText) statusText.textContent = STATUS_LABELS[device.status] || device.status || "상태 미확인";
-  const hideBtn = card.querySelector('button[data-action="hide-offline"]');
-  if (hideBtn) {
-    hideBtn.style.display = device.status === "disconnected" ? "inline-flex" : "none";
-  }
 
   card.querySelectorAll('[data-role="domainRadio"]').forEach((radio) => {
     radio.name = `domain-${device.id}`;
@@ -2776,21 +2880,10 @@ function renderDevices() {
     emptyHint.dataset.defaultMessage = emptyHint.textContent;
   }
 
+  const filterOnlineOnly = Boolean(state.filterOnlineOnly && !state.deviceEditMode);
+  let visibleCards = 0;
+
   state.devices.forEach((device) => {
-    const isOffline = device.status === "disconnected";
-    if (!isOffline && hiddenOfflineDevices.has(device.id)) {
-      hiddenOfflineDevices.delete(device.id);
-      persistHiddenOfflineDevices();
-    }
-    if (isOffline && hiddenOfflineDevices.has(device.id)) {
-      const existing = cardRegistry[device.id];
-      if (existing?.parentNode === container) {
-        container.removeChild(existing);
-      }
-      delete cardRegistry[device.id];
-      delete state.successCounters[device.id];
-      return;
-    }
     let card = cardRegistry[device.id];
     if (!card) {
       card = buildDeviceCard(device);
@@ -2801,6 +2894,13 @@ function renderDevices() {
       container.appendChild(card);
     }
     updateDeviceCard(card, device);
+    const shouldHide = filterOnlineOnly && device.status !== "connected";
+    card.classList.toggle("online-hidden", shouldHide);
+    card.classList.toggle("editing", state.deviceEditMode);
+    updateCardDeleteButton(card, device);
+    if (!shouldHide) {
+      visibleCards += 1;
+    }
     seenIds.add(device.id);
   });
 
@@ -2815,18 +2915,19 @@ function renderDevices() {
     }
   });
 
-  const visibleCards = container.querySelectorAll(".card").length;
+  if (!emptyHint) {
+    return;
+  }
+
   if (!visibleCards) {
-    if (emptyHint) {
-      const hasDevices = (state.devices || []).length > 0;
-      if (hasDevices && hiddenOfflineDevices.size > 0) {
-        emptyHint.textContent = "표시할 디바이스가 없습니다. 숨긴 오프라인 카드는 새로고침하거나 다시 연결되면 다시 나타납니다.";
-      } else if (emptyHint.dataset.defaultMessage) {
-        emptyHint.textContent = emptyHint.dataset.defaultMessage;
-      }
-      emptyHint.style.display = "block";
+    const hasDevices = (state.devices || []).length > 0;
+    if (hasDevices && filterOnlineOnly) {
+      emptyHint.textContent = "표시할 온라인 디바이스가 없습니다. 전체 보기를 선택하면 모든 카드가 표시됩니다.";
+    } else if (emptyHint.dataset.defaultMessage) {
+      emptyHint.textContent = emptyHint.dataset.defaultMessage;
     }
-  } else if (emptyHint) {
+    emptyHint.style.display = "block";
+  } else {
     if (emptyHint.dataset.defaultMessage) {
       emptyHint.textContent = emptyHint.dataset.defaultMessage;
     }
@@ -2843,6 +2944,15 @@ async function loadDevices(options = {}) {
   try {
     const data = await fetchJSON("/api/devices", { method: "GET" });
     state.devices = data.devices || [];
+    const activeIds = new Set((state.devices || []).map((device) => device.id));
+    if (state.deletingDevices?.size) {
+      Array.from(state.deletingDevices).forEach((deviceId) => {
+        if (!activeIds.has(deviceId)) {
+          state.deletingDevices.delete(deviceId);
+        }
+      });
+    }
+    updateDeviceEditButton();
     const globalConfig = data.global_config || {};
     renderGlobalConfig(globalConfig);
     renderSummary(data.counts || {});
@@ -2879,6 +2989,17 @@ function setNoticeMessage(message) {
     return;
   }
   console.warn(message);
+}
+
+function initOnlineOnlyToggle() {
+  const toggle = document.getElementById("onlineOnlyToggle");
+  if (!toggle) return;
+  toggle.checked = Boolean(state.filterOnlineOnly);
+  toggle.addEventListener("change", () => {
+    state.filterOnlineOnly = toggle.checked;
+    persistOnlineOnlyPreference(state.filterOnlineOnly);
+    renderDevices();
+  });
 }
 
 function showModalMessage(message, type = "error") {
@@ -3277,6 +3398,16 @@ document.getElementById("fileModal").addEventListener("click", (event) => {
   }
 });
 
+const editDevicesBtn = document.getElementById("editDevicesBtn");
+if (editDevicesBtn) {
+  editDevicesBtn.addEventListener("click", () => {
+    if (!state.devices.length) {
+      return;
+    }
+    setDeviceEditMode(!state.deviceEditMode);
+  });
+}
+
 document.getElementById("refreshBtn").addEventListener("click", async () => {
   await loadDevices();
 });
@@ -3292,6 +3423,7 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+initOnlineOnlyToggle();
 initCardColumnControl();
 loadDevices();
 </script>
