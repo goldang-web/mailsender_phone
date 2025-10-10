@@ -21,7 +21,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.4"
+APP_VERSION = "0.0.5"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -893,6 +893,71 @@ class MailClient:
                 inflight: Dict[Future[DispatchOutcome], DispatchGroup] = {}
                 fetch_batch_size = max(group_size * session_count, group_size)
 
+                def recycle_consumed_rows() -> bool:
+                    summary_row = conn.execute(
+                        """
+                        SELECT
+                            SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,
+                            SUM(CASE WHEN status='reserved' THEN 1 ELSE 0 END) AS reserved_count,
+                            SUM(CASE WHEN status='block' THEN 1 ELSE 0 END) AS block_count,
+                            SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) AS sent_count,
+                            SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_count
+                        FROM emails
+                        """
+                    ).fetchone()
+                    if not summary_row:
+                        return False
+                    pending_candidates = (
+                        (summary_row["pending_count"] or 0)
+                        + (summary_row["reserved_count"] or 0)
+                        + (summary_row["block_count"] or 0)
+                    )
+                    if pending_candidates > 0:
+                        return False
+                    sent_total = summary_row["sent_count"] or 0
+                    failed_total = summary_row["failed_count"] or 0
+                    reset_total = sent_total + failed_total
+                    if reset_total == 0:
+                        return False
+                    now_stamp = now_iso()
+                    conn.execute(
+                        """
+                        UPDATE emails
+                        SET status='pending',
+                            reserved_by=NULL,
+                            reserved_at=NULL,
+                            updated_at=?
+                        WHERE status IN ('sent','failed')
+                        """,
+                        (now_stamp,),
+                    )
+                    conn.commit()
+                    domain_totals["pending"] = domain_totals.get("pending", 0) + reset_total
+                    domain_totals["sent"] = max(0, domain_totals.get("sent", 0) - sent_total)
+                    domain_totals["failed"] = max(0, domain_totals.get("failed", 0) - failed_total)
+                    restart_message = (
+                        f"{domain_label} 발송 대상 재가동: sent {sent_total}건, failed {failed_total}건을 pending으로 전환"
+                    )
+                    print(f"[배치 발송] {restart_message}")
+                    try:
+                        self.send_job_report(
+                            JobResult(
+                                job_id=job_id,
+                                status="running",
+                                message=restart_message,
+                                result={
+                                    "logs": [
+                                        {"log": restart_message, "delivery_status": "info"},
+                                    ],
+                                    "summary": build_summary(),
+                                },
+                            )
+                        )
+                    except Exception:
+                        pass
+                    emit_progress(force=True)
+                    return True
+
                 def reserve_candidates(limit: int) -> List[DispatchEmail]:
                     limit = max(1, int(limit or 0))
                     rows = conn.execute(
@@ -906,6 +971,8 @@ class MailClient:
                         (limit,),
                     ).fetchall()
                     if not rows:
+                        if recycle_consumed_rows():
+                            return reserve_candidates(limit)
                         return []
                     now_stamp = now_iso()
                     emails = [
@@ -1024,13 +1091,47 @@ class MailClient:
                     bcc_processed += len(group.bcc)
                     now_stamp = now_iso()
                     detail_for_log = outcome.detail_line or outcome.status_line
+                    lower_response = (outcome.response_text or "").lower()
+                    status_lower = (outcome.status_line or "").lower()
+                    detail_lower = (detail_for_log or "").lower()
+                    throttle_marker_messages = {
+                        "452 4.7.1 sent too many messages": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
+                        "452 4.7.1 sent too many message": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
+                    }
+                    fatal_stop_marker_messages = {
+                        "421 4.7.1 this email has been temporarily blocked": "네이버 '421 4.7.1 This email has been temporarily blocked' 응답 감지",
+                    }
+                    matched_marker: Optional[str] = None
+                    matched_message: Optional[str] = None
+                    for text in (lower_response, status_lower, detail_lower):
+                        if not text:
+                            continue
+                        for marker, message in throttle_marker_messages.items():
+                            if marker in text:
+                                matched_marker = marker
+                                matched_message = message
+                                break
+                        if matched_marker:
+                            break
+                    if matched_marker is None:
+                        for text in (lower_response, status_lower, detail_lower):
+                            if not text:
+                                continue
+                            for marker, message in fatal_stop_marker_messages.items():
+                                if marker in text:
+                                    matched_marker = marker
+                                    matched_message = message
+                                    break
+                            if matched_marker:
+                                break
+                    throttle_detected = matched_marker in throttle_marker_messages if matched_marker else False
                     error_text = None if outcome.delivery_status == "sent" else (detail_for_log or outcome.status_line or "")[-500:]
                     for prev_status in previous_statuses:
                         if prev_status:
                             domain_totals[prev_status] = max(0, domain_totals.get(prev_status, 0) - 1)
                     for record in recipients:
                         persist_status = outcome.delivery_status
-                        if persist_status == "block":
+                        if persist_status == "block" or throttle_detected:
                             persist_status = "pending"
                         conn.execute(
                             """
@@ -1094,7 +1195,7 @@ class MailClient:
                                     "display": display_line,
                                     "email": recipient,
                                     "sequence": sequence_for_log,
-                                    "delivery_status": outcome.delivery_status,
+                                    "delivery_status": "throttle" if throttle_detected else outcome.delivery_status,
                                     "detail": detail_for_log,
                                     "bcc_total": 0,
                                     "is_primary": False,
@@ -1111,25 +1212,56 @@ class MailClient:
                             last_error = detail_for_log
                     if group.bcc:
                         print(f"  ↳ BCC 대상 {len(group.bcc)}건 포함")
-                    lower_response = (outcome.response_text or "").lower()
-                    status_lower = (outcome.status_line or "").lower()
-                    detail_lower = (detail_for_log or "").lower()
-                    fatal_marker_messages = {
-                        "452 4.7.1 sent too many messages": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
-                        "452 4.7.1 sent too many message": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
-                        "421 4.7.1 this email has been temporarily blocked": "네이버 '421 4.7.1 This email has been temporarily blocked' 응답 감지",
-                    }
-                    fatal_error = next(
-                        (
-                            message
-                            for text in (lower_response, status_lower, detail_lower)
-                            if text
-                            for marker, message in fatal_marker_messages.items()
-                            if marker in text
-                        ),
-                        fatal_error,
-                    )
-                    if fatal_error:
+                    if throttle_detected:
+                        throttle_notice = matched_message or "네이버 발송 제한 응답 감지"
+                        info_message = f"{throttle_notice} · IP 변경 시도"
+                        print(f"[배치 발송] {domain_label} · {info_message}")
+                        try:
+                            self.send_job_report(
+                                JobResult(
+                                    job_id=job_id,
+                                    status="running",
+                                    message=info_message,
+                                    result={
+                                        "logs": [
+                                            {"log": info_message, "delivery_status": "warning"},
+                                        ]
+                                    },
+                                )
+                            )
+                        except Exception:
+                            pass
+                        print("[IP 변경] 비행기 모드 토글을 시작합니다.")
+                        ip_success, ip_message, new_ip = self._perform_ip_change()
+                        log_status = "sent" if ip_success else "error"
+                        report_payload: Dict[str, object] = {
+                            "logs": [
+                                {"log": ip_message, "delivery_status": log_status},
+                            ]
+                        }
+                        if ip_success and new_ip:
+                            report_payload["public_ip"] = new_ip
+                        try:
+                            self.send_job_report(
+                                JobResult(
+                                    job_id=job_id,
+                                    status="running" if ip_success else "failed",
+                                    message=ip_message,
+                                    result=report_payload,
+                                    error=None if ip_success else ip_message,
+                                )
+                            )
+                        except Exception:
+                            pass
+                        print(f"[배치 발송] {domain_label} · {ip_message}")
+                        if not ip_success:
+                            fatal_error = f"{throttle_notice} · {ip_message}"
+                            stop_reason = fatal_error
+                            stop_requested = True
+                        else:
+                            emit_progress(force=True)
+                    elif matched_message:
+                        fatal_error = matched_message
                         stop_reason = fatal_error
                         stop_requested = True
                     emit_progress()
@@ -1223,24 +1355,54 @@ class MailClient:
             error=error_message,
         )
 
-    def handle_change_ip(self, job_id: str) -> JobResult:
-        print("[IP 변경] 비행기 모드 토글을 시작합니다.")
+    def _perform_ip_change(self) -> Tuple[bool, str, Optional[str]]:
         previous_ip = self.public_ip
         try:
             new_ip = change_mobile_ip_at_phone()
         except Exception as exc:  # pylint: disable=broad-except
-            return JobResult(job_id=job_id, status="failed", message=f"IP 변경 중 예외: {exc}")
+            return False, f"IP 변경 실패: {exc}", None
         if not new_ip:
-            return JobResult(job_id=job_id, status="failed", message="새 공인 IP를 확인하지 못했습니다.")
+            return False, "IP 변경 실패: 새 공인 IP를 확인하지 못했습니다.", None
         self.public_ip = new_ip
         self._last_ip_refresh = time.time()
         message = f"공인 IP 변경 완료: {previous_ip or '-'} → {new_ip}"
-        print(f"[IP 변경 완료] {message}")
+        return True, message, new_ip
+
+    def handle_change_ip(self, job_id: str) -> JobResult:
+        print("[IP 변경] 비행기 모드 토글을 시작합니다.")
+        self.send_job_report(
+            JobResult(
+                job_id=job_id,
+                status="running",
+                message="IP 변경 중...",
+                result={
+                    "logs": [
+                        {
+                            "log": "IP 변경 중...",
+                            "delivery_status": "info",
+                        }
+                    ]
+                },
+            )
+        )
+        success, message, new_ip = self._perform_ip_change()
+        if success:
+            print(f"[IP 변경 완료] {message}")
+        else:
+            print(f"[IP 변경 실패] {message}")
+        log_entry = {
+            "log": f"IP 변경 완료: {new_ip}" if success and new_ip else message,
+            "delivery_status": "sent" if success else "error",
+        }
+        result_payload: Dict[str, object] = {"logs": [log_entry]}
+        if success and new_ip:
+            result_payload["public_ip"] = new_ip
         return JobResult(
             job_id=job_id,
-            status="success",
+            status="success" if success else "failed",
             message=message,
-            result={"public_ip": new_ip},
+            result=result_payload,
+            error=None if success else message,
         )
 
     # ------------------------------------------------------------------ #
