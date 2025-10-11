@@ -5,28 +5,169 @@
 <title>메일 발송 제어 대시보드</title>
 <style>
 :root {
-  color-scheme: light;
   --card-columns: 4;
   --card-gap: 12px;
   --card-min-width: 220px;
+
+  color-scheme: light;
+  --color-bg: #f1f5f9;
+  --color-text: #0f172a;
+  --color-heading: #1f2937;
+  --color-subtext: #6b7280;
+  --color-muted: #475569;
+  --color-muted-soft: #64748b;
+  --color-muted-strong: #1e293b;
+  --color-placeholder: #94a3b8;
+  --color-surface: #ffffff;
+  --color-surface-subtle: #f8fafc;
+  --color-surface-alt: #f9fafb;
+  --color-border: #e2e8f0;
+  --color-border-strong: #cbd5f5;
+  --color-chip-neutral-bg: #f1f5f9;
+  --color-chip-neutral-text: #475569;
+  --color-chip-neutral-border: #e2e8f0;
+  --color-accent: #2563eb;
+  --color-accent-strong: #1d4ed8;
+  --color-accent-soft: #dbeafe;
+  --color-accent-text-contrast: #ffffff;
+  --color-success: #047857;
+  --color-success-bg: #dcfce7;
+  --color-success-soft: #ecfdf5;
+  --color-success-border: #bbf7d0;
+  --color-danger: #b91c1c;
+  --color-danger-bg: #fee2e2;
+  --color-danger-border: #fca5a5;
+  --color-danger-soft: #fef2f2;
+  --color-danger-soft-border: #fecdd3;
+  --color-danger-strong: #ef4444;
+  --color-danger-intense: #dc2626;
+  --color-warning: #d97706;
+  --color-warning-strong: #b45309;
+  --color-info: #0369a1;
+  --color-modal-backdrop: rgba(15, 23, 42, 0.48);
+  --color-ghost-border: #94a3b8;
+  --color-ip-highlight: #2563eb;
+  --shadow-elevated: rgba(15, 23, 42, 0.08);
+  --shadow-success: rgba(4, 120, 87, 0.12);
+  --shadow-hover: rgba(37, 99, 235, 0.2);
+  --shadow-modal: rgba(15, 23, 42, 0.25);
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --color-bg: #0b1120;
+  --color-text: #e2e8f0;
+  --color-heading: #f8fafc;
+  --color-subtext: #94a3b8;
+  --color-muted: #94a3b8;
+  --color-muted-soft: #a5b4cf;
+  --color-muted-strong: #cbd5f5;
+  --color-placeholder: #94a3b8;
+  --color-surface: #111c2f;
+  --color-surface-subtle: #16243c;
+  --color-surface-alt: #1b2a44;
+  --color-border: rgba(148, 163, 184, 0.25);
+  --color-border-strong: rgba(148, 163, 184, 0.4);
+  --color-chip-neutral-bg: rgba(148, 163, 184, 0.14);
+  --color-chip-neutral-text: #e2e8f0;
+  --color-chip-neutral-border: rgba(148, 163, 184, 0.35);
+  --color-accent: #60a5fa;
+  --color-accent-strong: #93c5fd;
+  --color-accent-soft: rgba(96, 165, 250, 0.18);
+  --color-accent-text-contrast: #041019;
+  --color-success: #34d399;
+  --color-success-bg: rgba(34, 197, 94, 0.22);
+  --color-success-soft: rgba(22, 101, 52, 0.4);
+  --color-success-border: rgba(34, 197, 94, 0.45);
+  --color-danger: #f87171;
+  --color-danger-bg: rgba(248, 113, 113, 0.24);
+  --color-danger-border: rgba(248, 113, 113, 0.45);
+  --color-danger-soft: rgba(127, 29, 29, 0.35);
+  --color-danger-soft-border: rgba(248, 113, 113, 0.38);
+  --color-danger-strong: #f87171;
+  --color-danger-intense: #f87171;
+  --color-warning: #fbbf24;
+  --color-warning-strong: #f59e0b;
+  --color-info: #38bdf8;
+  --color-modal-backdrop: rgba(2, 6, 23, 0.7);
+  --color-ghost-border: rgba(148, 163, 184, 0.45);
+  --color-ip-highlight: #93c5fd;
+  --shadow-elevated: rgba(2, 6, 23, 0.55);
+  --shadow-success: rgba(34, 197, 94, 0.25);
+  --shadow-hover: rgba(96, 165, 250, 0.35);
+  --shadow-modal: rgba(2, 6, 23, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) {
+    color-scheme: dark;
+    --color-bg: #0b1120;
+    --color-text: #e2e8f0;
+    --color-heading: #f8fafc;
+    --color-subtext: #94a3b8;
+    --color-muted: #94a3b8;
+    --color-muted-soft: #a5b4cf;
+    --color-muted-strong: #cbd5f5;
+    --color-placeholder: #94a3b8;
+    --color-surface: #111c2f;
+    --color-surface-subtle: #16243c;
+    --color-surface-alt: #1b2a44;
+    --color-border: rgba(148, 163, 184, 0.25);
+    --color-border-strong: rgba(148, 163, 184, 0.4);
+    --color-chip-neutral-bg: rgba(148, 163, 184, 0.14);
+    --color-chip-neutral-text: #e2e8f0;
+    --color-chip-neutral-border: rgba(148, 163, 184, 0.35);
+    --color-accent: #60a5fa;
+    --color-accent-strong: #93c5fd;
+    --color-accent-soft: rgba(96, 165, 250, 0.18);
+    --color-accent-text-contrast: #041019;
+    --color-success: #34d399;
+    --color-success-bg: rgba(34, 197, 94, 0.22);
+    --color-success-soft: rgba(22, 101, 52, 0.4);
+    --color-success-border: rgba(34, 197, 94, 0.45);
+    --color-danger: #f87171;
+    --color-danger-bg: rgba(248, 113, 113, 0.24);
+    --color-danger-border: rgba(248, 113, 113, 0.45);
+    --color-danger-soft: rgba(127, 29, 29, 0.35);
+    --color-danger-soft-border: rgba(248, 113, 113, 0.38);
+    --color-danger-strong: #f87171;
+    --color-danger-intense: #f87171;
+    --color-warning: #fbbf24;
+    --color-warning-strong: #f59e0b;
+    --color-info: #38bdf8;
+    --color-modal-backdrop: rgba(2, 6, 23, 0.7);
+    --color-ghost-border: rgba(148, 163, 184, 0.45);
+    --color-ip-highlight: #93c5fd;
+    --shadow-elevated: rgba(2, 6, 23, 0.55);
+    --shadow-success: rgba(34, 197, 94, 0.25);
+    --shadow-hover: rgba(96, 165, 250, 0.35);
+    --shadow-modal: rgba(2, 6, 23, 0.6);
+  }
 }
 * { box-sizing: border-box; }
 body {
   font-family: "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
-  background: #f1f5f9;
-  color: #0f172a;
+  background: var(--color-bg);
+  color: var(--color-text);
   margin: 0;
   padding: 20px;
+  transition: background-color 0.24s ease, color 0.24s ease;
 }
 h1 {
   margin: 0;
   font-size: 28px;
   font-weight: 700;
+  color: var(--color-heading);
 }
 h2 {
   margin: 0;
   font-size: 20px;
   font-weight: 600;
+  color: var(--color-heading);
 }
 a { color: inherit; }
 header {
@@ -37,10 +178,10 @@ header {
   margin-bottom: 20px;
 }
 .summary {
-  background: #ffffff;
+  background: var(--color-surface);
   border-radius: 16px;
   padding: 16px 20px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 8px 24px var(--shadow-elevated);
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -63,7 +204,7 @@ header {
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: #1f2937;
+  color: var(--color-heading);
 }
 .summary-toggle input[type="checkbox"] {
   width: 16px;
@@ -71,15 +212,15 @@ header {
   margin: 0;
 }
 .summary-actions button.device-edit-active {
-  background: #fee2e2;
-  border-color: #fca5a5;
-  color: #b91c1c;
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger-border);
+  color: var(--color-danger);
 }
 .global-panel {
-  background: #ffffff;
+  background: var(--color-surface);
   border-radius: 16px;
   padding: 18px 20px;
-  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 8px 24px var(--shadow-elevated);
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -90,19 +231,74 @@ header {
   font-size: 18px;
   font-weight: 700;
 }
-.global-form {
+.global-header {
   display: flex;
+  align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
   gap: 12px;
 }
+.global-header .global-updated {
+  font-size: 12px;
+}
+.global-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+@media (max-width: 1080px) {
+  .global-layout {
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+  }
+}
+@media (max-width: 860px) {
+  .global-layout {
+    grid-template-columns: 1fr;
+  }
+}
+.global-primary {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.global-secondary {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.global-primary-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+.global-primary-actions .global-actions {
+  width: 100%;
+  justify-content: flex-end;
+}
+.global-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  align-items: start;
+}
 .global-form .field {
-  flex: 1 1 220px;
+  min-width: 0;
+}
+.global-form .field.compact {
+  max-width: 140px;
+}
+.global-form .domain-field,
+.global-form .header-field {
+  grid-column: 1 / -1;
 }
 .global-form .domain-field {
-  min-width: 220px;
+  min-width: 240px;
 }
 .global-form textarea {
-  min-height: 80px;
+  min-height: 120px;
+}
+.header-field textarea {
+  min-height: 220px;
 }
 .domain-radio-group {
   display: inline-flex;
@@ -121,13 +317,6 @@ header {
   width: 16px;
   height: 16px;
 }
-.global-footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 12px;
-}
 .global-actions {
   display: flex;
   gap: 8px;
@@ -139,8 +328,8 @@ header {
   gap: 12px;
 }
 .global-schedule-card {
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  background: var(--color-surface-subtle);
+  border: 1px solid var(--color-border);
   border-radius: 14px;
   padding: 16px;
   display: flex;
@@ -149,8 +338,8 @@ header {
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 }
 .global-schedule-card.active {
-  border-color: #047857;
-  box-shadow: 0 10px 28px rgba(4, 120, 87, 0.12);
+  border-color: var(--color-success);
+  box-shadow: 0 10px 28px var(--shadow-success);
 }
 .schedule-header {
   display: flex;
@@ -164,7 +353,7 @@ header {
   gap: 8px;
   font-size: 13px;
   font-weight: 600;
-  color: #1f2937;
+  color: var(--color-heading);
 }
 .schedule-toggle input[type="checkbox"] {
   width: 18px;
@@ -175,12 +364,12 @@ header {
   font-weight: 600;
   padding: 4px 12px;
   border-radius: 999px;
-  background: #e2e8f0;
-  color: #475569;
+  background: var(--color-chip-neutral-bg);
+  color: var(--color-muted);
 }
 .schedule-status-pill.active {
-  background: #dcfce7;
-  color: #047857;
+  background: var(--color-success-bg);
+  color: var(--color-success);
 }
 .schedule-time-field {
   gap: 8px;
@@ -203,11 +392,11 @@ header {
   display: none;
 }
 .schedule-input-disabled {
-  background: #f1f5f9 !important;
-  color: #94a3b8;
+  background: var(--color-surface-subtle) !important;
+  color: var(--color-placeholder);
 }
 .schedule-input-disabled::placeholder {
-  color: #cbd5f5;
+  color: var(--color-border-strong);
 }
 .schedule-status-grid {
   display: flex;
@@ -216,38 +405,38 @@ header {
 }
 .schedule-status-grid .status-item {
   flex: 1 1 140px;
-  background: #ffffff;
+  background: var(--color-surface);
   border-radius: 10px;
   padding: 10px 12px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 .schedule-status-grid .status-label {
   font-size: 11px;
-  color: #64748b;
+  color: var(--color-muted-soft);
   font-weight: 600;
 }
 .schedule-status-grid .status-value {
   font-size: 14px;
   font-weight: 600;
-  color: #0f172a;
+  color: var(--color-text);
 }
 .field-hint {
   font-size: 12px;
-  color: #64748b;
+  color: var(--color-muted-soft);
 }
 .field-hint.muted {
-  color: #475569;
+  color: var(--color-muted);
 }
 .field-error {
   font-size: 12px;
-  color: #b91c1c;
+  color: var(--color-danger);
 }
 .field-unsaved {
   font-size: 12px;
-  color: #0369a1;
+  color: var(--color-info);
   font-weight: 600;
 }
 .hidden {
@@ -256,17 +445,17 @@ header {
 .global-status {
   font-size: 12px;
   min-height: 16px;
-  color: #475569;
+  color: var(--color-muted);
 }
 .global-status.success {
-  color: #047857;
+  color: var(--color-success);
 }
 .global-status.error {
-  color: #b91c1c;
+  color: var(--color-danger);
 }
 .global-updated {
   font-size: 12px;
-  color: #6b7280;
+  color: var(--color-subtext);
 }
 .summary-item {
   display: flex;
@@ -285,10 +474,10 @@ header {
   align-items: stretch;
 }
 .card {
-  background: #ffffff;
+  background: var(--color-surface);
   border-radius: 10px;
   padding: 12px;
-  box-shadow: 0 6px 14px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 6px 14px var(--shadow-elevated);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -315,7 +504,7 @@ button.card-delete-btn {
   font-size: 12px;
 }
 button.card-delete-btn.danger {
-  background: #ef4444;
+  background: var(--color-danger-strong);
 }
 button.card-delete-btn:disabled {
   opacity: 0.7;
@@ -331,7 +520,7 @@ button.card-delete-btn:disabled {
 }
 .meta {
   font-size: 11px;
-  color: #64748b;
+  color: var(--color-muted-soft);
   line-height: 1.45;
 }
 .ip-row {
@@ -340,9 +529,9 @@ button.card-delete-btn:disabled {
   justify-content: space-between;
   gap: 10px;
   padding: 8px 10px;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--color-border);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--color-surface-subtle);
   font-size: 13px;
 }
 .ip-row.offline {
@@ -350,15 +539,15 @@ button.card-delete-btn:disabled {
 }
 .ip-label {
   font-weight: 600;
-  color: #1f2937;
+  color: var(--color-heading);
 }
 .ip-value {
   font-family: "SFMono-Regular", "Consolas", "Menlo", monospace;
   font-size: 13px;
-  color: #2563eb;
+  color: var(--color-ip-highlight);
 }
 .ip-placeholder {
-  color: #94a3b8;
+  color: var(--color-placeholder);
 }
 .status-chip {
   display: inline-flex;
@@ -369,9 +558,9 @@ button.card-delete-btn:disabled {
   font-size: 12px;
   font-weight: 600;
 }
-.status-connected { background: #dcfce7; color: #047857; }
-.status-disconnected { background: #fee2e2; color: #b91c1c; }
-.status-unknown { background: #f1f5f9; color: #475569; }
+.status-connected { background: var(--color-success-bg); color: var(--color-success); }
+.status-disconnected { background: var(--color-danger-bg); color: var(--color-danger); }
+.status-unknown { background: var(--color-chip-neutral-bg); color: var(--color-muted); }
 .status-dot {
   width: 8px;
   height: 8px;
@@ -379,23 +568,29 @@ button.card-delete-btn:disabled {
   background: currentColor;
 }
 .domain-toggle {
-  display: inline-flex;
+  display: flex;
   gap: 12px;
   align-items: center;
+  flex-wrap: wrap;
+}
+.domain-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 .domain-toggle label {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: #334155;
+  color: var(--color-muted);
   padding: 4px 8px;
   border-radius: 999px;
   transition: background-color 0.16s ease, color 0.16s ease;
 }
 .domain-toggle label.checked {
-  background: #dbeafe;
-  color: #1d4ed8;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
   font-weight: 600;
 }
 .domain-count {
@@ -405,31 +600,35 @@ button.card-delete-btn:disabled {
   min-width: 38px;
   padding: 2px 7px;
   border-radius: 999px;
-  background: #e2e8f0;
+  background: var(--color-chip-neutral-bg);
   font-size: 11px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--color-muted-strong);
 }
 .domain-toggle label.checked .domain-count {
-  background: #2563eb;
-  color: #ffffff;
+  background: var(--color-accent);
+  color: var(--color-accent-text-contrast);
 }
 .domain-count.complete {
-  background: #dcfce7;
-  color: #047857;
+  background: var(--color-success-bg);
+  color: var(--color-success);
 }
 .domain-toggle label.checked .domain-count.complete {
-  background: #dcfce7;
-  color: #047857;
+  background: var(--color-success-bg);
+  color: var(--color-success);
+}
+.domain-option button.domain-add-btn {
+  padding: 4px 10px;
+  font-size: 11px;
 }
 .domain-summary {
   font-size: 12px;
-  color: #475569;
+  color: var(--color-muted);
   margin: 4px 0 0 0;
 }
 .domain-cycle {
   font-size: 12px;
-  color: #047857;
+  color: var(--color-success);
   margin: 2px 0 0 0;
   display: none;
   align-items: center;
@@ -443,14 +642,14 @@ button.card-delete-btn:disabled {
   align-items: center;
   padding: 2px 8px;
   border-radius: 999px;
-  background: #dcfce7;
-  color: #047857;
+  background: var(--color-success-bg);
+  color: var(--color-success);
   font-weight: 600;
   font-size: 11px;
 }
 .cycle-meta {
   font-size: 11px;
-  color: #64748b;
+  color: var(--color-muted-soft);
 }
 .config-block {
   display: flex;
@@ -461,6 +660,25 @@ button.card-delete-btn:disabled {
   display: flex;
   gap: 8px;
   flex-wrap: wrap;
+}
+.field-row.helo-row {
+  flex-wrap: nowrap;
+  align-items: flex-end;
+}
+.field-row.helo-row .field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.field-row.helo-row .field.compact {
+  flex: 0 0 110px;
+}
+.field-row.helo-row .field.compact input {
+  width: 100%;
+}
+@media (max-width: 640px) {
+  .field-row.helo-row {
+    flex-wrap: wrap;
+  }
 }
 .field-row .field {
   flex: 1 1 160px;
@@ -476,17 +694,18 @@ button.card-delete-btn:disabled {
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
-  color: #1f2937;
+  color: var(--color-heading);
 }
 .field span { font-weight: 600; }
 .field input,
 .field textarea {
   padding: 8px 10px;
-  border: 1px solid #cbd5f5;
+  border: 1px solid var(--color-border-strong);
   border-radius: 10px;
-  background: #f8fafc;
+  background: var(--color-surface-subtle);
   font-size: 13px;
   font-family: inherit;
+  color: var(--color-text);
 }
 .field textarea {
   min-height: 100px;
@@ -517,8 +736,8 @@ button {
   padding: 8px 16px;
   font-weight: 600;
   font-size: 13px;
-  background: #2563eb;
-  color: #fff;
+  background: var(--color-accent);
+  color: var(--color-accent-text-contrast);
   transition: transform 0.12s ease, box-shadow 0.16s ease;
 }
 button.small {
@@ -526,16 +745,16 @@ button.small {
   font-size: 12px;
 }
 button.secondary {
-  background: #e2e8f0;
-  color: #1e293b;
+  background: var(--color-border);
+  color: var(--color-muted-strong);
 }
 button.ghost {
   background: transparent;
-  border: 1px solid #94a3b8;
-  color: #1e293b;
+  border: 1px solid var(--color-ghost-border);
+  color: var(--color-heading);
 }
 button.danger {
-  background: #ef4444;
+  background: var(--color-danger-strong);
 }
 button:disabled {
   cursor: not-allowed;
@@ -544,13 +763,13 @@ button:disabled {
 }
 button:not(:disabled):hover {
   transform: translateY(-1px);
-  box-shadow: 0 10px 18px rgba(37, 99, 235, 0.2);
+  box-shadow: 0 10px 18px var(--shadow-hover);
 }
 .log-box {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--color-border);
   border-radius: 12px;
   padding: 12px;
-  background: #ffffff;
+  background: var(--color-surface);
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -576,26 +795,26 @@ button:not(:disabled):hover {
 .log-stats {
   font-size: 12px;
   font-weight: 600;
-  color: #1e293b;
+  color: var(--color-muted-strong);
 }
 .log-stats.secondary {
   font-weight: 500;
-  color: #475569;
+  color: var(--color-muted);
 }
 .log-stats.secondary[data-state="running"] {
-  color: #2563eb;
+  color: var(--color-accent);
 }
 .log-stats.secondary[data-state="cancelling"] {
-  color: #d97706;
+  color: var(--color-warning);
 }
 .log-stats.secondary[data-state="success"] {
-  color: #047857;
+  color: var(--color-success);
 }
 .log-stats.secondary[data-state="failed"] {
-  color: #b91c1c;
+  color: var(--color-danger);
 }
 .log-stats.secondary[data-state="cancelled"] {
-  color: #b45309;
+  color: var(--color-warning-strong);
 }
 .log-clear-btn {
   padding: 4px 10px;
@@ -608,36 +827,36 @@ button:not(:disabled):hover {
   flex-direction: column;
   gap: 8px;
   font-size: 12px;
-  color: #475569;
+  color: var(--color-muted);
 }
 .log-item {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--color-border);
   border-radius: 10px;
   padding: 10px;
-  background: #f9fafb;
+  background: var(--color-surface-alt);
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 .log-item.ok {
-  background: #ecfdf5;
-  border-color: #bbf7d0;
-  color: #047857;
+  background: var(--color-success-soft);
+  border-color: var(--color-success-border);
+  color: var(--color-success);
 }
 .log-item.fail {
-  background: #fef2f2;
-  border-color: #fecdd3;
-  color: #b91c1c;
+  background: var(--color-danger-soft);
+  border-color: var(--color-danger-soft-border);
+  color: var(--color-danger);
 }
 .log-meta {
   font-size: 11px;
-  color: #6b7280;
+  color: var(--color-subtext);
 }
 .log-text {
   font-family: "SFMono-Regular", "Menlo", "Consolas", monospace;
   font-size: 12px;
   line-height: 1.4;
-  color: #1f2937;
+  color: var(--color-heading);
   word-break: break-all;
 }
 
@@ -646,33 +865,40 @@ button:not(:disabled):hover {
   align-items: center;
   gap: 8px;
   font-size: 13px;
-  color: #1f2937;
+  color: var(--color-heading);
 }
 .inline-field span {
   font-weight: 600;
 }
-.inline-field input {
-  width: 64px;
+.inline-field input,
+.inline-field select {
   padding: 6px 8px;
-  border: 1px solid #cbd5f5;
+  border: 1px solid var(--color-border-strong);
   border-radius: 8px;
-  background: #f8fafc;
+  background: var(--color-surface-subtle);
   font-size: 13px;
   font-family: inherit;
+  color: var(--color-text);
+}
+.inline-field input {
+  width: 64px;
   text-align: center;
+}
+.inline-field select {
+  min-width: 120px;
 }
 .empty-hint {
   margin-top: 32px;
   text-align: center;
   font-size: 14px;
-  color: #64748b;
+  color: var(--color-muted-soft);
 }
 .notice {
   font-size: 12px;
   font-weight: 600;
 }
-.notice.success { color: #047857; }
-.notice.error { color: #b91c1c; }
+.notice.success { color: var(--color-success); }
+.notice.error { color: var(--color-danger); }
 
 .modal {
   position: fixed;
@@ -680,23 +906,23 @@ button:not(:disabled):hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(15, 23, 42, 0.48);
+  background: var(--color-modal-backdrop);
   z-index: 50;
   padding: 24px;
 }
 .modal.hidden { display: none; }
 .modal-card {
-  background: #ffffff;
+  background: var(--color-surface);
   border-radius: 18px;
   width: min(900px, 95vw);
   max-height: 90vh;
   display: flex;
   flex-direction: column;
-  box-shadow: 0 20px 36px rgba(15, 23, 42, 0.25);
+  box-shadow: 0 20px 36px var(--shadow-modal);
 }
 .modal-header {
   padding: 18px 22px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--color-border);
   display: flex;
   justify-content: space-between;
   align-items: center;
@@ -726,14 +952,14 @@ button:not(:disabled):hover {
 .file-table th,
 .file-table td {
   padding: 10px;
-  border-bottom: 1px solid #e2e8f0;
+  border-bottom: 1px solid var(--color-border);
   text-align: left;
   vertical-align: top;
 }
 .file-table th {
-  background: #f8fafc;
+  background: var(--color-surface-subtle);
   font-weight: 700;
-  color: #1e293b;
+  color: var(--color-muted-strong);
 }
 .file-ops {
   display: flex;
@@ -741,9 +967,9 @@ button:not(:disabled):hover {
   flex-wrap: wrap;
 }
 .preview-box {
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--color-border);
   border-radius: 12px;
-  background: #f8fafc;
+  background: var(--color-surface-subtle);
   padding: 12px;
   font-family: "D2Coding", "Courier New", monospace;
   font-size: 12px;
@@ -753,10 +979,10 @@ button:not(:disabled):hover {
 }
 .modal-message {
   font-size: 12px;
-  color: #dc2626;
+  color: var(--color-danger-intense);
 }
 .modal-message.success {
-  color: #047857;
+  color: var(--color-success);
 }
 
 .refresh-group {
@@ -767,7 +993,7 @@ button:not(:disabled):hover {
 }
 .last-sync {
   font-size: 12px;
-  color: #64748b;
+  color: var(--color-muted-soft);
 }
 
 @media (max-width: 960px) {
@@ -791,101 +1017,117 @@ button:not(:disabled):hover {
       <span>카드 열 수</span>
       <input type="number" id="cardColumnsInput" min="2" max="6" step="1" value="4">
     </label>
+    <label class="inline-field" for="themeSelect">
+      <span>테마</span>
+      <select id="themeSelect">
+        <option value="light">라이트</option>
+        <option value="dark">다크</option>
+        <option value="system">시스템</option>
+      </select>
+    </label>
     <button class="secondary" id="refreshBtn">새로 고침</button>
   </div>
 </header>
 
 <section class="global-panel" id="globalPanel">
-  <h2>공통 발송 설정</h2>
-  <div class="global-form">
-    <div class="field domain-field">
-      <span>활성 도메인</span>
-      <div class="domain-radio-group" id="globalActiveDomainGroup">
-        <label>
-          <input type="radio" name="globalActiveDomain" value="naver">
-          네이버
-        </label>
-        <label>
-          <input type="radio" name="globalActiveDomain" value="daum">
-          다음
-        </label>
-      </div>
-    </div>
-    <label class="field">
-      <span>HELO</span>
-      <input type="text" id="globalHelo" placeholder="예: mail.example.com">
-    </label>
-    <label class="field">
-      <span>MAIL FROM</span>
-      <input type="text" id="globalMailFrom" placeholder="sender@example.com">
-    </label>
-    <label class="field compact">
-      <span>세션 수</span>
-      <input type="number" id="globalSessionCount" min="1" step="1" placeholder="1 이상">
-    </label>
-    <label class="field compact">
-      <span>BCC 수</span>
-      <input type="number" id="globalBccCount" min="0" max="30" step="1" placeholder="0~30">
-    </label>
+  <div class="global-header">
+    <h2>공통 발송 설정</h2>
+    <div class="global-updated" id="globalUpdatedAt">아직 적용 기록이 없습니다.</div>
   </div>
-  <label class="field">
-    <span>HEADER</span>
-    <textarea id="globalHeader" placeholder="헤더를 입력하세요"></textarea>
-  </label>
-  <div class="global-schedule">
-    <div class="global-schedule-card" id="globalStopScheduleCard">
-      <div class="schedule-header">
-        <label class="schedule-toggle" for="globalStopEnabled">
-          <input type="checkbox" id="globalStopEnabled">
-          <span>자동 중지 예약</span>
-        </label>
-        <span class="schedule-status-pill" id="globalStopStatusPill">비활성</span>
-      </div>
-      <div class="field schedule-time-field">
-        <span id="globalStopTimeLabel">예약 시각 (HH:MM)</span>
-        <div class="schedule-time-input">
-          <input
-            type="text"
-            id="globalStopTime"
-            inputmode="numeric"
-            autocomplete="off"
-            autocorrect="off"
-            spellcheck="false"
-            maxlength="5"
-            placeholder="예: 07:30"
-            aria-labelledby="globalStopTimeLabel">
-          <div class="schedule-time-actions hidden" id="globalStopTimeActions">
-            <button type="button" class="secondary small" id="globalStopTimeCancelBtn">취소</button>
-            <button type="button" class="small" id="globalStopTimeSaveBtn">저장</button>
+  <div class="global-layout">
+    <div class="global-primary">
+      <div class="global-form">
+        <div class="field domain-field">
+          <span>활성 도메인</span>
+          <div class="domain-radio-group" id="globalActiveDomainGroup">
+            <label>
+              <input type="radio" name="globalActiveDomain" value="naver">
+              네이버
+            </label>
+            <label>
+              <input type="radio" name="globalActiveDomain" value="daum">
+              다음
+            </label>
           </div>
         </div>
-        <div class="field-hint" id="globalStopTimeHint">24시간 형식으로 입력하세요 (00:00~23:59).</div>
-        <div class="field-hint muted hidden" id="globalStopTimeDisabledHint">예약을 켜면 바로 적용됩니다.</div>
-        <div class="field-error hidden" id="globalStopTimeError"></div>
-        <div class="field-unsaved hidden" id="globalStopTimeUnsaved">저장하지 않은 변경 사항이 있습니다.</div>
-      </div>
-      <div class="schedule-status-grid">
-        <div class="status-item">
-          <span class="status-label">상태</span>
-          <span class="status-value" id="globalStopStatusText">비활성</span>
-        </div>
-        <div class="status-item">
-          <span class="status-label">다음 실행 예정</span>
-          <span class="status-value" id="globalStopNextRun">--</span>
-        </div>
-        <div class="status-item">
-          <span class="status-label">마지막 실행</span>
-          <span class="status-value" id="globalStopLastRun">--</span>
-        </div>
+        <label class="field">
+          <span>HELO</span>
+          <input type="text" id="globalHelo" placeholder="예: mail.example.com">
+        </label>
+        <label class="field">
+          <span>MAIL FROM</span>
+          <input type="text" id="globalMailFrom" placeholder="sender@example.com">
+        </label>
+        <label class="field compact">
+          <span>세션 수</span>
+          <input type="number" id="globalSessionCount" min="1" step="1" placeholder="1 이상">
+        </label>
+        <label class="field compact">
+          <span>BCC 수</span>
+          <input type="number" id="globalBccCount" min="0" max="30" step="1" placeholder="0~30">
+        </label>
+        <label class="field header-field">
+          <span>HEADER</span>
+          <textarea id="globalHeader" placeholder="헤더를 입력하세요"></textarea>
+        </label>
       </div>
     </div>
-  </div>
-  <div class="global-footer">
-    <div class="global-updated" id="globalUpdatedAt">아직 적용 기록이 없습니다.</div>
-    <div class="global-actions">
-      <button id="globalApplyBtn">설정 적용</button>
-      <button class="secondary" id="globalSendAllBtn">전체 발송</button>
-      <button class="danger" id="globalStopAllBtn">전체 중지</button>
+    <div class="global-secondary">
+      <div class="global-primary-actions">
+        <div class="global-actions">
+          <button id="globalApplyBtn">설정 적용</button>
+          <button class="secondary" id="globalSendAllBtn">전체 발송</button>
+          <button class="danger" id="globalStopAllBtn">전체 중지</button>
+        </div>
+      </div>
+      <div class="global-schedule">
+        <div class="global-schedule-card" id="globalStopScheduleCard">
+          <div class="schedule-header">
+            <label class="schedule-toggle" for="globalStopEnabled">
+              <input type="checkbox" id="globalStopEnabled">
+              <span>자동 중지 예약</span>
+            </label>
+            <span class="schedule-status-pill" id="globalStopStatusPill">비활성</span>
+          </div>
+          <div class="field schedule-time-field">
+            <span id="globalStopTimeLabel">예약 시각 (HH:MM)</span>
+            <div class="schedule-time-input">
+              <input
+                type="text"
+                id="globalStopTime"
+                inputmode="numeric"
+                autocomplete="off"
+                autocorrect="off"
+                spellcheck="false"
+                maxlength="5"
+                placeholder="예: 07:30"
+                aria-labelledby="globalStopTimeLabel">
+              <div class="schedule-time-actions hidden" id="globalStopTimeActions">
+                <button type="button" class="secondary small" id="globalStopTimeCancelBtn">취소</button>
+                <button type="button" class="small" id="globalStopTimeSaveBtn">저장</button>
+              </div>
+            </div>
+            <div class="field-hint" id="globalStopTimeHint">24시간 형식으로 입력하세요 (00:00~23:59).</div>
+            <div class="field-hint muted hidden" id="globalStopTimeDisabledHint">예약을 켜면 바로 적용됩니다.</div>
+            <div class="field-error hidden" id="globalStopTimeError"></div>
+            <div class="field-unsaved hidden" id="globalStopTimeUnsaved">저장하지 않은 변경 사항이 있습니다.</div>
+          </div>
+          <div class="schedule-status-grid">
+            <div class="status-item">
+              <span class="status-label">상태</span>
+              <span class="status-value" id="globalStopStatusText">비활성</span>
+            </div>
+            <div class="status-item">
+              <span class="status-label">다음 실행 예정</span>
+              <span class="status-value" id="globalStopNextRun">--</span>
+            </div>
+            <div class="status-item">
+              <span class="status-label">마지막 실행</span>
+              <span class="status-value" id="globalStopLastRun">--</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
   <div class="global-status" id="globalStatus"></div>
@@ -1036,6 +1278,86 @@ const fieldCache = {};
 const cardRegistry = {};
 const ONLINE_ONLY_KEY = "dashboard.onlineOnlyFilter";
 const LEGACY_HIDDEN_OFFLINE_KEY = "dashboard.hiddenOfflineDevices";
+const THEME_STORAGE_KEY = "dashboard.themePreference";
+const VALID_THEMES = ["light", "dark", "system"];
+let themePreference = "system";
+const prefersDarkQuery = typeof window !== "undefined" && typeof window.matchMedia === "function"
+  ? window.matchMedia("(prefers-color-scheme: dark)")
+  : null;
+
+function isValidTheme(value) {
+  return VALID_THEMES.includes(value);
+}
+
+function loadThemePreference() {
+  try {
+    const stored = localStorage.getItem(THEME_STORAGE_KEY);
+    if (isValidTheme(stored)) {
+      return stored;
+    }
+  } catch (err) {
+    console.warn("테마 설정을 불러오지 못했습니다.", err);
+  }
+  return "system";
+}
+
+function persistThemePreference(theme) {
+  try {
+    localStorage.setItem(THEME_STORAGE_KEY, theme);
+  } catch (err) {
+    console.warn("테마 설정 저장에 실패했습니다.", err);
+  }
+}
+
+function applyThemePreference(theme) {
+  const root = document.documentElement;
+  if (theme === "light") {
+    root.setAttribute("data-theme", "light");
+  } else if (theme === "dark") {
+    root.setAttribute("data-theme", "dark");
+  } else {
+    root.removeAttribute("data-theme");
+    theme = "system";
+  }
+  root.dataset.themePreference = theme;
+}
+
+function syncThemeSelect(theme) {
+  const select = document.getElementById("themeSelect");
+  if (select && select.value !== theme) {
+    select.value = theme;
+  }
+}
+
+function handleThemeSelectChange(event) {
+  const next = event.target.value;
+  themePreference = isValidTheme(next) ? next : "system";
+  persistThemePreference(themePreference);
+  applyThemePreference(themePreference);
+}
+
+function handleSystemThemeChange() {
+  if (themePreference === "system") {
+    applyThemePreference("system");
+  }
+}
+
+function initThemeControl() {
+  themePreference = loadThemePreference();
+  applyThemePreference(themePreference);
+  syncThemeSelect(themePreference);
+  const select = document.getElementById("themeSelect");
+  if (select) {
+    select.addEventListener("change", handleThemeSelectChange);
+  }
+  if (prefersDarkQuery) {
+    if (typeof prefersDarkQuery.addEventListener === "function") {
+      prefersDarkQuery.addEventListener("change", handleSystemThemeChange);
+    } else if (typeof prefersDarkQuery.addListener === "function") {
+      prefersDarkQuery.addListener(handleSystemThemeChange);
+    }
+  }
+}
 
 function clampNumber(value, min, max, fallback) {
   const parsed = typeof value === "number" ? value : parseInt(value, 10);
@@ -2837,19 +3159,25 @@ function buildDeviceCard(device) {
       <button class="ghost small" data-action="change-ip">IP 변경</button>
     </div>
     <div class="domain-toggle">
-      <label data-role="domainLabel" data-domain="naver">
-        <input type="radio" data-role="domainRadio" value="naver"> 네이버
-        <span class="domain-count" data-role="domainCount" data-domain="naver">0</span>
-      </label>
-      <label data-role="domainLabel" data-domain="daum">
-        <input type="radio" data-role="domainRadio" value="daum"> 다음
-        <span class="domain-count" data-role="domainCount" data-domain="daum">0</span>
-      </label>
+      <div class="domain-option" data-domain="naver">
+        <label data-role="domainLabel" data-domain="naver">
+          <input type="radio" data-role="domainRadio" value="naver"> 네이버
+          <span class="domain-count" data-role="domainCount" data-domain="naver">0</span>
+        </label>
+        <button type="button" class="ghost small domain-add-btn" data-action="files" data-domain="naver">관리</button>
+      </div>
+      <div class="domain-option" data-domain="daum">
+        <label data-role="domainLabel" data-domain="daum">
+          <input type="radio" data-role="domainRadio" value="daum"> 다음
+          <span class="domain-count" data-role="domainCount" data-domain="daum">0</span>
+        </label>
+        <button type="button" class="ghost small domain-add-btn" data-action="files" data-domain="daum">관리</button>
+      </div>
     </div>
     <div class="domain-summary" data-role="domainSummary">총 이메일 0건 · 잔여 0건</div>
     <div class="domain-cycle" data-role="domainCycle"></div>
     <div class="config-block">
-      <div class="field-row">
+      <div class="field-row helo-row">
         <label class="field">
           <span>HELO</span>
           <input type="text" data-field="helo">
@@ -2892,8 +3220,6 @@ function buildDeviceCard(device) {
         <button class="secondary" data-action="single">단일 발송</button>
         <button data-action="batch">전체 발송</button>
         <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
-        <button class="ghost" data-action="files" data-domain="naver">네이버 DB 추가</button>
-        <button class="ghost" data-action="files" data-domain="daum">다음 DB 추가</button>
         </div>
       </div>
     </div>
@@ -3512,6 +3838,7 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+initThemeControl();
 initOnlineOnlyToggle();
 initCardColumnControl();
 loadDevices();
