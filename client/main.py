@@ -11,7 +11,7 @@ from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Deque, Dict, Iterable, List, Optional, Tuple
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -22,7 +22,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.12"
+APP_VERSION = "0.0.14"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -311,6 +311,8 @@ class MailClient:
         self._recovery_failures: Dict[str, str] = {}
         self.public_ip: Optional[str] = None
         self._last_ip_refresh: float = 0.0
+        self._current_job_id: Optional[str] = None
+        self._cancel_ack_sent: Set[str] = set()
 
     # ------------------------------------------------------------------ #
     # 설정/환경 관리
@@ -689,6 +691,7 @@ class MailClient:
             print(f"[경고] 작업 보고 실패: {exc}")
 
     def _update_job_controls(self, controls: Iterable[Dict[str, object]]) -> None:
+        previous_ids = set(self.job_controls.keys())
         snapshot: Dict[str, Dict[str, object]] = {}
         for control in controls:
             if not isinstance(control, dict):
@@ -698,6 +701,43 @@ class MailClient:
                 continue
             snapshot[job_id] = control
         self.job_controls = snapshot
+        removed_ids = previous_ids - set(snapshot.keys())
+        for job_id in removed_ids:
+            self._cancel_ack_sent.discard(job_id)
+
+    def _acknowledge_cancelled_jobs(self) -> None:
+        if not self.job_controls:
+            return
+        pending: List[str] = []
+        for job_id, control in self.job_controls.items():
+            if not isinstance(control, dict):
+                continue
+            if not control.get("cancel_requested"):
+                continue
+            if job_id == self._current_job_id:
+                continue
+            if job_id in self._cancel_ack_sent:
+                continue
+            pending.append(job_id)
+        if not pending:
+            return
+        message = "사용자 요청으로 발송을 중단했습니다. (클라이언트 재접속)"
+        for job_id in pending:
+            self._cancel_ack_sent.add(job_id)
+            try:
+                print(f"[작업 정리] 중지 요청된 작업 {job_id}을(를) 취소 상태로 보고합니다.")
+                self.send_job_report(
+                    JobResult(
+                        job_id=job_id,
+                        status="cancelled",
+                        message=message,
+                        result=None,
+                        error="사용자 요청으로 발송을 중단했습니다.",
+                    )
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[경고] 작업 취소 보고 실패: {exc}")
+                self._cancel_ack_sent.discard(job_id)
 
     def _is_cancel_requested(self, job_id: str) -> bool:
         if not job_id:
@@ -1340,6 +1380,7 @@ class MailClient:
                     status_lower = (outcome.status_line or "").lower()
                     detail_lower = (detail_for_log or "").lower()
                     throttle_marker_messages = {
+                        "550 5.7.2": "네이버 '550 5.7.2' 응답 감지",  # Your email has been blocked because the sender is unauthenticated
                         "452 4.7.1 sent too many messages": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
                         "452 4.7.1 sent too many message": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
                         "421 4.3.2 your ip blocked from this server": "네이버 '421 4.3.2 Your IP blocked from this server' 응답 감지",
@@ -1946,17 +1987,29 @@ class MailClient:
                     self.connected = True
                     configs = response.get("configs") or {}
                     self.apply_configs(configs)
+                    controls = response.get("job_controls") or []
+                    if isinstance(controls, Iterable):
+                        self._update_job_controls(controls)
+                    self._acknowledge_cancelled_jobs()
                     jobs = response.get("jobs") or []
                     for job in jobs:
                         job_id = str(job.get("job_id"))
+                        if job_id:
+                            self._current_job_id = job_id
+                            self._cancel_ack_sent.discard(job_id)
                         self.send_job_report(
                             JobResult(job_id=job_id, status="running", message="작업 시작")
                         )
-                        result = self.process_job(job)
+                        try:
+                            result = self.process_job(job)
+                        finally:
+                            if job_id:
+                                self._current_job_id = None
                         domain_states = self.collect_domain_states()
                         self.send_job_report(result, domain_states)
                         if job_id:
                             self.job_controls.pop(job_id, None)
+                            self._cancel_ack_sent.discard(job_id)
                     time.sleep(self.interval)
                 except requests.RequestException as exc:
                     if self.connected:
