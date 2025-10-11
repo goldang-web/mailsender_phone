@@ -748,6 +748,14 @@ button.secondary {
   background: var(--color-border);
   color: var(--color-muted-strong);
 }
+button.secondary.is-running,
+button.secondary.is-running:disabled {
+  background: var(--color-success);
+  color: var(--color-accent-text-contrast);
+  box-shadow: 0 10px 18px var(--shadow-success);
+  opacity: 1;
+  cursor: not-allowed;
+}
 button.ghost {
   background: transparent;
   border: 1px solid var(--color-ghost-border);
@@ -1449,6 +1457,17 @@ function sanitizeGlobalDomain(value) {
   const candidate = String(value ?? "").trim().toLowerCase();
   if (candidate === "daum") {
     return "daum";
+  }
+  return "naver";
+}
+
+function normalizeDeviceDomain(value) {
+  const candidate = String(value ?? "").trim().toLowerCase();
+  if (candidate === "daum") {
+    return "daum";
+  }
+  if (candidate === "naver") {
+    return "naver";
   }
   return "naver";
 }
@@ -2287,6 +2306,24 @@ function latestChangeIpJob(device) {
   return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
 }
 
+function latestSingleJob(device, domain) {
+  if (!device?.jobs?.length) {
+    return null;
+  }
+  const targetDomain = normalizeDeviceDomain(domain || device.active_domain || "naver");
+  const candidates = device.jobs.filter((job) => {
+    if (job.job_type !== "single_send") {
+      return false;
+    }
+    const jobDomain = normalizeDeviceDomain(job.domain || device.active_domain || targetDomain);
+    return jobDomain === targetDomain;
+  });
+  if (!candidates.length) {
+    return null;
+  }
+  return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
+}
+
 
 function latestBatchJob(device) {
   if (!device?.jobs?.length) {
@@ -2338,6 +2375,32 @@ function hasActiveBatchJob(device) {
     return false;
   }
   return device.jobs.some((job) => job.job_type === "batch_send" && (ACTIVE_JOB_STATES.has(job.status) || (job.status === "running" && job.cancel_requested)));
+}
+
+function updateSingleSendControls(card, device) {
+  const singleBtn = card.querySelector('button[data-action="single"]');
+  if (!singleBtn) {
+    return;
+  }
+  if (!singleBtn.dataset.defaultLabel) {
+    singleBtn.dataset.defaultLabel = singleBtn.textContent;
+  }
+  const deviceData = device || card.__deviceData || {};
+  const activeDomain = normalizeDeviceDomain(getActiveDomain(card, deviceData.active_domain));
+  const job = latestSingleJob(deviceData, activeDomain);
+  const isActive = job ? ACTIVE_JOB_STATES.has(job.status) : false;
+  card.dataset.currentSingleJobDomain = activeDomain;
+  if (isActive) {
+    card.dataset.currentSingleJobId = job?.id || "";
+    singleBtn.disabled = true;
+    singleBtn.classList.add("is-running");
+    singleBtn.textContent = "단일 발송 중...";
+    return;
+  }
+  card.dataset.currentSingleJobId = "";
+  singleBtn.classList.remove("is-running");
+  singleBtn.disabled = false;
+  singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
 }
 
 function updateBatchControls(card, device) {
@@ -2934,6 +2997,7 @@ function attachCardEvents(card) {
         currentDevice.active_domain = domain;
         card.__deviceData = { ...currentDevice };
         populateConfigForm(card, currentDevice, domain);
+        updateSingleSendControls(card, card.__deviceData);
         setNotice(card, `${DOMAIN_LABELS[domain]} 도메인으로 전환했습니다.`);
       } catch (err) {
         setNotice(card, err.message || "도메인 전환에 실패했습니다.", "error");
@@ -3023,25 +3087,88 @@ function attachCardEvents(card) {
 
   const singleBtn = card.querySelector('button[data-action="single"]');
   singleBtn.addEventListener("click", async () => {
+    if (singleBtn.disabled) return;
+    if (!singleBtn.dataset.defaultLabel) {
+      singleBtn.dataset.defaultLabel = singleBtn.textContent;
+    }
+
+    const resetButton = () => {
+      singleBtn.disabled = false;
+      singleBtn.classList.remove("is-loading", "is-running");
+      singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
+      card.dataset.currentSingleJobId = "";
+      if (card.dataset.activeDomain) {
+        card.dataset.currentSingleJobDomain = normalizeDeviceDomain(card.dataset.activeDomain);
+      }
+    };
+
+    singleBtn.disabled = true;
+    singleBtn.classList.add("is-loading", "is-running");
+    singleBtn.textContent = "단일 발송 중...";
+
     const currentDevice = getDevice();
     const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
     const rcpt = card.querySelector('[data-field="rcpt_to"]').value.trim();
+    let jobScheduled = false;
+
     try {
-      await ensureConfigSynced(card, currentDevice, domain);
-    } catch (err) {
-      setNotice(card, err.message || "설정 저장에 실패했습니다.", "error");
-      return;
-    }
-    const payload = { domain, rcpt_to: rcpt || null };
-    try {
-      await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-single`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setNotice(card, "단일 발송 작업을 추가했습니다.");
-      await loadDevices();
-    } catch (err) {
-      setNotice(card, err.message || "단일 발송 예약에 실패했습니다.", "error");
+      try {
+        await ensureConfigSynced(card, currentDevice, domain);
+      } catch (err) {
+        setNotice(card, err.message || "설정 저장에 실패했습니다.", "error");
+        resetButton();
+        return;
+      }
+
+      const payload = { domain, rcpt_to: rcpt || null };
+      try {
+        const result = await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-single`, {
+          method: "POST",
+          body: JSON.stringify(payload),
+        });
+        jobScheduled = true;
+        const scheduledJob = result?.job;
+        if (scheduledJob) {
+          const baseDevice = card.__deviceData || currentDevice || {};
+          const jobs = Array.isArray(baseDevice.jobs) ? [...baseDevice.jobs] : [];
+          const existingIdx = jobs.findIndex((job) => job?.id === scheduledJob.id);
+          const normalizedJob = {
+            ...scheduledJob,
+            job_type: scheduledJob.job_type || "single_send",
+            status: scheduledJob.status || "pending",
+            progress: Array.isArray(scheduledJob.progress) ? scheduledJob.progress : [],
+            cancel_requested: Boolean(scheduledJob.cancel_requested),
+          };
+          if (existingIdx >= 0) {
+            jobs[existingIdx] = { ...jobs[existingIdx], ...normalizedJob };
+          } else {
+            jobs.unshift(normalizedJob);
+          }
+          const updatedDevice = { ...baseDevice, jobs };
+          card.__deviceData = updatedDevice;
+          updateSingleSendControls(card, updatedDevice);
+        } else {
+          updateSingleSendControls(card, card.__deviceData || currentDevice);
+        }
+        setNotice(card, "단일 발송 작업을 추가했습니다.");
+        try {
+          await loadDevices();
+        } catch (refreshErr) {
+          console.error(refreshErr);
+        }
+      } catch (err) {
+        setNotice(card, err.message || "단일 발송 예약에 실패했습니다.", "error");
+        resetButton();
+        return;
+      }
+    } finally {
+      if (!singleBtn.isConnected) {
+        return;
+      }
+      singleBtn.classList.remove("is-loading");
+      if (jobScheduled) {
+        updateSingleSendControls(card, card.__deviceData || currentDevice);
+      }
     }
   });
 
@@ -3266,6 +3393,7 @@ function updateDeviceCard(card, device) {
   ensureFieldCache(device.id, "daum", bestConfig(device, "daum"));
   populateConfigForm(card, device, activeDomain);
   updateIpControls(card, device);
+  updateSingleSendControls(card, device);
 
   const logListEl = card.querySelector('[data-role="logList"]');
   if (logListEl) renderLogList(device, logListEl);
