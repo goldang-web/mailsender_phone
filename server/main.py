@@ -27,6 +27,9 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "anchor_interval": 0,
     "anchor_email": "",
     "rcpt_to": "",
+    "stop_schedule_enabled": False,
+    "stop_schedule_time": "",
+    "stop_schedule_last_run": None,
 }
 
 
@@ -481,6 +484,18 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN client_last_cycle_processed INTEGER DEFAULT 0"
             )
+        if "stop_schedule_enabled" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN stop_schedule_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        if "stop_schedule_time" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN stop_schedule_time TEXT DEFAULT ''"
+            )
+        if "stop_schedule_last_run" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN stop_schedule_last_run TEXT"
+            )
         job_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
@@ -525,9 +540,11 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                 INSERT INTO device_configs (
                     device_id, domain, helo, smtp_host, smtp_port,
                     mail_from, header, session_count, bcc_count,
-                    anchor_interval, anchor_email, rcpt_to, updated_at
+                    anchor_interval, anchor_email, rcpt_to,
+                    stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
+                    updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(device_id, domain) DO NOTHING
                 """,
                 (
@@ -543,9 +560,28 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG["anchor_interval"],
                     DEFAULT_DOMAIN_CONFIG["anchor_email"],
                     DEFAULT_DOMAIN_CONFIG["rcpt_to"],
+                    1 if DEFAULT_DOMAIN_CONFIG["stop_schedule_enabled"] else 0,
+                    DEFAULT_DOMAIN_CONFIG["stop_schedule_time"],
+                    DEFAULT_DOMAIN_CONFIG["stop_schedule_last_run"],
                     now,
                 ),
             )
+        global_defaults = load_global_config(conn=conn)
+        schedule_enabled = sanitize_stop_schedule_enabled(global_defaults.get("stop_schedule_enabled"))
+        schedule_time = sanitize_stop_schedule_time(global_defaults.get("stop_schedule_time"))
+        if schedule_enabled and schedule_time:
+            for domain in DOMAINS:
+                conn.execute(
+                    """
+                    UPDATE device_configs
+                    SET stop_schedule_enabled=1,
+                        stop_schedule_time=?,
+                        stop_schedule_last_run=NULL,
+                        updated_at=?
+                    WHERE device_id=? AND domain=?
+                    """,
+                    (schedule_time, now, device_id, domain),
+                )
         row = conn.execute(
             "SELECT * FROM devices WHERE id=?",
             (device_id,),
@@ -591,6 +627,10 @@ def serialize_config(row: Dict[str, Any]) -> Dict[str, Any]:
     except (TypeError, ValueError):
         session_value = 1
     session_value = max(1, session_value)
+    schedule_enabled = sanitize_stop_schedule_enabled(row.get("stop_schedule_enabled"))
+    schedule_time = sanitize_stop_schedule_time(row.get("stop_schedule_time"))
+    schedule_last_run = sanitize_stop_schedule_last_run(row.get("stop_schedule_last_run"))
+    schedule_next_run = compute_next_stop_schedule(schedule_time) if schedule_enabled and schedule_time else None
     return {
         "domain": row["domain"],
         "helo": row.get("helo", ""),
@@ -603,6 +643,10 @@ def serialize_config(row: Dict[str, Any]) -> Dict[str, Any]:
         "anchor_interval": clamp_anchor_interval(row.get("anchor_interval", 0)),
         "anchor_email": normalize_anchor_email(row.get("anchor_email", "")),
         "rcpt_to": row.get("rcpt_to", ""),
+        "stop_schedule_enabled": schedule_enabled,
+        "stop_schedule_time": schedule_time,
+        "stop_schedule_last_run": schedule_last_run,
+        "stop_schedule_next_run": schedule_next_run,
         "updated_at": row.get("updated_at"),
         "client_db_version": row.get("client_db_version", 0),
         "client_total": row.get("client_total", 0),
@@ -1112,6 +1156,9 @@ class DeviceConfigPayload(BaseModel):
     anchor_interval: Optional[int] = 0
     anchor_email: Optional[str] = ""
     rcpt_to: Optional[str] = ""
+    stop_schedule_enabled: Optional[bool] = None
+    stop_schedule_time: Optional[str] = None
+    stop_schedule_last_run: Optional[str] = None
 
 
 class UpdateConfigRequest(DeviceConfigPayload):
@@ -1137,6 +1184,7 @@ class DomainStatePayload(BaseModel):
     cycle_count: Optional[int] = None
     last_cycle_completed_at: Optional[str] = None
     last_cycle_processed: Optional[int] = None
+    stop_schedule_last_run: Optional[str] = None
 
 
 class JobReportPayload(BaseModel):
@@ -1336,12 +1384,27 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         stored_config["active_domain"] = requested_active_domain
         device_count = max(device_count, domain_update_count)
         next_time_value = schedule_time or previous_time or ""
-        stored_config["stop_schedule_enabled"] = schedule_enabled
-        stored_config["stop_schedule_time"] = next_time_value
+        schedule_updates: Dict[str, Any] = {
+            "stop_schedule_enabled": 1 if schedule_enabled else 0,
+            "stop_schedule_time": next_time_value if schedule_enabled else "",
+        }
+        reset_schedule_run = False
         if not schedule_enabled:
-            stored_config["stop_schedule_last_run"] = None
+            reset_schedule_run = True
         elif (not previous_enabled) or (previous_time != next_time_value):
+            reset_schedule_run = True
+        stored_config["stop_schedule_enabled"] = schedule_enabled
+        stored_config["stop_schedule_time"] = next_time_value if schedule_enabled else ""
+        if reset_schedule_run:
+            schedule_updates["stop_schedule_last_run"] = None
             stored_config["stop_schedule_last_run"] = None
+        else:
+            stored_config["stop_schedule_last_run"] = stored_config.get("stop_schedule_last_run")
+        schedule_device_count, schedule_update_count = apply_global_config_to_devices(conn, schedule_updates)
+        if schedule_update_count:
+            applied_fields.append("stop_schedule")
+        device_count = max(device_count, schedule_device_count)
+        update_count += schedule_update_count
         updated_at = save_global_config(conn, stored_config)
         conn.commit()
         refreshed_config = load_global_config(conn=conn)
@@ -1381,14 +1444,43 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
         device = get_device(device_id, conn=conn)
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        config_data = to_dict(config_row)
         now = now_ts()
         sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
         sanitized_interval = clamp_anchor_interval(payload.anchor_interval or 0)
         sanitized_anchor = normalize_anchor_email(payload.anchor_email or "")
+        current_enabled = sanitize_stop_schedule_enabled(config_data.get("stop_schedule_enabled"))
+        current_time = sanitize_stop_schedule_time(config_data.get("stop_schedule_time"))
+        current_last_run = sanitize_stop_schedule_last_run(config_data.get("stop_schedule_last_run"))
+        requested_enabled = payload.stop_schedule_enabled if payload.stop_schedule_enabled is not None else current_enabled
+        requested_time = payload.stop_schedule_time if payload.stop_schedule_time is not None else current_time
+        requested_last_run = (
+            sanitize_stop_schedule_last_run(payload.stop_schedule_last_run)
+            if payload.stop_schedule_last_run is not None
+            else current_last_run
+        )
+        schedule_enabled = sanitize_stop_schedule_enabled(requested_enabled)
+        schedule_time = sanitize_stop_schedule_time(requested_time)
+        if not schedule_time:
+            schedule_enabled = False
+        schedule_last_run: Optional[str]
+        if not schedule_enabled:
+            schedule_last_run = None
+        elif schedule_time != current_time or schedule_enabled != current_enabled:
+            schedule_last_run = None
+        else:
+            schedule_last_run = requested_last_run
         conn.execute(
             """
             UPDATE device_configs
-            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?, updated_at=?
+            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
+                stop_schedule_enabled=?, stop_schedule_time=?, stop_schedule_last_run=?, updated_at=?
             WHERE device_id=? AND domain=?
             """,
             (
@@ -1402,6 +1494,9 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
                 sanitized_interval,
                 sanitized_anchor,
                 payload.rcpt_to or "",
+                1 if schedule_enabled else 0,
+                schedule_time or "",
+                schedule_last_run,
                 now,
                 device_id,
                 normalized,
@@ -1831,6 +1926,9 @@ def clear_device_logs(device_id: str, payload: ClearLogsRequest) -> Dict[str, An
     if payload.domain:
         normalized_domain = normalize_domain(payload.domain)
     with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         if normalized_domain:
             cursor = conn.execute(
                 "DELETE FROM send_logs WHERE device_id=? AND domain=?",
@@ -1842,11 +1940,20 @@ def clear_device_logs(device_id: str, payload: ClearLogsRequest) -> Dict[str, An
                 (device_id,),
             )
         deleted = cursor.rowcount if cursor.rowcount is not None else 0
+        job_payload = {"domains": [normalized_domain]} if normalized_domain else {"domains": []}
+        reset_job = create_job(
+            conn,
+            device_id,
+            normalized_domain,
+            "reset_sent_sequence",
+            job_payload,
+        )
         conn.commit()
     return {
         "device_id": device_id,
         "domain": normalized_domain,
         "cleared": deleted,
+        "reset_job_id": reset_job["id"],
     }
 
 
@@ -2041,6 +2148,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 cycle_completed_value = None
             else:
                 cycle_completed_value = 1 if state.cycle_completed else 0
+            state_last_run = sanitize_stop_schedule_last_run(state.stop_schedule_last_run)
             conn.execute(
                 """
                 UPDATE device_configs
@@ -2057,6 +2165,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     client_cycle_count=COALESCE(?, client_cycle_count),
                     client_last_cycle_at=COALESCE(?, client_last_cycle_at),
                     client_last_cycle_processed=COALESCE(?, client_last_cycle_processed),
+                    stop_schedule_last_run=COALESCE(?, stop_schedule_last_run),
                     client_updated_at=?
                 WHERE device_id=? AND domain=?
                 """,
@@ -2074,6 +2183,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     state.cycle_count,
                     state.last_cycle_completed_at,
                     state.last_cycle_processed,
+                    state_last_run,
                     now,
                     device_id,
                     domain,

@@ -729,6 +729,94 @@ button.card-delete-btn:disabled {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+.device-schedule {
+  margin-top: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface);
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.device-schedule-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.device-schedule .schedule-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-heading);
+}
+.device-schedule input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+.device-schedule-pill {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-muted);
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--color-surface-subtle);
+  border: 1px solid var(--color-border);
+}
+.device-schedule.active .device-schedule-pill,
+.device-schedule-pill[data-state="active"] {
+  color: var(--color-accent-strong);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+.device-schedule-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.schedule-time-wrapper {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.schedule-time-wrapper button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.device-schedule .schedule-time-input {
+  flex: 0 0 90px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  background: var(--color-surface-subtle);
+  font-size: 13px;
+  text-align: center;
+}
+.device-schedule .schedule-time-input:disabled {
+  background: var(--color-surface-subtle);
+  color: var(--color-muted);
+}
+.device-schedule-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.device-schedule-meta strong {
+  color: var(--color-heading);
+  font-weight: 600;
+}
+.device-schedule-meta strong[data-state="pending-reset"] {
+  color: var(--color-warning-strong);
+}
+.device-schedule-hint {
+  font-size: 11px;
+  color: var(--color-muted-soft);
+}
 button {
   cursor: pointer;
   border: none;
@@ -1273,7 +1361,8 @@ const JOB_STATUS_LABELS = {
 };
 const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
 
-const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
+const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to", "stop_schedule_time"];
+const SCHEDULE_FIELDS = ["stop_schedule_enabled", "stop_schedule_time", "stop_schedule_last_run"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 6;
@@ -1529,6 +1618,9 @@ function initialFieldValues(config) {
     anchor_interval: formatAnchorValue(config?.anchor_interval ?? 0),
     anchor_email: config?.anchor_email || "",
     rcpt_to: config?.rcpt_to || "",
+    stop_schedule_time: sanitizeScheduleTime(config?.stop_schedule_time ?? "") || "",
+    stop_schedule_enabled: config?.stop_schedule_enabled ? "1" : "0",
+    stop_schedule_last_run: config?.stop_schedule_last_run || "",
   };
 }
 
@@ -1582,6 +1674,20 @@ function collectConfigPayload(card, currentDevice, domain) {
   const anchorEmailInput = card.querySelector('[data-field="anchor_email"]');
   const anchorEmailValue = anchorEmailInput?.value?.trim() ?? "";
 
+  const scheduleToggle = card.querySelector('[data-field="stop_schedule_enabled"]');
+  const scheduleTimeInput = card.querySelector('[data-field="stop_schedule_time"]');
+  let scheduleEnabled = Boolean(scheduleToggle?.checked);
+  let scheduleTimeValue = sanitizeScheduleTime(scheduleTimeInput?.value ?? "") || "";
+  if (scheduleTimeInput && scheduleTimeInput.value !== scheduleTimeValue) {
+    scheduleTimeInput.value = scheduleTimeValue;
+  }
+  if (!scheduleTimeValue) {
+    scheduleEnabled = false;
+  }
+
+  const cacheEntry = fieldCache[currentDevice.id]?.[domain];
+  const resetRequested = cacheEntry?.values?.stop_schedule_last_run === "__RESET__";
+
   return {
     payload: {
       helo: card.querySelector('[data-field="helo"]').value.trim(),
@@ -1593,6 +1699,9 @@ function collectConfigPayload(card, currentDevice, domain) {
       anchor_interval: parseAnchorInput(anchorIntervalValue),
       anchor_email: anchorEmailValue,
       rcpt_to: card.querySelector('[data-field="rcpt_to"]').value.trim(),
+      stop_schedule_enabled: scheduleEnabled,
+      stop_schedule_time: scheduleTimeValue,
+      ...(resetRequested ? { stop_schedule_last_run: "" } : {}),
     },
   };
 }
@@ -1653,6 +1762,106 @@ function formatScheduleDate(value) {
     return str;
   }
   return formatDate(str);
+}
+
+function computeDeviceNextRun(timeValue) {
+  const sanitized = sanitizeScheduleTime(timeValue);
+  if (!sanitized) return null;
+  const [hh, mm] = sanitized.split(":").map((part) => Number(part) || 0);
+  const now = new Date();
+  const target = new Date(now);
+  target.setHours(hh, mm, 0, 0);
+  if (target <= now) {
+    target.setDate(target.getDate() + 1);
+  }
+  return target.toISOString();
+}
+
+function updateDeviceSchedule(card, device, domain, config, options = {}) {
+  const scheduleCard = card.querySelector('[data-role="deviceSchedule"]');
+  if (!scheduleCard) return;
+  const toggle = scheduleCard.querySelector('[data-field="stop_schedule_enabled"]');
+  const timeInput = scheduleCard.querySelector('[data-field="stop_schedule_time"]');
+  const statusEl = scheduleCard.querySelector('[data-role="scheduleStatus"]');
+  const nextRunEl = scheduleCard.querySelector('[data-role="scheduleNextRun"]');
+  const lastRunEl = scheduleCard.querySelector('[data-role="scheduleLastRun"]');
+  const hintEl = scheduleCard.querySelector('[data-role="scheduleHint"]');
+  const resetBtn = scheduleCard.querySelector('[data-action="schedule-reset"]');
+  const deviceId = device?.id || card.dataset.deviceId;
+  const cacheEntry = deviceId ? fieldCache[deviceId]?.[domain] : null;
+  const resetPending = cacheEntry?.values?.stop_schedule_last_run === "__RESET__";
+
+  let enabled = Boolean(config?.stop_schedule_enabled);
+  let timeValue = sanitizeScheduleTime(config?.stop_schedule_time) || "";
+  let nextRunValue = config?.stop_schedule_next_run || null;
+  let lastRunValue = config?.stop_schedule_last_run || null;
+
+  if (options.preview) {
+    enabled = Boolean(toggle?.checked);
+    const inputValue = sanitizeScheduleTime(timeInput?.value ?? "") || "";
+    if (!inputValue) {
+      enabled = false;
+    }
+    timeValue = inputValue;
+    nextRunValue = enabled && inputValue ? computeDeviceNextRun(inputValue) : null;
+  }
+
+  if (!nextRunValue && enabled && timeValue) {
+    nextRunValue = computeDeviceNextRun(timeValue);
+  }
+
+  const activeInput = document.activeElement === timeInput;
+  if (toggle) {
+    toggle.checked = enabled;
+  }
+  if (timeInput) {
+    if (!activeInput || options.force) {
+      timeInput.value = timeValue || "";
+    }
+    timeInput.disabled = !enabled;
+  }
+
+  scheduleCard.classList.toggle("active", enabled && Boolean(timeValue));
+  if (statusEl) {
+    if (enabled && timeValue) {
+      statusEl.textContent = `${timeValue} 예정`;
+      statusEl.dataset.state = "active";
+    } else {
+      statusEl.textContent = "비활성";
+      statusEl.dataset.state = "disabled";
+    }
+  }
+  if (nextRunEl) {
+    nextRunEl.textContent = enabled && nextRunValue ? formatDate(nextRunValue) : "--";
+  }
+  if (lastRunEl) {
+    if (resetPending) {
+      lastRunEl.textContent = "저장 시 초기화";
+      lastRunEl.dataset.state = "pending-reset";
+    } else if (lastRunValue) {
+      lastRunEl.textContent = formatScheduleDate(lastRunValue) || lastRunValue;
+      lastRunEl.dataset.state = "reported";
+    } else {
+      lastRunEl.textContent = "--";
+      lastRunEl.dataset.state = "none";
+    }
+  }
+  if (resetBtn) {
+    const hasLastRun = Boolean(config?.stop_schedule_last_run);
+    resetBtn.disabled = !hasLastRun || resetPending;
+    resetBtn.textContent = resetPending ? "재실행 대기" : "오늘 다시 실행";
+  }
+  if (hintEl) {
+    if (!enabled) {
+      hintEl.textContent = "예약을 켜면 지정 시간에 자동으로 발송을 멈춥니다.";
+    } else if (!timeValue) {
+      hintEl.textContent = "HH:MM 형식으로 입력하세요.";
+    } else if (resetPending) {
+      hintEl.textContent = "저장하면 오늘 실행 기록이 초기화됩니다.";
+    } else {
+      hintEl.textContent = "저장하면 지정 시간에 오늘 발송을 중단합니다.";
+    }
+  }
 }
 
 function updateStopScheduleStatus(config, options = {}) {
@@ -2283,6 +2492,11 @@ function buildLogDisplayText(entry) {
   if (!parsed || !parsed.label || !parsed.email) {
     return entry?.response || entry?.log || "-";
   }
+  const baseLabel = parsed.label.trim();
+  let labelText = baseLabel;
+  if (baseLabel && baseLabel.toLowerCase() === "sent" && typeof parsed.count === "number" && parsed.count > 0) {
+    labelText = `Sent(${formatCount(parsed.count)})`;
+  }
   let suffix = "";
   if (parsed.isPrimary) {
     if (typeof parsed.bccCount === "number" && parsed.bccCount > 0) {
@@ -2292,7 +2506,7 @@ function buildLogDisplayText(entry) {
       suffix += ` + 알박기 ${parsed.anchorCount}`;
     }
   }
-  return `${parsed.label} - ${parsed.email}${suffix}`;
+  return `${labelText} - ${parsed.email}${suffix}`;
 }
 
 function latestChangeIpJob(device) {
@@ -2586,6 +2800,10 @@ function bestConfig(device, domain) {
     client_cycle_count: 0,
     client_last_cycle_at: null,
     client_last_cycle_processed: 0,
+    stop_schedule_enabled: false,
+    stop_schedule_time: "",
+    stop_schedule_last_run: null,
+    stop_schedule_next_run: null,
   };
 }
 
@@ -2921,6 +3139,16 @@ function populateConfigForm(card, device, domain) {
   if (anchorEmailInput && document.activeElement !== anchorEmailInput) anchorEmailInput.value = cache.values.anchor_email;
   const rcptInput = card.querySelector('[data-field="rcpt_to"]');
   if (rcptInput && document.activeElement !== rcptInput) rcptInput.value = cache.values.rcpt_to;
+  const scheduleToggle = card.querySelector('[data-field="stop_schedule_enabled"]');
+  if (scheduleToggle) {
+    const enabledValue = cache.values.stop_schedule_enabled === "1";
+    scheduleToggle.checked = enabledValue;
+  }
+  const scheduleTimeInput = card.querySelector('[data-field="stop_schedule_time"]');
+  if (scheduleTimeInput && document.activeElement !== scheduleTimeInput) {
+    scheduleTimeInput.value = cache.values.stop_schedule_time || "";
+  }
+  updateDeviceSchedule(card, device, domain, config, { force: true });
 }
 
 function attachCardEvents(card) {
@@ -3053,6 +3281,58 @@ function attachCardEvents(card) {
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       markFieldDirty(currentDevice.id, domain, "anchor_interval", sanitized);
+    });
+  }
+
+  const scheduleToggle = card.querySelector('[data-field="stop_schedule_enabled"]');
+  if (scheduleToggle) {
+    scheduleToggle.addEventListener("change", () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      const normalizedValue = scheduleToggle.checked ? "1" : "0";
+      markFieldDirty(currentDevice.id, domain, "stop_schedule_enabled", normalizedValue);
+      if (!scheduleToggle.checked) {
+        markFieldDirty(currentDevice.id, domain, "stop_schedule_last_run", "");
+      }
+      const config = bestConfig(currentDevice, domain);
+      updateDeviceSchedule(card, currentDevice, domain, config, { preview: true, force: true });
+    });
+  }
+
+  const scheduleTimeInput = card.querySelector('[data-field="stop_schedule_time"]');
+  if (scheduleTimeInput) {
+    scheduleTimeInput.addEventListener("input", () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, "stop_schedule_time", scheduleTimeInput.value);
+      const config = bestConfig(currentDevice, domain);
+      updateDeviceSchedule(card, currentDevice, domain, config, { preview: true });
+    });
+    scheduleTimeInput.addEventListener("blur", () => {
+      const sanitized = sanitizeScheduleTime(scheduleTimeInput.value) || "";
+      if (scheduleTimeInput.value !== sanitized) {
+        scheduleTimeInput.value = sanitized;
+      }
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, "stop_schedule_time", sanitized);
+      const config = bestConfig(currentDevice, domain);
+      updateDeviceSchedule(card, currentDevice, domain, config, { preview: true, force: true });
+    });
+  }
+
+  const scheduleResetBtn = card.querySelector('[data-action="schedule-reset"]');
+  if (scheduleResetBtn) {
+    scheduleResetBtn.addEventListener("click", () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      const config = bestConfig(currentDevice, domain);
+      if (!config?.stop_schedule_last_run) {
+        setNotice(card, "오늘 실행된 기록이 없어 초기화할 내용이 없습니다.", "info");
+        return;
+      }
+      markFieldDirty(currentDevice.id, domain, "stop_schedule_last_run", "__RESET__");
+      updateDeviceSchedule(card, currentDevice, domain, config, { preview: true, force: true });
     });
   }
 
@@ -3348,6 +3628,26 @@ function buildDeviceCard(device) {
         <button data-action="batch">전체 발송</button>
         <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
         </div>
+      </div>
+    </div>
+    <div class="device-schedule" data-role="deviceSchedule">
+      <div class="device-schedule-header">
+        <label class="schedule-toggle">
+          <input type="checkbox" data-field="stop_schedule_enabled">
+          <span>자동 중지</span>
+        </label>
+        <span class="device-schedule-pill" data-role="scheduleStatus">비활성</span>
+      </div>
+      <div class="device-schedule-body">
+        <div class="schedule-time-wrapper">
+          <input type="text" class="schedule-time-input" data-field="stop_schedule_time" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" placeholder="예: 02:30">
+          <button type="button" class="ghost small" data-action="schedule-reset">오늘 다시 실행</button>
+        </div>
+        <div class="device-schedule-meta">
+          <span>다음 실행: <strong data-role="scheduleNextRun">--</strong></span>
+          <span>마지막 실행: <strong data-role="scheduleLastRun">--</strong></span>
+        </div>
+        <div class="device-schedule-hint" data-role="scheduleHint">예약을 켜면 지정 시간에 자동으로 발송을 멈춥니다.</div>
       </div>
     </div>
     <div class="log-box">

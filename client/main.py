@@ -12,6 +12,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
+from datetime import datetime
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -22,7 +23,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.14"
+APP_VERSION = "0.0.16"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -41,6 +42,7 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "active_domain": "naver",
     "local_versions": {},
     "domain_cycles": {},
+    "stop_schedule": {},
 }
 
 DOMAIN_DB_SCHEMA = """
@@ -300,6 +302,25 @@ class MailClient:
                 "last_completed_at": entry.get("last_completed_at"),
                 "last_processed": entry.get("last_processed"),
             }
+        raw_schedule_config = config.get("stop_schedule") or {}
+        self.stop_schedules: Dict[str, Dict[str, object]] = {}
+        for domain in DOMAINS:
+            entry = raw_schedule_config.get(domain) or {}
+            schedule_time = self._sanitize_schedule_time(entry.get("time"))
+            enabled_flag = self._sanitize_schedule_enabled(entry.get("enabled")) if entry else False
+            enabled = bool(schedule_time) and enabled_flag
+            last_run_local = self._sanitize_schedule_date(entry.get("last_run"))
+            server_last_run = self._sanitize_schedule_date(entry.get("server_last_run"))
+            if self._is_date_newer(server_last_run, last_run_local):
+                last_run_local = server_last_run
+            self.stop_schedules[domain] = {
+                "enabled": enabled,
+                "time": schedule_time if enabled else "",
+                "last_run": last_run_local,
+                "server_last_run": server_last_run,
+                "needs_sync": bool(last_run_local and last_run_local != server_last_run),
+            }
+        self._schedule_events: Dict[str, Dict[str, object]] = {}
         self.session = requests.Session()
         self._configure_session()
         self.domain_paths: Dict[str, Path] = {
@@ -313,6 +334,19 @@ class MailClient:
         self._last_ip_refresh: float = 0.0
         self._current_job_id: Optional[str] = None
         self._cancel_ack_sent: Set[str] = set()
+        raw_sequences = config.get("sent_sequences")
+        if not isinstance(raw_sequences, dict):
+            raw_sequences = {}
+        self.sent_sequences: Dict[str, int] = {}
+        for key, value in raw_sequences.items():
+            try:
+                self.sent_sequences[key] = max(0, int(value))
+            except (TypeError, ValueError):
+                self.sent_sequences[key] = 0
+        for domain in DOMAINS:
+            self.sent_sequences.setdefault(domain, 0)
+        self._sequence_dirty: Set[str] = set()
+        self._last_sequence_flush: float = 0.0
 
     # ------------------------------------------------------------------ #
     # 설정/환경 관리
@@ -456,11 +490,59 @@ class MailClient:
         snapshot["active_domain"] = self.active_domain
         snapshot["local_versions"] = self.local_versions
         snapshot["domain_cycles"] = self.domain_cycles
+        snapshot["stop_schedule"] = self._serialize_stop_schedule()
+        snapshot["sent_sequences"] = self.sent_sequences
         save_config(snapshot)
+        self.config["sent_sequences"] = self.sent_sequences
+        self._sequence_dirty.clear()
+        self._last_sequence_flush = time.monotonic()
 
     # ------------------------------------------------------------------ #
     # 내부 유틸리티
     # ------------------------------------------------------------------ #
+    def _serialize_stop_schedule(self) -> Dict[str, Dict[str, object]]:
+        serialized: Dict[str, Dict[str, object]] = {}
+        for domain, state in self.stop_schedules.items():
+            serialized[domain] = {
+                "enabled": bool(state.get("enabled")),
+                "time": state.get("time") or "",
+                "last_run": state.get("last_run"),
+                "server_last_run": state.get("server_last_run"),
+            }
+        return serialized
+
+    def _maybe_flush_sent_sequences(self, force: bool = False) -> None:
+        if not force and not self._sequence_dirty:
+            return
+        now_point = time.monotonic()
+        if not force and now_point - self._last_sequence_flush < 10:
+            return
+        self.persist()
+        self._last_sequence_flush = now_point
+
+    def _next_sent_sequence(self, domain: Optional[str]) -> int:
+        normalized = (domain or self.active_domain or "naver").lower()
+        current = max(0, int(self.sent_sequences.get(normalized, 0)))
+        new_value = current + 1
+        self.sent_sequences[normalized] = new_value
+        self._sequence_dirty.add(normalized)
+        self._maybe_flush_sent_sequences()
+        return new_value
+
+    def _reset_sent_sequences(self, domains: Optional[Iterable[str]] = None) -> None:
+        if domains is None:
+            target_domains = set(self.sent_sequences.keys()) | set(DOMAINS)
+        else:
+            target_domains = {str(domain or "").lower() for domain in domains if domain}
+        if not target_domains:
+            target_domains = set(DOMAINS)
+        for domain in target_domains:
+            if not domain:
+                continue
+            self.sent_sequences[domain] = 0
+            self._sequence_dirty.add(domain)
+        self._maybe_flush_sent_sequences(force=True)
+
     @staticmethod
     def _sanitize_bcc_count(value: object) -> int:
         try:
@@ -487,6 +569,154 @@ class MailClient:
         if not EMAIL_PATTERN.fullmatch(candidate):
             return None
         return candidate.lower()
+
+    @staticmethod
+    def _sanitize_schedule_enabled(value: object) -> bool:
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in {"", "0", "false", "no", "off"}:
+                return False
+            if lowered in {"1", "true", "yes", "on"}:
+                return True
+        return bool(value)
+
+    @staticmethod
+    def _sanitize_schedule_time(value: object) -> Optional[str]:
+        if value is None:
+            return None
+        candidate = str(value).strip()
+        if not candidate:
+            return None
+        try:
+            parsed = datetime.strptime(candidate, "%H:%M")
+        except ValueError:
+            return None
+        return parsed.strftime("%H:%M")
+
+    @staticmethod
+    def _sanitize_schedule_date(value: object) -> Optional[str]:
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        candidate = str(value).strip()
+        if not candidate:
+            return None
+        try:
+            parsed = datetime.strptime(candidate, "%Y-%m-%d")
+            return parsed.date().isoformat()
+        except ValueError:
+            try:
+                parsed_dt = datetime.fromisoformat(candidate)
+            except ValueError:
+                return None
+            return parsed_dt.date().isoformat()
+
+    @staticmethod
+    def _is_date_newer(candidate: Optional[str], reference: Optional[str]) -> bool:
+        if not candidate:
+            return False
+        if not reference:
+            return True
+        try:
+            candidate_dt = datetime.fromisoformat(candidate)
+        except ValueError:
+            try:
+                candidate_dt = datetime.strptime(candidate, "%Y-%m-%d")
+            except ValueError:
+                return False
+        try:
+            reference_dt = datetime.fromisoformat(reference)
+        except ValueError:
+            try:
+                reference_dt = datetime.strptime(reference, "%Y-%m-%d")
+            except ValueError:
+                return True
+        return candidate_dt.date() > reference_dt.date()
+
+    def _get_schedule_state(self, domain: str) -> Dict[str, object]:
+        normalized = (domain or "").lower()
+        state = self.stop_schedules.get(normalized)
+        if state is None:
+            state = {
+                "enabled": False,
+                "time": "",
+                "last_run": None,
+                "server_last_run": None,
+                "needs_sync": False,
+            }
+            self.stop_schedules[normalized] = state
+        return state
+
+    def _local_now(self) -> datetime:
+        return datetime.now().astimezone()
+
+    def _schedule_due(self, domain: str) -> bool:
+        state = self._get_schedule_state(domain)
+        if not state.get("enabled") or not state.get("time"):
+            return False
+        try:
+            schedule_time = datetime.strptime(state["time"], "%H:%M").time()
+        except (TypeError, ValueError):
+            return False
+        now_point = self._local_now()
+        scheduled_dt = datetime.combine(now_point.date(), schedule_time, tzinfo=now_point.tzinfo)
+        if now_point < scheduled_dt:
+            return False
+        today_iso = now_point.date().isoformat()
+        if state.get("last_run") == today_iso:
+            return False
+        if state.get("server_last_run") == today_iso:
+            state["last_run"] = today_iso
+            state["needs_sync"] = False
+            return False
+        state["last_run"] = today_iso
+        state["needs_sync"] = True
+        self._schedule_events[domain] = {
+            "reason": "예약된 자동 정지 실행",
+            "triggered_at": now_iso(),
+        }
+        label = DOMAIN_LABELS.get(domain, domain)
+        print(f"[예약 중지] {label} · {state['time']} 스케줄 도달, 발송을 중단합니다.")
+        self.persist()
+        return True
+
+    def _schedule_block_reason(self, domain: str) -> Optional[str]:
+        state = self._get_schedule_state(domain)
+        if not state.get("enabled"):
+            return None
+        today_iso = self._local_now().date().isoformat()
+        if state.get("last_run") != today_iso:
+            return None
+        event = self._schedule_events.get(domain)
+        if event and event.get("reason"):
+            return str(event["reason"])
+        return "예약된 자동 정지가 이미 실행되었습니다."
+
+    def _schedule_guard_for_job(self, domain: Optional[str], job_id: str, job_type: str) -> Optional["JobResult"]:
+        if not domain:
+            return None
+        normalized = domain.lower()
+        if normalized not in DOMAINS:
+            return None
+        self._schedule_due(normalized)
+        block_reason = self._schedule_block_reason(normalized)
+        if not block_reason:
+            return None
+        label = DOMAIN_LABELS.get(normalized, normalized)
+        print(f"[예약 중지] {label} · {block_reason}")
+        summary = f"{label} 예약 중지가 활성화되어 작업을 취소했습니다."
+        return JobResult(
+            job_id=job_id,
+            status="cancelled",
+            message=summary,
+            result={"domain": normalized, "job_type": job_type, "reason": block_reason},
+            error=block_reason,
+        )
+
+    def _evaluate_idle_schedules(self) -> None:
+        for domain in DOMAINS:
+            self._schedule_due(domain)
 
     @staticmethod
     def _sanitize_session_count(value: object) -> int:
@@ -752,10 +982,25 @@ class MailClient:
     # ------------------------------------------------------------------ #
     def collect_domain_states(self) -> List[Dict[str, object]]:
         states: List[Dict[str, object]] = []
+
+        def attach_schedule(snapshot: Dict[str, object], domain_key: str) -> Dict[str, object]:
+            schedule_state = self.stop_schedules.get(domain_key)
+            if not schedule_state:
+                return snapshot
+            schedule_last_run = schedule_state.get("last_run")
+            if schedule_last_run:
+                snapshot["stop_schedule_last_run"] = schedule_last_run
+                if schedule_state.get("needs_sync"):
+                    schedule_state["needs_sync"] = False
+                if self._is_date_newer(schedule_last_run, schedule_state.get("server_last_run")):
+                    schedule_state["server_last_run"] = schedule_last_run
+            return snapshot
+
         for domain, db_path in self.domain_paths.items():
             totals: Dict[str, int] = {status: 0 for status in EMAIL_STATUSES}
             if not db_path.exists():
-                states.append(self._build_domain_state_snapshot(domain, totals))
+                snapshot = self._build_domain_state_snapshot(domain, totals)
+                states.append(attach_schedule(snapshot, domain))
                 continue
             try:
                 with sqlite3.connect(db_path) as conn:
@@ -764,7 +1009,8 @@ class MailClient:
                         "SELECT status, COUNT(*) AS cnt FROM emails GROUP BY status"
                     ):
                         totals[row["status"]] = row["cnt"]
-                    states.append(self._build_domain_state_snapshot(domain, totals))
+                    snapshot = self._build_domain_state_snapshot(domain, totals)
+                    states.append(attach_schedule(snapshot, domain))
                     if domain in self._state_errors:
                         self._state_errors.pop(domain, None)
             except sqlite3.Error as error:
@@ -775,7 +1021,8 @@ class MailClient:
                 if self._state_errors.get(domain) != message:
                     print(f"[오류] {message}")
                     self._state_errors[domain] = message
-                states.append(self._build_domain_state_snapshot(domain, totals))
+                snapshot = self._build_domain_state_snapshot(domain, totals)
+                states.append(attach_schedule(snapshot, domain))
         return states
 
     # ------------------------------------------------------------------ #
@@ -797,6 +1044,8 @@ class MailClient:
             return self.handle_batch_send(domain, payload, job_id)
         if job_type == "change_ip":
             return self.handle_change_ip(job_id)
+        if job_type == "reset_sent_sequence":
+            return self.handle_reset_sent_sequence(domain, payload, job_id)
         return JobResult(job_id=job_id, status="failed", message="지원하지 않는 작업 유형입니다.")
 
     def handle_inject(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
@@ -953,10 +1202,11 @@ class MailClient:
         dispatch_logs: List[Dict[str, object]] = []
         bcc_total = len(bcc_emails)
         if delivery_status == "sent":
+            sequence_value = self._next_sent_sequence(normalized_domain or None)
             meta_items: List[Tuple[str, object]] = [("primary", 1)]
             if bcc_total > 0:
                 meta_items.append(("bcc", bcc_total))
-            log_line = self._format_dispatch_log_line("Sent", 1, rcpt_to, meta_items)
+            log_line = self._format_dispatch_log_line("Sent", sequence_value, rcpt_to, meta_items)
             display_line = self._format_dispatch_display_line(
                 "Sent",
                 rcpt_to,
@@ -964,13 +1214,14 @@ class MailClient:
                 0,
                 True,
                 self.device_name,
+                sequence=sequence_value,
             )
             dispatch_logs.append(
                 {
                     "log": log_line,
                     "display": display_line,
                     "email": rcpt_to,
-                    "sequence": 1,
+                    "sequence": sequence_value,
                     "delivery_status": "sent",
                     "detail": detail_line or status_line,
                     "bcc_total": bcc_total,
@@ -984,7 +1235,10 @@ class MailClient:
             meta_items: List[Tuple[str, object]] = [("primary", 1)]
             if bcc_total > 0:
                 meta_items.append(("bcc", bcc_total))
-            log_line = self._format_dispatch_log_line(label, 1, rcpt_to, meta_items)
+            sequence_domain = (normalized_domain or (self.active_domain or "naver")).lower()
+            base_sequence = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
+            sequence_for_log = base_sequence + 1
+            log_line = self._format_dispatch_log_line(label, sequence_for_log, rcpt_to, meta_items)
             display_line = self._format_dispatch_display_line(
                 label,
                 rcpt_to,
@@ -998,7 +1252,7 @@ class MailClient:
                     "log": log_line,
                     "display": display_line,
                     "email": rcpt_to,
-                    "sequence": 1,
+                    "sequence": sequence_for_log,
                     "delivery_status": delivery_status,
                     "detail": detail_line or status_line,
                     "bcc_total": bcc_total,
@@ -1025,13 +1279,16 @@ class MailClient:
         }
         error_message = None if success else (detail_line or status_line or "발송 실패")
         primary_log = dispatch_logs[0]["log"] if dispatch_logs else self._format_dispatch_log_line("Fail", 0, rcpt_to)
-        return JobResult(
+        job_result = JobResult(
             job_id=job_id,
             status=status,
             message=primary_log,
             result=result_payload,
             error=error_message,
         )
+        if delivery_status == "sent":
+            self._maybe_flush_sent_sequences(force=True)
+        return job_result
 
     def handle_batch_send(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
         if not domain:
@@ -1116,12 +1373,24 @@ class MailClient:
                 JobResult(job_id=job_id, status="running", message=progress_message, result=summary_snapshot),
                 [domain_state],
             )
+            self._maybe_flush_sent_sequences()
             last_report_at = now_point
 
         stop_requested = False
         cancel_requested = False
         stop_reason: Optional[str] = None
         fatal_error: Optional[str] = None
+
+        def check_schedule_trigger() -> None:
+            nonlocal stop_requested, cancel_requested, stop_reason
+            if stop_requested:
+                return
+            if self._schedule_due(normalized):
+                stop_requested = True
+                cancel_requested = True
+                stop_reason = "예약된 자동 정지 실행"
+
+        check_schedule_trigger()
 
         try:
             with sqlite3.connect(db_path) as conn:
@@ -1448,10 +1717,9 @@ class MailClient:
                     bcc_count = len(group.bcc)
                     anchor_count = len(group.injected)
                     if outcome.delivery_status == "sent":
-                        sent_base = sent_count
                         sent_count += group_size_actual
                         primary_email = recipient_emails[0] if recipient_emails else "-"
-                        sequence = sent_base + 1
+                        sequence = self._next_sent_sequence(normalized)
                         meta_items: List[Tuple[str, object]] = [("primary", 1)]
                         if bcc_count > 0:
                             meta_items.append(("bcc", bcc_count))
@@ -1465,6 +1733,7 @@ class MailClient:
                             anchor_count,
                             True,
                             self.device_name,
+                            sequence=sequence,
                         )
                         dispatch_logs.append(
                             {
@@ -1486,7 +1755,8 @@ class MailClient:
                         is_block = outcome.delivery_status == "block"
                         label = "Block" if is_block else "Fail"
                         primary_email = recipient_emails[0] if recipient_emails else "-"
-                        sequence_for_log = processed - group_size_actual + 1
+                        current_sequence = max(0, int(self.sent_sequences.get(normalized, 0)))
+                        sequence_for_log = current_sequence + 1
                         meta_items: List[Tuple[str, object]] = [("primary", 1)]
                         if bcc_count > 0:
                             meta_items.append(("bcc", bcc_count))
@@ -1625,6 +1895,7 @@ class MailClient:
                 try:
                     with ThreadPoolExecutor(max_workers=session_count) as executor:
                         while True:
+                            check_schedule_trigger()
                             if not stop_requested:
                                 while len(inflight) < session_count:
                                     group = next_group()
@@ -1642,13 +1913,16 @@ class MailClient:
                                         stop_requested = True
                                         cancel_requested = True
                                         stop_reason = "사용자 중지 요청"
+                                    check_schedule_trigger()
                                     continue
                                 for future in done:
                                     group = inflight.pop(future)
                                     process_future(future, group)
                                 if fatal_error and not inflight:
                                     break
+                                check_schedule_trigger()
                                 continue
+                            check_schedule_trigger()
                             if stop_requested:
                                 break
                             group = next_group()
@@ -1662,6 +1936,7 @@ class MailClient:
                             for future in done:
                                 group = inflight.pop(future)
                                 process_future(future, group)
+                            check_schedule_trigger()
                 finally:
                     if pending_queue:
                         release_reserved_rows(list(pending_queue))
@@ -1672,14 +1947,17 @@ class MailClient:
         emit_progress(force=True)
         summary = build_summary()
         if cancel_requested:
-            final_message = format_summary("사용자 요청으로 배치 발송 중단", summary)
+            headline = stop_reason or "사용자 요청으로 배치 발송 중단"
+            final_message = format_summary(headline, summary)
+            error_text = stop_reason or "사용자 요청으로 발송을 중단했습니다."
             print(f"[배치 발송] {domain_label} · {final_message}")
+            self._maybe_flush_sent_sequences(force=True)
             return JobResult(
                 job_id=job_id,
                 status="cancelled",
                 message=final_message,
                 result=summary,
-                error="사용자 요청으로 발송을 중단했습니다.",
+                error=error_text,
             )
         success = failed_count == 0 and fatal_error is None
         base_message = "배치 발송 완료" if success else "배치 발송 중 오류"
@@ -1692,6 +1970,7 @@ class MailClient:
             error_message = last_error
             final_message = f"{final_message} · 마지막 오류: {last_error}"
         print(f"[배치 발송] {domain_label} · {final_message}")
+        self._maybe_flush_sent_sequences(force=True)
         return JobResult(
             job_id=job_id,
             status="success" if success else "failed",
@@ -1748,6 +2027,36 @@ class MailClient:
             message=message,
             result=result_payload,
             error=None if success else message,
+        )
+
+    def handle_reset_sent_sequence(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
+        targets: Set[str] = set()
+        if domain:
+            targets.add(str(domain).lower())
+        raw_domains = payload.get("domains")
+        if isinstance(raw_domains, (list, tuple, set)):
+            for item in raw_domains:
+                if not item:
+                    continue
+                targets.add(str(item).lower())
+        if not targets:
+            targets = set(self.sent_sequences.keys()) | set(DOMAINS)
+        self._reset_sent_sequences(targets)
+        labels = [DOMAIN_LABELS.get(key, key) for key in sorted(targets)]
+        if labels:
+            label_text = ", ".join(labels)
+        else:
+            label_text = "모든 도메인"
+        print(f"[로그 초기화] {label_text} 누적 발송 카운터를 0으로 재설정했습니다.")
+        result = {
+            "domains": sorted(targets),
+            "sent_sequences": {key: self.sent_sequences.get(key, 0) for key in sorted(targets)},
+        }
+        return JobResult(
+            job_id=job_id,
+            status="success",
+            message=f"{label_text} 발송 카운터 초기화",
+            result=result,
         )
 
     # ------------------------------------------------------------------ #
@@ -1879,10 +2188,14 @@ class MailClient:
         anchor_total: int,
         is_primary: bool,
         device_name: Optional[str] = None,
+        sequence: Optional[int] = None,
     ) -> str:
         safe_label = (label or "").strip() or "Sent"
         target = (email or "").strip() or "-"
-        display = f"{safe_label} - {target}"
+        label_display = safe_label
+        if sequence is not None and sequence > 0 and safe_label.lower() == "sent":
+            label_display = f"{safe_label}({sequence})"
+        display = f"{label_display} - {target}"
         if is_primary:
             if bcc_total > 0:
                 display += f" 외 {bcc_total}"
@@ -1987,6 +2300,7 @@ class MailClient:
                     self.connected = True
                     configs = response.get("configs") or {}
                     self.apply_configs(configs)
+                    self._evaluate_idle_schedules()
                     controls = response.get("job_controls") or []
                     if isinstance(controls, Iterable):
                         self._update_job_controls(controls)
@@ -1994,6 +2308,17 @@ class MailClient:
                     jobs = response.get("jobs") or []
                     for job in jobs:
                         job_id = str(job.get("job_id"))
+                        job_type = str(job.get("job_type") or "")
+                        guard_result: Optional[JobResult] = None
+                        if job_type in {"single_send", "batch_send"}:
+                            guard_result = self._schedule_guard_for_job(job.get("domain"), job_id, job_type)
+                        if guard_result:
+                            domain_states = self.collect_domain_states()
+                            self.send_job_report(guard_result, domain_states)
+                            if job_id:
+                                self.job_controls.pop(job_id, None)
+                                self._cancel_ack_sent.discard(job_id)
+                            continue
                         if job_id:
                             self._current_job_id = job_id
                             self._cancel_ack_sent.discard(job_id)
@@ -2036,9 +2361,44 @@ class MailClient:
     def apply_configs(self, configs: Dict[str, Dict[str, object]]) -> None:
         if not configs:
             return
-        # 현재는 서버 설정을 참조용으로만 사용
-        # 향후 필요시 로컬 동기화 로직을 추가할 수 있습니다.
-        pass
+        changed = False
+        for domain, payload in configs.items():
+            normalized = (domain or "").lower()
+            if normalized not in DOMAINS:
+                continue
+            state = self._get_schedule_state(normalized)
+            server_enabled = self._sanitize_schedule_enabled(payload.get("stop_schedule_enabled"))
+            server_time = self._sanitize_schedule_time(payload.get("stop_schedule_time"))
+            if not server_time:
+                server_enabled = False
+            server_last_run = self._sanitize_schedule_date(payload.get("stop_schedule_last_run"))
+            previous_enabled = bool(state.get("enabled"))
+            previous_time = state.get("time") or ""
+            desired_time = server_time or ""
+            if server_enabled != previous_enabled or desired_time != previous_time:
+                state["enabled"] = server_enabled
+                state["time"] = desired_time if server_enabled else ""
+                if not server_enabled:
+                    state["last_run"] = None
+                    state["needs_sync"] = False
+                    self._schedule_events.pop(normalized, None)
+                elif desired_time != previous_time:
+                    state["last_run"] = None
+                    state["needs_sync"] = False
+                    self._schedule_events.pop(normalized, None)
+                    server_last_run = None
+                changed = True
+            if server_last_run:
+                if self._is_date_newer(server_last_run, state.get("last_run")):
+                    state["last_run"] = server_last_run
+                    state["needs_sync"] = False
+                    changed = True
+            if server_last_run is None and not server_enabled:
+                state["server_last_run"] = None
+            else:
+                state["server_last_run"] = server_last_run
+        if changed:
+            self.persist()
 
 
 DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
