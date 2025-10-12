@@ -1260,6 +1260,7 @@ class GlobalConfigPayload(BaseModel):
     active_domain: Optional[str] = None
     stop_schedule_enabled: Optional[bool] = False
     stop_schedule_time: Optional[str] = ""
+    stop_schedule_deploy: Optional[bool] = False
 
 
 class GlobalConfigResponse(BaseModel):
@@ -1384,10 +1385,7 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         stored_config["active_domain"] = requested_active_domain
         device_count = max(device_count, domain_update_count)
         next_time_value = schedule_time or previous_time or ""
-        schedule_updates: Dict[str, Any] = {
-            "stop_schedule_enabled": 1 if schedule_enabled else 0,
-            "stop_schedule_time": next_time_value if schedule_enabled else "",
-        }
+        deploy_schedule = bool(payload.stop_schedule_deploy)
         reset_schedule_run = False
         if not schedule_enabled:
             reset_schedule_run = True
@@ -1396,15 +1394,23 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         stored_config["stop_schedule_enabled"] = schedule_enabled
         stored_config["stop_schedule_time"] = next_time_value if schedule_enabled else ""
         if reset_schedule_run:
-            schedule_updates["stop_schedule_last_run"] = None
             stored_config["stop_schedule_last_run"] = None
         else:
             stored_config["stop_schedule_last_run"] = stored_config.get("stop_schedule_last_run")
-        schedule_device_count, schedule_update_count = apply_global_config_to_devices(conn, schedule_updates)
-        if schedule_update_count:
-            applied_fields.append("stop_schedule")
-        device_count = max(device_count, schedule_device_count)
-        update_count += schedule_update_count
+        schedule_device_count = 0
+        schedule_update_count = 0
+        if deploy_schedule:
+            schedule_updates: Dict[str, Any] = {
+                "stop_schedule_enabled": 1 if schedule_enabled else 0,
+                "stop_schedule_time": next_time_value if schedule_enabled else "",
+            }
+            if reset_schedule_run:
+                schedule_updates["stop_schedule_last_run"] = None
+            schedule_device_count, schedule_update_count = apply_global_config_to_devices(conn, schedule_updates)
+            if schedule_update_count:
+                applied_fields.append("stop_schedule")
+            device_count = max(device_count, schedule_device_count)
+            update_count += schedule_update_count
         updated_at = save_global_config(conn, stored_config)
         conn.commit()
         refreshed_config = load_global_config(conn=conn)

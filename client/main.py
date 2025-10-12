@@ -23,7 +23,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.16"
+APP_VERSION = "0.0.17"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -334,6 +334,8 @@ class MailClient:
         self._last_ip_refresh: float = 0.0
         self._current_job_id: Optional[str] = None
         self._cancel_ack_sent: Set[str] = set()
+        self._pending_jobs: Deque[Dict[str, object]] = deque()
+        self._pending_job_ids: Set[str] = set()
         raw_sequences = config.get("sent_sequences")
         if not isinstance(raw_sequences, dict):
             raw_sequences = {}
@@ -520,10 +522,16 @@ class MailClient:
         self.persist()
         self._last_sequence_flush = now_point
 
-    def _next_sent_sequence(self, domain: Optional[str]) -> int:
+    def _next_sent_sequence(self, domain: Optional[str], increment: int = 1) -> int:
         normalized = (domain or self.active_domain or "naver").lower()
+        try:
+            step = int(increment)
+        except (TypeError, ValueError):
+            step = 1
+        if step <= 0:
+            step = 1
         current = max(0, int(self.sent_sequences.get(normalized, 0)))
-        new_value = current + 1
+        new_value = current + step
         self.sent_sequences[normalized] = new_value
         self._sequence_dirty.add(normalized)
         self._maybe_flush_sent_sequences()
@@ -916,7 +924,13 @@ class MailClient:
         domain_states: Optional[List[Dict[str, object]]] = None,
     ) -> None:
         try:
-            self.heartbeat(domain_states or [], [report])
+            data = self.heartbeat(domain_states or [], [report])
+            configs = data.get("configs") if isinstance(data, dict) else None
+            if isinstance(configs, dict) and configs:
+                self.apply_configs(configs)
+            new_jobs = data.get("jobs") if isinstance(data, dict) else None
+            if isinstance(new_jobs, list):
+                self._queue_jobs(new_jobs)
         except Exception as exc:  # pylint: disable=broad-except
             print(f"[경고] 작업 보고 실패: {exc}")
 
@@ -968,6 +982,20 @@ class MailClient:
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"[경고] 작업 취소 보고 실패: {exc}")
                 self._cancel_ack_sent.discard(job_id)
+
+    def _queue_jobs(self, jobs: Iterable[Dict[str, object]]) -> None:
+        if not jobs:
+            return
+        for job in jobs:
+            if not isinstance(job, dict):
+                continue
+            job_id = str(job.get("job_id") or "").strip()
+            if not job_id or job_id == self._current_job_id:
+                continue
+            if job_id in self._pending_job_ids:
+                continue
+            self._pending_jobs.append(job)
+            self._pending_job_ids.add(job_id)
 
     def _is_cancel_requested(self, job_id: str) -> bool:
         if not job_id:
@@ -1202,7 +1230,8 @@ class MailClient:
         dispatch_logs: List[Dict[str, object]] = []
         bcc_total = len(bcc_emails)
         if delivery_status == "sent":
-            sequence_value = self._next_sent_sequence(normalized_domain or None)
+            total_increment = 1 + bcc_total
+            sequence_value = self._next_sent_sequence(normalized_domain or None, total_increment)
             meta_items: List[Tuple[str, object]] = [("primary", 1)]
             if bcc_total > 0:
                 meta_items.append(("bcc", bcc_total))
@@ -1719,7 +1748,7 @@ class MailClient:
                     if outcome.delivery_status == "sent":
                         sent_count += group_size_actual
                         primary_email = recipient_emails[0] if recipient_emails else "-"
-                        sequence = self._next_sent_sequence(normalized)
+                        sequence = self._next_sent_sequence(normalized, group_size_actual)
                         meta_items: List[Tuple[str, object]] = [("primary", 1)]
                         if bcc_count > 0:
                             meta_items.append(("bcc", bcc_count))
@@ -2305,9 +2334,20 @@ class MailClient:
                     if isinstance(controls, Iterable):
                         self._update_job_controls(controls)
                     self._acknowledge_cancelled_jobs()
-                    jobs = response.get("jobs") or []
+                    jobs: List[Dict[str, object]] = []
+                    while self._pending_jobs:
+                        pending_job = self._pending_jobs.popleft()
+                        pending_id = str(pending_job.get("job_id") or "").strip()
+                        if pending_id:
+                            self._pending_job_ids.discard(pending_id)
+                        jobs.append(pending_job)
+                    response_jobs = response.get("jobs")
+                    if isinstance(response_jobs, list):
+                        jobs.extend(job for job in response_jobs if isinstance(job, dict))
                     for job in jobs:
                         job_id = str(job.get("job_id"))
+                        if job_id:
+                            self._pending_job_ids.discard(job_id)
                         job_type = str(job.get("job_type") or "")
                         guard_result: Optional[JobResult] = None
                         if job_type in {"single_send", "batch_send"}:

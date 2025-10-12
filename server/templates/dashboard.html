@@ -1185,6 +1185,7 @@ button:not(:disabled):hover {
             </label>
             <span class="schedule-status-pill" id="globalStopStatusPill">비활성</span>
           </div>
+          <p class="field-hint muted" id="globalStopDescription">각 디바이스 카드에서 자동 중지 시간을 개별로 관리하세요. 아래 기본값은 필요할 때 전체 디바이스에 배포하는 용도로만 저장됩니다.</p>
           <div class="field schedule-time-field">
             <span id="globalStopTimeLabel">예약 시각 (HH:MM)</span>
             <div class="schedule-time-input">
@@ -1222,6 +1223,10 @@ button:not(:disabled):hover {
               <span class="status-value" id="globalStopLastRun">--</span>
             </div>
           </div>
+          <label class="schedule-deploy-toggle">
+            <input type="checkbox" id="globalStopDeploy">
+            <span>설정 적용 시 기본값을 전체 디바이스에 배포</span>
+          </label>
         </div>
       </div>
     </div>
@@ -4057,6 +4062,7 @@ async function handleGlobalApply() {
   const bccInput = document.getElementById("globalBccCount");
   const stopEnabledInput = document.getElementById("globalStopEnabled");
   const stopTimeInput = document.getElementById("globalStopTime");
+  const stopDeployInput = document.getElementById("globalStopDeploy");
   const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
   if (!applyBtn) return;
   const activeDomainValue = sanitizeGlobalDomain(
@@ -4099,6 +4105,7 @@ async function handleGlobalApply() {
     }
   }
   setStopScheduleEnabledUI(stopEnabledValue, { force: true });
+  const shouldDeploySchedule = Boolean(stopDeployInput?.checked);
   state.globalDraft.active_domain = activeDomainValue;
   state.globalDraft.helo = heloValue;
   state.globalDraft.mail_from = mailValue;
@@ -4118,6 +4125,7 @@ async function handleGlobalApply() {
     bcc_count: parseBccInput(bccValue),
     stop_schedule_enabled: stopEnabledValue,
     stop_schedule_time: stopTimeValue,
+    stop_schedule_deploy: shouldDeploySchedule,
   };
   const originalText = applyBtn.textContent;
   applyBtn.disabled = true;
@@ -4135,37 +4143,55 @@ async function handleGlobalApply() {
     const newScheduleEnabled = Boolean(serverConfig.stop_schedule_enabled);
     const newScheduleTime = sanitizeScheduleTime(serverConfig.stop_schedule_time);
     const scheduleChanged = previousScheduleEnabled !== newScheduleEnabled || previousScheduleTime !== newScheduleTime;
-    if (!appliedFields.length || affected <= 0) {
-      if (scheduleChanged) {
-        if (newScheduleEnabled) {
-          setGlobalStatus(`자동 중지 예약을 매일 ${newScheduleTime}에 실행하도록 설정했습니다.`, "success");
-        } else {
-          setGlobalStatus("자동 중지 예약을 비활성화했습니다.", "success");
-        }
+    const scheduleDeployed = appliedFields.includes("stop_schedule");
+    const scheduleDefaultUpdated = scheduleChanged && !scheduleDeployed;
+    const noDeviceUpdates = (!appliedFields.length && !scheduleDeployed) || affected <= 0;
+    if (noDeviceUpdates) {
+      if (scheduleDeployed) {
+        const message = newScheduleEnabled
+          ? `자동 중지 스케줄을 매일 ${newScheduleTime}로 전체 디바이스에 배포했습니다.`
+          : "자동 중지 스케줄을 전체 디바이스에서 비활성화하도록 배포했습니다.";
+        setGlobalStatus(message, "success");
+      } else if (scheduleDefaultUpdated) {
+        const message = newScheduleEnabled
+          ? `자동 중지 기본값을 매일 ${newScheduleTime}로 저장했습니다.`
+          : "자동 중지 기본값을 비활성화로 저장했습니다.";
+        setGlobalStatus(message, "success");
       } else {
         setGlobalStatus("적용할 값이 없어 기존 설정을 유지했습니다.", "info");
       }
     } else {
-      const fieldLabels = appliedFields.map((field) => {
+      const appliedWithoutSchedule = appliedFields.filter((field) => field !== "stop_schedule");
+      const fieldLabels = appliedWithoutSchedule.map((field) => {
         if (field === "active_domain") return "활성 도메인";
         if (field === "helo") return "HELO";
         if (field === "mail_from") return "MAIL FROM";
         if (field === "header") return "HEADER";
         if (field === "session_count") return "세션 수";
         if (field === "bcc_count") return "BCC 수";
+        if (field === "stop_schedule") return "자동 중지 스케줄";
         return field.toUpperCase();
       });
-      let message = `총 ${affected}대에 ${fieldLabels.join(", ")} 값을 적용했습니다.`;
-      if (scheduleChanged) {
+      let message = fieldLabels.length
+        ? `총 ${affected}대에 ${fieldLabels.join(", ")} 값을 적용했습니다.`
+        : `총 ${affected}대에 설정을 적용했습니다.`;
+      if (scheduleDeployed) {
         message += newScheduleEnabled
-          ? ` / 자동 중지 예약: 매일 ${newScheduleTime}`
-          : " / 자동 중지 예약 비활성화";
+          ? ` / 자동 중지 스케줄 배포: 매일 ${newScheduleTime}`
+          : " / 자동 중지 스케줄 비활성화 배포";
+      } else if (scheduleDefaultUpdated) {
+        message += newScheduleEnabled
+          ? ` / 자동 중지 기본값: 매일 ${newScheduleTime}`
+          : " / 자동 중지 기본값 비활성화";
       }
       setGlobalStatus(message, "success");
     }
     GLOBAL_FIELD_LIST.forEach((field) => {
       state.globalDirty[field] = false;
     });
+    if (stopDeployInput) {
+      stopDeployInput.checked = false;
+    }
     renderGlobalConfig(serverConfig);
     await loadDevices({ silent: true });
   } catch (err) {
