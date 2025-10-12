@@ -54,7 +54,6 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "active_domain": "naver",
     "stop_schedule_enabled": False,
     "stop_schedule_time": "",
-    "stop_schedule_last_run": None,
 }
 GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count")
 MAX_DEVICE_LOG_HISTORY = 10
@@ -190,13 +189,10 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized["bcc_count"] = clamp_bcc_count(raw.get("bcc_count"))
     sanitized["session_count"] = sanitize_session_count(raw.get("session_count"))
     sanitized["active_domain"] = sanitize_global_active_domain(raw.get("active_domain"))
-    enabled = sanitize_stop_schedule_enabled(raw.get("stop_schedule_enabled"))
-    time_value = sanitize_stop_schedule_time(raw.get("stop_schedule_time"))
-    if not time_value:
-        enabled = False
-    sanitized["stop_schedule_enabled"] = enabled
-    sanitized["stop_schedule_time"] = time_value
-    sanitized["stop_schedule_last_run"] = sanitize_stop_schedule_last_run(raw.get("stop_schedule_last_run"))
+    schedule_time = sanitize_stop_schedule_time(raw.get("stop_schedule_time"))
+    sanitized["stop_schedule_time"] = schedule_time
+    schedule_enabled = sanitize_stop_schedule_enabled(raw.get("stop_schedule_enabled"))
+    sanitized["stop_schedule_enabled"] = schedule_enabled if schedule_time else False
     return sanitized
 
 
@@ -249,8 +245,16 @@ def load_global_config(*, conn: Optional[sqlite3.Connection] = None) -> Dict[str
     sanitized = sanitize_global_config_payload(payload)
     config: Dict[str, Any] = {**sanitized}
     config["updated_at"] = updated_at
-    if config["stop_schedule_enabled"]:
-        config["stop_schedule_next_run"] = compute_next_stop_schedule(config["stop_schedule_time"])
+    try:
+        last_row = conn.execute(
+            "SELECT MAX(stop_schedule_last_run) AS last_run FROM device_configs WHERE stop_schedule_last_run IS NOT NULL"
+        ).fetchone()
+        raw_last_run = last_row["last_run"] if last_row else None
+        config["stop_schedule_last_run"] = sanitize_stop_schedule_last_run(raw_last_run)
+    except sqlite3.Error:
+        config["stop_schedule_last_run"] = None
+    if sanitized.get("stop_schedule_enabled") and sanitized.get("stop_schedule_time"):
+        config["stop_schedule_next_run"] = compute_next_stop_schedule(sanitized["stop_schedule_time"])
     else:
         config["stop_schedule_next_run"] = None
     if owns_conn:
@@ -263,10 +267,7 @@ def save_global_config(conn: sqlite3.Connection, config: Dict[str, Any]) -> str:
     sanitized = sanitize_global_config_payload(config)
     payload: Dict[str, Any] = {}
     for field, default in GLOBAL_CONFIG_DEFAULTS.items():
-        if field == "stop_schedule_last_run":
-            payload[field] = sanitized.get(field)
-        else:
-            payload[field] = sanitized.get(field, default)
+        payload[field] = sanitized.get(field, default)
     conn.execute(
         """
         INSERT INTO global_settings (key, value, updated_at)
@@ -566,22 +567,6 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     now,
                 ),
             )
-        global_defaults = load_global_config(conn=conn)
-        schedule_enabled = sanitize_stop_schedule_enabled(global_defaults.get("stop_schedule_enabled"))
-        schedule_time = sanitize_stop_schedule_time(global_defaults.get("stop_schedule_time"))
-        if schedule_enabled and schedule_time:
-            for domain in DOMAINS:
-                conn.execute(
-                    """
-                    UPDATE device_configs
-                    SET stop_schedule_enabled=1,
-                        stop_schedule_time=?,
-                        stop_schedule_last_run=NULL,
-                        updated_at=?
-                    WHERE device_id=? AND domain=?
-                    """,
-                    (schedule_time, now, device_id, domain),
-                )
         row = conn.execute(
             "SELECT * FROM devices WHERE id=?",
             (device_id,),
@@ -1156,9 +1141,6 @@ class DeviceConfigPayload(BaseModel):
     anchor_interval: Optional[int] = 0
     anchor_email: Optional[str] = ""
     rcpt_to: Optional[str] = ""
-    stop_schedule_enabled: Optional[bool] = None
-    stop_schedule_time: Optional[str] = None
-    stop_schedule_last_run: Optional[str] = None
 
 
 class UpdateConfigRequest(DeviceConfigPayload):
@@ -1167,6 +1149,11 @@ class UpdateConfigRequest(DeviceConfigPayload):
 
 class ActiveDomainRequest(BaseModel):
     domain: str
+
+
+class DeviceScheduleUpdateRequest(BaseModel):
+    enabled: bool
+    time: Optional[str] = None
 
 
 class DomainStatePayload(BaseModel):
@@ -1258,9 +1245,8 @@ class GlobalConfigPayload(BaseModel):
     bcc_count: Optional[int] = 0
     session_count: Optional[int] = 1
     active_domain: Optional[str] = None
-    stop_schedule_enabled: Optional[bool] = False
-    stop_schedule_time: Optional[str] = ""
-    stop_schedule_deploy: Optional[bool] = False
+    stop_schedule_enabled: Optional[bool] = None
+    stop_schedule_time: Optional[str] = None
 
 
 class GlobalConfigResponse(BaseModel):
@@ -1270,9 +1256,9 @@ class GlobalConfigResponse(BaseModel):
     bcc_count: int
     session_count: int
     active_domain: str
+    stop_schedule_enabled: bool
+    stop_schedule_time: str
     updated_at: Optional[str] = None
-    stop_schedule_enabled: bool = False
-    stop_schedule_time: Optional[str] = None
     stop_schedule_last_run: Optional[str] = None
     stop_schedule_next_run: Optional[str] = None
 
@@ -1310,6 +1296,10 @@ def list_devices() -> Dict[str, Any]:
 @app.get("/api/global/config", response_model=GlobalConfigResponse)
 def get_global_config_endpoint() -> GlobalConfigResponse:
     config = load_global_config()
+    schedule_time = sanitize_stop_schedule_time(config.get("stop_schedule_time"))
+    schedule_enabled = sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled"))
+    if schedule_enabled and not schedule_time:
+        schedule_enabled = False
     return GlobalConfigResponse(
         helo=config.get("helo", ""),
         mail_from=config.get("mail_from", ""),
@@ -1317,35 +1307,28 @@ def get_global_config_endpoint() -> GlobalConfigResponse:
         bcc_count=clamp_bcc_count(config.get("bcc_count", 0)),
         session_count=sanitize_session_count(config.get("session_count", 1)),
         active_domain=sanitize_global_active_domain(config.get("active_domain")),
+        stop_schedule_enabled=schedule_enabled,
+        stop_schedule_time=schedule_time or "",
         updated_at=config.get("updated_at"),
-        stop_schedule_enabled=sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled")),
-        stop_schedule_time=sanitize_stop_schedule_time(config.get("stop_schedule_time")),
-        stop_schedule_last_run=sanitize_stop_schedule_last_run(config.get("stop_schedule_last_run")),
+        stop_schedule_last_run=config.get("stop_schedule_last_run"),
         stop_schedule_next_run=config.get("stop_schedule_next_run"),
     )
 
 
 @app.post("/api/global/config/apply")
 def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]:
-    schedule_enabled = sanitize_stop_schedule_enabled(payload.stop_schedule_enabled)
-    schedule_time = sanitize_stop_schedule_time(payload.stop_schedule_time)
-    if not schedule_time:
-        schedule_enabled = False
     raw_inputs = {
         "helo": (payload.helo or "").strip(),
         "mail_from": (payload.mail_from or "").strip(),
         "header": payload.header or "",
         "bcc_count": clamp_bcc_count(payload.bcc_count),
         "session_count": sanitize_session_count(payload.session_count),
-        "stop_schedule_enabled": schedule_enabled,
-        "stop_schedule_time": schedule_time,
     }
     domain_update_requested = payload.active_domain is not None
+    schedule_reset_last_run = False
     with db_lock, get_conn() as conn:
         current_config = load_global_config(conn=conn)
         stored_config = sanitize_global_config_payload(current_config)
-        previous_enabled = stored_config.get("stop_schedule_enabled", False)
-        previous_time = stored_config.get("stop_schedule_time", "")
         previous_active_domain = stored_config.get("active_domain", "naver")
         requested_active_domain = (
             sanitize_global_active_domain(payload.active_domain)
@@ -1377,6 +1360,46 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 apply_values[field] = value_to_apply
                 stored_config[field] = value_to_apply
                 applied_fields.append(field)
+        current_schedule_enabled = sanitize_stop_schedule_enabled(stored_config.get("stop_schedule_enabled"))
+        current_schedule_time = sanitize_stop_schedule_time(stored_config.get("stop_schedule_time"))
+        previous_last_run = sanitize_stop_schedule_last_run(current_config.get("stop_schedule_last_run"))
+        schedule_requested = (
+            payload.stop_schedule_enabled is not None or payload.stop_schedule_time is not None
+        )
+        incoming_schedule_time = current_schedule_time
+        if payload.stop_schedule_time is not None:
+            incoming_schedule_time = sanitize_stop_schedule_time(payload.stop_schedule_time)
+            raw_schedule_str = str(payload.stop_schedule_time or "").strip()
+            if raw_schedule_str and not incoming_schedule_time:
+                raise HTTPException(status_code=400, detail="HH:MM 형식으로 시간을 입력하세요.")
+        incoming_schedule_enabled = current_schedule_enabled
+        if payload.stop_schedule_enabled is not None:
+            incoming_schedule_enabled = sanitize_stop_schedule_enabled(payload.stop_schedule_enabled)
+        if incoming_schedule_enabled and not incoming_schedule_time:
+            raise HTTPException(status_code=400, detail="자동 중지를 활성화하려면 HH:MM 형식의 시간을 입력하세요.")
+        final_schedule_time = incoming_schedule_time
+        final_schedule_enabled = incoming_schedule_enabled and bool(final_schedule_time)
+        schedule_changed = (
+            final_schedule_enabled != current_schedule_enabled
+            or final_schedule_time != current_schedule_time
+        )
+        if not final_schedule_enabled:
+            if current_schedule_enabled or previous_last_run:
+                schedule_reset_last_run = True
+        elif final_schedule_time != current_schedule_time:
+            schedule_reset_last_run = True
+        if schedule_requested or schedule_changed or schedule_reset_last_run:
+            apply_values["stop_schedule_enabled"] = 1 if final_schedule_enabled else 0
+            apply_values["stop_schedule_time"] = final_schedule_time or ""
+            if schedule_reset_last_run:
+                apply_values["stop_schedule_last_run"] = None
+            stored_config["stop_schedule_enabled"] = final_schedule_enabled
+            stored_config["stop_schedule_time"] = final_schedule_time or ""
+            if "stop_schedule" not in applied_fields:
+                applied_fields.append("stop_schedule")
+        else:
+            stored_config["stop_schedule_enabled"] = current_schedule_enabled
+            stored_config["stop_schedule_time"] = current_schedule_time or ""
         device_count, update_count = apply_global_config_to_devices(conn, apply_values)
         domain_update_count = 0
         if active_domain_changed:
@@ -1384,42 +1407,31 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
             applied_fields.append("active_domain")
         stored_config["active_domain"] = requested_active_domain
         device_count = max(device_count, domain_update_count)
-        next_time_value = schedule_time or previous_time or ""
-        deploy_schedule = bool(payload.stop_schedule_deploy)
-        reset_schedule_run = False
-        if not schedule_enabled:
-            reset_schedule_run = True
-        elif (not previous_enabled) or (previous_time != next_time_value):
-            reset_schedule_run = True
-        stored_config["stop_schedule_enabled"] = schedule_enabled
-        stored_config["stop_schedule_time"] = next_time_value if schedule_enabled else ""
-        if reset_schedule_run:
-            stored_config["stop_schedule_last_run"] = None
-        else:
-            stored_config["stop_schedule_last_run"] = stored_config.get("stop_schedule_last_run")
-        schedule_device_count = 0
-        schedule_update_count = 0
-        if deploy_schedule:
-            schedule_updates: Dict[str, Any] = {
-                "stop_schedule_enabled": 1 if schedule_enabled else 0,
-                "stop_schedule_time": next_time_value if schedule_enabled else "",
-            }
-            if reset_schedule_run:
-                schedule_updates["stop_schedule_last_run"] = None
-            schedule_device_count, schedule_update_count = apply_global_config_to_devices(conn, schedule_updates)
-            if schedule_update_count:
-                applied_fields.append("stop_schedule")
-            device_count = max(device_count, schedule_device_count)
-            update_count += schedule_update_count
         updated_at = save_global_config(conn, stored_config)
         conn.commit()
         refreshed_config = load_global_config(conn=conn)
+    schedule_state = {
+        "enabled": sanitize_stop_schedule_enabled(refreshed_config.get("stop_schedule_enabled")),
+        "time": sanitize_stop_schedule_time(refreshed_config.get("stop_schedule_time")),
+        "next_run": refreshed_config.get("stop_schedule_next_run"),
+        "last_run": refreshed_config.get("stop_schedule_last_run"),
+        "reset_last_run": schedule_reset_last_run,
+    }
+    unique_fields = sorted(set(applied_fields))
+    field_log = ", ".join(unique_fields) if unique_fields else "none"
+    schedule_mode = "on" if schedule_state["enabled"] else "off"
+    schedule_time = schedule_state["time"] or "-"
+    print(
+        f"[{updated_at}] Applied global config (fields={field_log}, devices={device_count}, updates={update_count}) "
+        f"schedule={schedule_mode}({schedule_time})"
+    )
     return {
         "config": refreshed_config,
         "updated_at": updated_at,
         "device_count": device_count,
         "config_updates": update_count,
-        "applied_fields": applied_fields,
+        "applied_fields": unique_fields,
+        "schedule_state": schedule_state,
     }
 
 
@@ -1461,32 +1473,11 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
         sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
         sanitized_interval = clamp_anchor_interval(payload.anchor_interval or 0)
         sanitized_anchor = normalize_anchor_email(payload.anchor_email or "")
-        current_enabled = sanitize_stop_schedule_enabled(config_data.get("stop_schedule_enabled"))
-        current_time = sanitize_stop_schedule_time(config_data.get("stop_schedule_time"))
-        current_last_run = sanitize_stop_schedule_last_run(config_data.get("stop_schedule_last_run"))
-        requested_enabled = payload.stop_schedule_enabled if payload.stop_schedule_enabled is not None else current_enabled
-        requested_time = payload.stop_schedule_time if payload.stop_schedule_time is not None else current_time
-        requested_last_run = (
-            sanitize_stop_schedule_last_run(payload.stop_schedule_last_run)
-            if payload.stop_schedule_last_run is not None
-            else current_last_run
-        )
-        schedule_enabled = sanitize_stop_schedule_enabled(requested_enabled)
-        schedule_time = sanitize_stop_schedule_time(requested_time)
-        if not schedule_time:
-            schedule_enabled = False
-        schedule_last_run: Optional[str]
-        if not schedule_enabled:
-            schedule_last_run = None
-        elif schedule_time != current_time or schedule_enabled != current_enabled:
-            schedule_last_run = None
-        else:
-            schedule_last_run = requested_last_run
         conn.execute(
             """
             UPDATE device_configs
             SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
-                stop_schedule_enabled=?, stop_schedule_time=?, stop_schedule_last_run=?, updated_at=?
+                updated_at=?
             WHERE device_id=? AND domain=?
             """,
             (
@@ -1500,9 +1491,6 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
                 sanitized_interval,
                 sanitized_anchor,
                 payload.rcpt_to or "",
-                1 if schedule_enabled else 0,
-                schedule_time or "",
-                schedule_last_run,
                 now,
                 device_id,
                 normalized,
@@ -1516,6 +1504,65 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
     if not config_row:
         raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
     return serialize_config(to_dict(config_row))
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/schedule")
+def update_device_schedule(device_id: str, domain: str, payload: DeviceScheduleUpdateRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        config_data = to_dict(config_row)
+        previous_enabled = sanitize_stop_schedule_enabled(config_data.get("stop_schedule_enabled"))
+        previous_time = sanitize_stop_schedule_time(config_data.get("stop_schedule_time"))
+        previous_last_run = sanitize_stop_schedule_last_run(config_data.get("stop_schedule_last_run"))
+        requested_enabled = sanitize_stop_schedule_enabled(payload.enabled)
+        requested_time = sanitize_stop_schedule_time(payload.time)
+        if requested_enabled and not requested_time:
+            raise HTTPException(status_code=400, detail="예약을 켜려면 유효한 HH:MM 형식의 시간을 입력하세요.")
+        schedule_time = requested_time if requested_enabled else (requested_time or previous_time or "")
+        schedule_enabled_flag = 1 if requested_enabled and schedule_time else 0
+        schedule_last_run: Optional[str]
+        if schedule_enabled_flag == 0:
+            schedule_last_run = None
+        elif not previous_enabled or previous_time != schedule_time:
+            schedule_last_run = None
+        else:
+            schedule_last_run = previous_last_run
+        now = now_ts()
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET stop_schedule_enabled=?,
+                stop_schedule_time=?,
+                stop_schedule_last_run=?,
+                updated_at=?
+            WHERE device_id=? AND domain=?
+            """,
+            (
+                schedule_enabled_flag,
+                schedule_time or "",
+                schedule_last_run,
+                now,
+                device_id,
+                normalized,
+            ),
+        )
+        conn.commit()
+        refreshed = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+    return {"config": serialize_config(to_dict(refreshed))}
 
 
 @app.post("/api/devices/{device_id}/active-domain")
@@ -1805,80 +1852,6 @@ def request_global_stop(payload: GlobalStopRequest) -> Dict[str, Any]:
         "cancelled": cancelled,
         "cancel_requested": cancel_requested,
     }
-
-
-class StopScheduleRunner:
-    def __init__(self, interval_seconds: int = 30) -> None:
-        self.interval_seconds = max(5, int(interval_seconds))
-        self._stop_event = threading.Event()
-        self._lock = threading.Lock()
-        self._thread = threading.Thread(target=self._loop, name="StopScheduleRunner", daemon=True)
-        self._started = False
-        self._last_signature: Optional[Tuple[str, str]] = None
-
-    def start(self) -> None:
-        with self._lock:
-            if self._started:
-                return
-            self._started = True
-            self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    def _loop(self) -> None:
-        while not self._stop_event.is_set():
-            try:
-                self._tick()
-            except Exception:
-                pass
-            self._stop_event.wait(self.interval_seconds)
-
-    def _tick(self) -> None:
-        config = load_global_config()
-        enabled = sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled"))
-        time_str = sanitize_stop_schedule_time(config.get("stop_schedule_time"))
-        if not enabled or not time_str:
-            self._last_signature = None
-            return
-        last_run = sanitize_stop_schedule_last_run(config.get("stop_schedule_last_run"))
-        now = get_local_now()
-        try:
-            schedule_time = datetime.strptime(time_str, "%H:%M").time()
-        except ValueError:
-            return
-        scheduled_dt = datetime.combine(now.date(), schedule_time, tzinfo=now.tzinfo)
-        today_iso = now.date().isoformat()
-        signature = (time_str, today_iso)
-        if now < scheduled_dt:
-            self._last_signature = None
-            return
-        if self._last_signature == signature:
-            return
-        if last_run == today_iso:
-            self._last_signature = signature
-            return
-        reason = "예약된 자동 정지 실행"
-        try:
-            request_global_stop(GlobalStopRequest(reason=reason))
-        except Exception:
-            return
-        self._last_signature = signature
-        with db_lock, get_conn() as conn:
-            latest_config = load_global_config(conn=conn)
-            latest_enabled = sanitize_stop_schedule_enabled(latest_config.get("stop_schedule_enabled"))
-            latest_time = sanitize_stop_schedule_time(latest_config.get("stop_schedule_time"))
-            updated = False
-            if latest_enabled and latest_time == time_str:
-                latest_config["stop_schedule_last_run"] = today_iso
-                save_global_config(conn, latest_config)
-                updated = True
-            if updated:
-                conn.commit()
-
-
-stop_scheduler = StopScheduleRunner()
-stop_scheduler.start()
 
 
 def fetch_device_file(conn: sqlite3.Connection, device_id: str, domain: str, file_id: int) -> sqlite3.Row:
@@ -2213,7 +2186,13 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             SELECT *
             FROM jobs
             WHERE device_id=? AND status='pending' AND cancel_requested=0
-            ORDER BY created_at ASC
+            ORDER BY
+                CASE job_type
+                    WHEN 'single_send' THEN 0
+                    WHEN 'batch_send' THEN 1
+                    ELSE 2
+                END,
+                created_at ASC
             """,
             (device_id,),
         ).fetchall()

@@ -23,7 +23,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.18"
+APP_VERSION = "0.0.22"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -308,14 +308,14 @@ class MailClient:
             entry = raw_schedule_config.get(domain) or {}
             schedule_time = self._sanitize_schedule_time(entry.get("time"))
             enabled_flag = self._sanitize_schedule_enabled(entry.get("enabled")) if entry else False
-            enabled = bool(schedule_time) and enabled_flag
+            enabled = bool(enabled_flag) and bool(schedule_time)
             last_run_local = self._sanitize_schedule_date(entry.get("last_run"))
             server_last_run = self._sanitize_schedule_date(entry.get("server_last_run"))
             if self._is_date_newer(server_last_run, last_run_local):
                 last_run_local = server_last_run
             self.stop_schedules[domain] = {
                 "enabled": enabled,
-                "time": schedule_time if enabled else "",
+                "time": schedule_time or "",
                 "last_run": last_run_local,
                 "server_last_run": server_last_run,
                 "needs_sync": bool(last_run_local and last_run_local != server_last_run),
@@ -2532,7 +2532,7 @@ class MailClient:
             desired_time = server_time or ""
             if server_enabled != previous_enabled or desired_time != previous_time:
                 state["enabled"] = server_enabled
-                state["time"] = desired_time if server_enabled else ""
+                state["time"] = desired_time
                 if not server_enabled:
                     state["last_run"] = None
                     state["needs_sync"] = False

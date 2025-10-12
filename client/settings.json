@@ -24,7 +24,7 @@
   "stop_schedule": {
     "naver": {
       "enabled": false,
-      "time": "",
+      "time": "21:31",
       "last_run": null,
       "server_last_run": null
     },

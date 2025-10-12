@@ -243,37 +243,41 @@ header {
 }
 .global-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1.8fr) minmax(0, 1fr);
+  grid-template-columns: 1fr;
   gap: 20px;
   align-items: start;
-}
-@media (max-width: 1080px) {
-  .global-layout {
-    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
-  }
-}
-@media (max-width: 860px) {
-  .global-layout {
-    grid-template-columns: 1fr;
-  }
 }
 .global-primary {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
-.global-secondary {
+.global-section {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  padding: 18px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: 18px;
+  background: var(--color-surface);
 }
-.global-primary-actions {
+.global-section-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-heading);
+}
+.global-section-header {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
 }
-.global-primary-actions .global-actions {
-  width: 100%;
-  justify-content: flex-end;
+.global-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
 }
 .global-form {
   display: grid;
@@ -340,6 +344,43 @@ header {
 .global-schedule-card.active {
   border-color: var(--color-success);
   box-shadow: 0 10px 28px var(--shadow-success);
+}
+.global-schedule-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.global-schedule-card .schedule-time-input {
+  flex: 0 0 96px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  background: var(--color-surface);
+  font-size: 13px;
+  text-align: center;
+}
+.global-schedule-card .schedule-time-input:focus {
+  border-color: var(--color-accent);
+  outline: none;
+  box-shadow: 0 0 0 3px var(--color-accent-soft);
+}
+.global-schedule-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.global-schedule-meta strong {
+  color: var(--color-heading);
+  font-weight: 600;
+}
+.global-schedule-hint {
+  font-size: 11px;
+  color: var(--color-muted-soft);
+}
+.global-schedule-hint.error {
+  color: var(--color-danger);
 }
 .schedule-header {
   display: flex;
@@ -1132,101 +1173,73 @@ button:not(:disabled):hover {
   </div>
   <div class="global-layout">
     <div class="global-primary">
-      <div class="global-form">
-        <div class="field domain-field">
-          <span>활성 도메인</span>
-          <div class="domain-radio-group" id="globalActiveDomainGroup">
-            <label>
-              <input type="radio" name="globalActiveDomain" value="naver">
-              네이버
-            </label>
-            <label>
-              <input type="radio" name="globalActiveDomain" value="daum">
-              다음
-            </label>
+      <div class="global-section">
+        <div class="global-section-header">
+          <h3 class="global-section-title">발송 제어</h3>
+          <div class="global-actions global-section-actions">
+            <button id="globalApplyBtn">설정 적용</button>
+            <button class="secondary" id="globalSendAllBtn">전체 발송</button>
+            <button class="danger" id="globalStopAllBtn">전체 중지</button>
           </div>
         </div>
-        <label class="field">
-          <span>HELO</span>
-          <input type="text" id="globalHelo" placeholder="예: mail.example.com">
-        </label>
-        <label class="field">
-          <span>MAIL FROM</span>
-          <input type="text" id="globalMailFrom" placeholder="sender@example.com">
-        </label>
-        <label class="field compact">
-          <span>세션 수</span>
-          <input type="number" id="globalSessionCount" min="1" step="1" placeholder="1 이상">
-        </label>
-        <label class="field compact">
-          <span>BCC 수</span>
-          <input type="number" id="globalBccCount" min="0" max="30" step="1" placeholder="0~30">
-        </label>
-        <label class="field header-field">
-          <span>HEADER</span>
-          <textarea id="globalHeader" placeholder="헤더를 입력하세요"></textarea>
-        </label>
-      </div>
-    </div>
-    <div class="global-secondary">
-      <div class="global-primary-actions">
-        <div class="global-actions">
-          <button id="globalApplyBtn">설정 적용</button>
-          <button class="secondary" id="globalSendAllBtn">전체 발송</button>
-          <button class="danger" id="globalStopAllBtn">전체 중지</button>
-        </div>
-      </div>
-      <div class="global-schedule">
-        <div class="global-schedule-card" id="globalStopScheduleCard">
-          <div class="schedule-header">
-            <label class="schedule-toggle" for="globalStopEnabled">
-              <input type="checkbox" id="globalStopEnabled">
-              <span>자동 중지 예약</span>
-            </label>
-            <span class="schedule-status-pill" id="globalStopStatusPill">비활성</span>
-          </div>
-          <p class="field-hint muted" id="globalStopDescription">각 디바이스 카드에서 자동 중지 시간을 개별로 관리하세요. 아래 기본값은 필요할 때 전체 디바이스에 배포하는 용도로만 저장됩니다.</p>
-          <div class="field schedule-time-field">
-            <span id="globalStopTimeLabel">예약 시각 (HH:MM)</span>
-            <div class="schedule-time-input">
-              <input
-                type="text"
-                id="globalStopTime"
-                inputmode="numeric"
-                autocomplete="off"
-                autocorrect="off"
-                spellcheck="false"
-                maxlength="5"
-                placeholder="예: 07:30"
-                aria-labelledby="globalStopTimeLabel">
-              <div class="schedule-time-actions hidden" id="globalStopTimeActions">
-                <button type="button" class="secondary small" id="globalStopTimeCancelBtn">취소</button>
-                <button type="button" class="small" id="globalStopTimeSaveBtn">저장</button>
-              </div>
-            </div>
-            <div class="field-hint" id="globalStopTimeHint">24시간 형식으로 입력하세요 (00:00~23:59).</div>
-            <div class="field-hint muted hidden" id="globalStopTimeDisabledHint">예약을 켜면 바로 적용됩니다.</div>
-            <div class="field-error hidden" id="globalStopTimeError"></div>
-            <div class="field-unsaved hidden" id="globalStopTimeUnsaved">저장하지 않은 변경 사항이 있습니다.</div>
-          </div>
-          <div class="schedule-status-grid">
-            <div class="status-item">
-              <span class="status-label">상태</span>
-              <span class="status-value" id="globalStopStatusText">비활성</span>
-            </div>
-            <div class="status-item">
-              <span class="status-label">다음 실행 예정</span>
-              <span class="status-value" id="globalStopNextRun">--</span>
-            </div>
-            <div class="status-item">
-              <span class="status-label">마지막 실행</span>
-              <span class="status-value" id="globalStopLastRun">--</span>
+        <div class="global-form">
+          <div class="field domain-field">
+            <span>활성 도메인</span>
+            <div class="domain-radio-group" id="globalActiveDomainGroup">
+              <label>
+                <input type="radio" name="globalActiveDomain" value="naver">
+                네이버
+              </label>
+              <label>
+                <input type="radio" name="globalActiveDomain" value="daum">
+                다음
+              </label>
             </div>
           </div>
-          <label class="schedule-deploy-toggle">
-            <input type="checkbox" id="globalStopDeploy">
-            <span>설정 적용 시 기본값을 전체 디바이스에 배포</span>
+          <label class="field">
+            <span>HELO</span>
+            <input type="text" id="globalHelo" placeholder="예: mail.example.com">
           </label>
+          <label class="field">
+            <span>MAIL FROM</span>
+            <input type="text" id="globalMailFrom" placeholder="sender@example.com">
+          </label>
+          <label class="field compact">
+            <span>세션 수</span>
+            <input type="number" id="globalSessionCount" min="1" step="1" placeholder="1 이상">
+          </label>
+          <label class="field compact">
+            <span>BCC 수</span>
+            <input type="number" id="globalBccCount" min="0" max="30" step="1" placeholder="0~30">
+          </label>
+          <label class="field header-field">
+            <span>HEADER</span>
+            <textarea id="globalHeader" placeholder="헤더를 입력하세요"></textarea>
+          </label>
+        </div>
+      </div>
+      <div class="global-section">
+        <h3 class="global-section-title">시간 제어</h3>
+        <div class="global-schedule">
+          <div class="global-schedule-card" id="globalScheduleCard">
+            <div class="schedule-header">
+              <label class="schedule-toggle">
+                <input type="checkbox" id="globalStopScheduleToggle">
+                <span>자동 중지</span>
+              </label>
+              <span class="schedule-status-pill" id="globalStopSchedulePill">비활성</span>
+            </div>
+            <div class="global-schedule-body">
+              <div class="schedule-time-wrapper">
+                <input type="text" class="schedule-time-input" id="globalStopScheduleTime" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" placeholder="예: 02:30">
+              </div>
+              <div class="global-schedule-meta">
+                <span>다음 실행: <strong id="globalStopScheduleNext">--</strong></span>
+                <span>마지막 실행: <strong id="globalStopScheduleLast">--</strong></span>
+              </div>
+              <div class="global-schedule-hint" id="globalStopScheduleHint">HH:MM 형식으로 입력하세요.</div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -1286,7 +1299,16 @@ button:not(:disabled):hover {
 </div>
 
 <script>
-const GLOBAL_FIELD_LIST = ["active_domain", "helo", "mail_from", "header", "session_count", "bcc_count", "stop_schedule_time", "stop_schedule_enabled"];
+const GLOBAL_FIELD_LIST = [
+  "active_domain",
+  "helo",
+  "mail_from",
+  "header",
+  "session_count",
+  "bcc_count",
+  "stop_schedule_enabled",
+  "stop_schedule_time",
+];
 const GLOBAL_DEFAULTS = {
   active_domain: "naver",
   helo: "",
@@ -1294,12 +1316,8 @@ const GLOBAL_DEFAULTS = {
   header: "",
   session_count: "1",
   bcc_count: "0",
-  stop_schedule_time: "",
   stop_schedule_enabled: false,
-};
-const GLOBAL_META_DEFAULTS = {
-  stop_schedule_last_run: null,
-  stop_schedule_next_run: null,
+  stop_schedule_time: "",
 };
 const GLOBAL_INPUT_IDS = {
   active_domain: "globalActiveDomainGroup",
@@ -1308,8 +1326,8 @@ const GLOBAL_INPUT_IDS = {
   header: "globalHeader",
   session_count: "globalSessionCount",
   bcc_count: "globalBccCount",
-  stop_schedule_time: "globalStopTime",
-  stop_schedule_enabled: "globalStopEnabled",
+  stop_schedule_enabled: "globalStopScheduleToggle",
+  stop_schedule_time: "globalStopScheduleTime",
 };
 
 const state = {
@@ -1323,7 +1341,7 @@ const state = {
   },
   pollingHandle: null,
   successCounters: {},
-  globalConfig: { ...GLOBAL_DEFAULTS, ...GLOBAL_META_DEFAULTS, updated_at: null },
+  globalConfig: { ...GLOBAL_DEFAULTS, updated_at: null, stop_schedule_last_run: null, stop_schedule_next_run: null },
   globalDraft: { ...GLOBAL_DEFAULTS },
   globalDirty: {
     active_domain: false,
@@ -1332,17 +1350,11 @@ const state = {
     header: false,
     session_count: false,
     bcc_count: false,
-    stop_schedule_time: false,
     stop_schedule_enabled: false,
+    stop_schedule_time: false,
   },
   globalStatusTimer: null,
-  scheduleEditing: {
-    inputValue: "",
-    sanitizedValue: "",
-    dirty: false,
-    error: "",
-    saving: false,
-  },
+  globalScheduleError: "",
   deviceEditMode: false,
   filterOnlineOnly: false,
   deletingDevices: new Set(),
@@ -1366,8 +1378,7 @@ const JOB_STATUS_LABELS = {
 };
 const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
 
-const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to", "stop_schedule_time"];
-const SCHEDULE_FIELDS = ["stop_schedule_enabled", "stop_schedule_time", "stop_schedule_last_run"];
+const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 6;
@@ -1623,9 +1634,6 @@ function initialFieldValues(config) {
     anchor_interval: formatAnchorValue(config?.anchor_interval ?? 0),
     anchor_email: config?.anchor_email || "",
     rcpt_to: config?.rcpt_to || "",
-    stop_schedule_time: sanitizeScheduleTime(config?.stop_schedule_time ?? "") || "",
-    stop_schedule_enabled: config?.stop_schedule_enabled ? "1" : "0",
-    stop_schedule_last_run: config?.stop_schedule_last_run || "",
   };
 }
 
@@ -1679,20 +1687,6 @@ function collectConfigPayload(card, currentDevice, domain) {
   const anchorEmailInput = card.querySelector('[data-field="anchor_email"]');
   const anchorEmailValue = anchorEmailInput?.value?.trim() ?? "";
 
-  const scheduleToggle = card.querySelector('[data-field="stop_schedule_enabled"]');
-  const scheduleTimeInput = card.querySelector('[data-field="stop_schedule_time"]');
-  let scheduleEnabled = Boolean(scheduleToggle?.checked);
-  let scheduleTimeValue = sanitizeScheduleTime(scheduleTimeInput?.value ?? "") || "";
-  if (scheduleTimeInput && scheduleTimeInput.value !== scheduleTimeValue) {
-    scheduleTimeInput.value = scheduleTimeValue;
-  }
-  if (!scheduleTimeValue) {
-    scheduleEnabled = false;
-  }
-
-  const cacheEntry = fieldCache[currentDevice.id]?.[domain];
-  const resetRequested = cacheEntry?.values?.stop_schedule_last_run === "__RESET__";
-
   return {
     payload: {
       helo: card.querySelector('[data-field="helo"]').value.trim(),
@@ -1704,9 +1698,6 @@ function collectConfigPayload(card, currentDevice, domain) {
       anchor_interval: parseAnchorInput(anchorIntervalValue),
       anchor_email: anchorEmailValue,
       rcpt_to: card.querySelector('[data-field="rcpt_to"]').value.trim(),
-      stop_schedule_enabled: scheduleEnabled,
-      stop_schedule_time: scheduleTimeValue,
-      ...(resetRequested ? { stop_schedule_last_run: "" } : {}),
     },
   };
 }
@@ -1782,7 +1773,64 @@ function computeDeviceNextRun(timeValue) {
   return target.toISOString();
 }
 
-function updateDeviceSchedule(card, device, domain, config, options = {}) {
+function formatScheduleInputValue(raw) {
+  const digits = String(raw ?? "").replace(/\D/g, "").slice(0, 4);
+  if (digits.length <= 2) {
+    return digits;
+  }
+  const hours = digits.slice(0, 2);
+  const minutes = digits.slice(2);
+  return minutes ? `${hours}:${minutes}` : hours;
+}
+
+async function requestDeviceScheduleUpdate(card, device, domain, payload) {
+  const normalizedDomain = normalizeDeviceDomain(domain);
+  const scheduleCard = card.querySelector('[data-role="deviceSchedule"]');
+  const toggle = scheduleCard?.querySelector('[data-field="stop_schedule_enabled"]');
+  const timeInput = scheduleCard?.querySelector('[data-field="stop_schedule_time"]');
+  const previousConfig = bestConfig(device, normalizedDomain);
+  scheduleCard?.classList.add("is-updating");
+  if (toggle) toggle.disabled = true;
+  if (timeInput) timeInput.disabled = true;
+  try {
+    const result = await fetchJSON(`/api/devices/${device.id}/domains/${normalizedDomain}/schedule`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const updatedConfig = result.config || {};
+    device.configs = device.configs || {};
+    device.configs[normalizedDomain] = updatedConfig;
+    card.__deviceData = { ...device };
+    updateDeviceSchedule(card, device, normalizedDomain, updatedConfig);
+    const savedTime = sanitizeScheduleTime(updatedConfig.stop_schedule_time) || "";
+    if (payload.enabled && savedTime) {
+      setNotice(card, `자동 중지를 매일 ${savedTime}에 실행하도록 저장했습니다.`);
+    } else if (payload.enabled) {
+      setNotice(card, "예약 시간이 비어 있어 자동 중지를 비활성화했습니다.", "info");
+    } else if (payload.time) {
+      setNotice(card, payload.time ? `자동 중지 시간을 ${payload.time || "--"}로 저장했습니다.` : "자동 중지 시간을 비워 저장했습니다.");
+    } else {
+      setNotice(card, "자동 중지를 비활성화했습니다.");
+    }
+    return updatedConfig;
+  } catch (err) {
+    updateDeviceSchedule(card, device, normalizedDomain, previousConfig);
+    if (toggle) {
+      toggle.checked = Boolean(previousConfig?.stop_schedule_enabled);
+    }
+    if (timeInput) {
+      timeInput.value = sanitizeScheduleTime(previousConfig?.stop_schedule_time) || "";
+    }
+    setNotice(card, err?.message || "스케줄 업데이트에 실패했습니다.", "error");
+    throw err;
+  } finally {
+    scheduleCard?.classList.remove("is-updating");
+    if (toggle) toggle.disabled = false;
+    if (timeInput) timeInput.disabled = false;
+  }
+}
+
+function updateDeviceSchedule(card, device, domain, config) {
   const scheduleCard = card.querySelector('[data-role="deviceSchedule"]');
   if (!scheduleCard) return;
   const toggle = scheduleCard.querySelector('[data-field="stop_schedule_enabled"]');
@@ -1791,39 +1839,23 @@ function updateDeviceSchedule(card, device, domain, config, options = {}) {
   const nextRunEl = scheduleCard.querySelector('[data-role="scheduleNextRun"]');
   const lastRunEl = scheduleCard.querySelector('[data-role="scheduleLastRun"]');
   const hintEl = scheduleCard.querySelector('[data-role="scheduleHint"]');
-  const resetBtn = scheduleCard.querySelector('[data-action="schedule-reset"]');
-  const deviceId = device?.id || card.dataset.deviceId;
-  const cacheEntry = deviceId ? fieldCache[deviceId]?.[domain] : null;
-  const resetPending = cacheEntry?.values?.stop_schedule_last_run === "__RESET__";
 
-  let enabled = Boolean(config?.stop_schedule_enabled);
-  let timeValue = sanitizeScheduleTime(config?.stop_schedule_time) || "";
-  let nextRunValue = config?.stop_schedule_next_run || null;
-  let lastRunValue = config?.stop_schedule_last_run || null;
+  const enabled = Boolean(config?.stop_schedule_enabled);
+  const timeValue = sanitizeScheduleTime(config?.stop_schedule_time) || "";
+  const nextRunValue = enabled && timeValue
+    ? formatDate(config?.stop_schedule_next_run || computeDeviceNextRun(timeValue))
+    : null;
+  const lastRunValue = formatScheduleDate(config?.stop_schedule_last_run);
 
-  if (options.preview) {
-    enabled = Boolean(toggle?.checked);
-    const inputValue = sanitizeScheduleTime(timeInput?.value ?? "") || "";
-    if (!inputValue) {
-      enabled = false;
-    }
-    timeValue = inputValue;
-    nextRunValue = enabled && inputValue ? computeDeviceNextRun(inputValue) : null;
-  }
-
-  if (!nextRunValue && enabled && timeValue) {
-    nextRunValue = computeDeviceNextRun(timeValue);
-  }
-
-  const activeInput = document.activeElement === timeInput;
   if (toggle) {
     toggle.checked = enabled;
   }
   if (timeInput) {
-    if (!activeInput || options.force) {
-      timeInput.value = timeValue || "";
+    const activeInput = document.activeElement === timeInput;
+    if (!activeInput) {
+      timeInput.value = timeValue;
     }
-    timeInput.disabled = !enabled;
+    timeInput.disabled = false;
   }
 
   scheduleCard.classList.toggle("active", enabled && Boolean(timeValue));
@@ -1837,386 +1869,25 @@ function updateDeviceSchedule(card, device, domain, config, options = {}) {
     }
   }
   if (nextRunEl) {
-    nextRunEl.textContent = enabled && nextRunValue ? formatDate(nextRunValue) : "--";
+    nextRunEl.textContent = nextRunValue || "--";
   }
   if (lastRunEl) {
-    if (resetPending) {
-      lastRunEl.textContent = "저장 시 초기화";
-      lastRunEl.dataset.state = "pending-reset";
-    } else if (lastRunValue) {
-      lastRunEl.textContent = formatScheduleDate(lastRunValue) || lastRunValue;
+    if (lastRunValue) {
+      lastRunEl.textContent = lastRunValue;
       lastRunEl.dataset.state = "reported";
     } else {
       lastRunEl.textContent = "--";
       lastRunEl.dataset.state = "none";
     }
   }
-  if (resetBtn) {
-    const hasLastRun = Boolean(config?.stop_schedule_last_run);
-    resetBtn.disabled = !hasLastRun || resetPending;
-    resetBtn.textContent = resetPending ? "재실행 대기" : "오늘 다시 실행";
-  }
   if (hintEl) {
-    if (!enabled) {
-      hintEl.textContent = "예약을 켜면 지정 시간에 자동으로 발송을 멈춥니다.";
-    } else if (!timeValue) {
+    if (!timeValue) {
       hintEl.textContent = "HH:MM 형식으로 입력하세요.";
-    } else if (resetPending) {
-      hintEl.textContent = "저장하면 오늘 실행 기록이 초기화됩니다.";
+    } else if (!enabled) {
+      hintEl.textContent = `저장된 시간 ${timeValue} · 토글을 켜면 적용됩니다.`;
     } else {
-      hintEl.textContent = "저장하면 지정 시간에 오늘 발송을 중단합니다.";
+      hintEl.textContent = "예약된 시간에 현재 작업이 중단됩니다.";
     }
-  }
-}
-
-function updateStopScheduleStatus(config, options = {}) {
-  const { force = false } = options;
-  const enabled = Boolean(config?.stop_schedule_enabled);
-  const timeValue = sanitizeScheduleTime(config?.stop_schedule_time);
-  const card = document.getElementById("globalStopScheduleCard");
-  const pillEl = document.getElementById("globalStopStatusPill");
-  const statusTextEl = document.getElementById("globalStopStatusText");
-  const nextRunEl = document.getElementById("globalStopNextRun");
-  const lastRunEl = document.getElementById("globalStopLastRun");
-  const nextRunLabel = config?.stop_schedule_next_run ? formatDate(config.stop_schedule_next_run) : null;
-  const lastRunLabel = formatScheduleDate(config?.stop_schedule_last_run);
-  const isDirty = Boolean(state.globalDirty?.stop_schedule_enabled);
-  const allowStatusUpdate = force || !isDirty;
-  if (allowStatusUpdate) {
-    if (card) {
-      card.classList.toggle("active", enabled && !!timeValue);
-    }
-    if (pillEl) {
-      pillEl.textContent = enabled ? "활성" : "비활성";
-      pillEl.classList.toggle("active", enabled);
-    }
-    if (statusTextEl) {
-      if (enabled && timeValue) {
-        statusTextEl.textContent = `활성 (매일 ${timeValue})`;
-      } else if (!enabled && timeValue) {
-        statusTextEl.textContent = `비활성 (저장된 시간 ${timeValue})`;
-      } else {
-        statusTextEl.textContent = enabled ? "활성" : "비활성";
-      }
-    }
-  }
-  if (nextRunEl) {
-    nextRunEl.textContent = enabled && nextRunLabel ? nextRunLabel : "--";
-  }
-  if (lastRunEl) {
-    lastRunEl.textContent = lastRunLabel || "--";
-  }
-  setStopScheduleEnabledUI(enabled, { force });
-}
-
-function setStopScheduleEnabledUI(enabled, options = {}) {
-  const { force = false } = options;
-  const isDirty = Boolean(state.globalDirty?.stop_schedule_enabled);
-  const allowUpdate = force || !isDirty;
-  const toggle = document.getElementById("globalStopEnabled");
-  const card = document.getElementById("globalStopScheduleCard");
-  const pillEl = document.getElementById("globalStopStatusPill");
-  if (toggle && allowUpdate && toggle.checked !== enabled) {
-    toggle.checked = enabled;
-  }
-  if (allowUpdate && card) {
-    card.classList.toggle("active", enabled);
-  }
-  if (allowUpdate && pillEl) {
-    pillEl.textContent = enabled ? "활성" : "비활성";
-    pillEl.classList.toggle("active", enabled);
-  }
-  const timeInput = document.getElementById("globalStopTime");
-  if (timeInput && allowUpdate) {
-    timeInput.classList.toggle("schedule-input-disabled", !enabled);
-  }
-}
-
-function getSavedScheduleTime() {
-  return sanitizeScheduleTime(state.globalDraft?.stop_schedule_time ?? state.globalConfig?.stop_schedule_time ?? "");
-}
-
-function syncScheduleEditingFromConfig(config, options = {}) {
-  const { force = false } = options;
-  const saved = sanitizeScheduleTime(config?.stop_schedule_time ?? getSavedScheduleTime());
-  if (!force && state.scheduleEditing.dirty) {
-    updateScheduleEditingUI();
-    return;
-  }
-  state.scheduleEditing = {
-    inputValue: saved,
-    sanitizedValue: saved,
-    dirty: false,
-    error: "",
-    saving: false,
-  };
-  state.globalDirty.stop_schedule_time = false;
-  const input = document.getElementById("globalStopTime");
-  if (input) {
-    input.value = saved;
-  }
-  updateScheduleEditingUI();
-}
-
-function updateScheduleEditingUI() {
-  const actionsEl = document.getElementById("globalStopTimeActions");
-  const saveBtn = document.getElementById("globalStopTimeSaveBtn");
-  const cancelBtn = document.getElementById("globalStopTimeCancelBtn");
-  const errorEl = document.getElementById("globalStopTimeError");
-  const unsavedEl = document.getElementById("globalStopTimeUnsaved");
-  const disabledHintEl = document.getElementById("globalStopTimeDisabledHint");
-  const toggleEl = document.getElementById("globalStopEnabled");
-  const isEnabled = Boolean(toggleEl?.checked);
-  const { dirty, error, sanitizedValue, saving } = state.scheduleEditing;
-  if (actionsEl) {
-    actionsEl.classList.toggle("hidden", !dirty);
-  }
-  if (saveBtn) {
-    saveBtn.disabled = !dirty || !sanitizedValue || Boolean(error) || saving;
-    saveBtn.textContent = saving ? "저장 중..." : "저장";
-  }
-  if (cancelBtn) {
-    cancelBtn.disabled = !dirty || saving;
-  }
-  if (errorEl) {
-    if (error) {
-      errorEl.textContent = error;
-      errorEl.classList.remove("hidden");
-    } else {
-      errorEl.textContent = "";
-      errorEl.classList.add("hidden");
-    }
-  }
-  if (unsavedEl) {
-    unsavedEl.classList.toggle("hidden", !dirty || saving);
-  }
-  if (disabledHintEl) {
-    const showHint = !isEnabled && dirty && !saving;
-    disabledHintEl.classList.toggle("hidden", !showHint);
-  }
-}
-
-function formatScheduleInputValue(raw) {
-  if (raw === undefined || raw === null) {
-    return "";
-  }
-  const digits = String(raw).replace(/\D/g, "").slice(0, 4);
-  if (digits.length <= 2) {
-    return digits;
-  }
-  const hours = digits.slice(0, 2);
-  const minutes = digits.slice(2);
-  return minutes ? `${hours}:${minutes}` : hours;
-}
-
-function handleStopTimeInput(event) {
-  const input = event.target;
-  const formatted = formatScheduleInputValue(input.value);
-  if (input.value !== formatted) {
-    input.value = formatted;
-  }
-  const saved = getSavedScheduleTime();
-  const sanitized = sanitizeScheduleTime(formatted);
-  let error = "";
-  const isComplete = formatted.length === 5;
-  if (isComplete && !sanitized) {
-    error = "24시간 형식(HH:MM)으로 입력하세요.";
-  }
-  const dirty = formatted !== saved;
-  state.scheduleEditing = {
-    ...state.scheduleEditing,
-    inputValue: formatted,
-    sanitizedValue: sanitized,
-    dirty,
-    error,
-  };
-  state.globalDirty.stop_schedule_time = dirty;
-  updateScheduleEditingUI();
-}
-
-function handleStopTimeBlur(event) {
-  const input = event.target;
-  const sanitized = sanitizeScheduleTime(input.value);
-  if (sanitized) {
-    input.value = sanitized;
-  }
-  const saved = getSavedScheduleTime();
-  const formatted = input.value;
-  const dirty = formatted !== saved;
-  let error = "";
-  if (formatted && !sanitizeScheduleTime(formatted)) {
-    error = "24시간 형식(HH:MM)으로 입력하세요.";
-  }
-  state.scheduleEditing = {
-    ...state.scheduleEditing,
-    inputValue: formatted,
-    sanitizedValue: sanitizeScheduleTime(formatted),
-    dirty,
-    error,
-  };
-  state.globalDirty.stop_schedule_time = dirty;
-  updateScheduleEditingUI();
-}
-
-function handleStopTimeCancel(event) {
-  event.preventDefault();
-  const saved = getSavedScheduleTime();
-  const input = document.getElementById("globalStopTime");
-  if (input) {
-    input.value = saved;
-  }
-  state.scheduleEditing = {
-    inputValue: saved,
-    sanitizedValue: saved,
-    dirty: false,
-    error: "",
-    saving: false,
-  };
-  state.globalDirty.stop_schedule_time = false;
-  updateScheduleEditingUI();
-}
-
-async function handleStopTimeSave(event) {
-  event.preventDefault();
-  const currentToggle = Boolean(document.getElementById("globalStopEnabled")?.checked);
-  let sanitized = state.scheduleEditing.sanitizedValue;
-  if (!sanitized) {
-    sanitized = sanitizeScheduleTime(document.getElementById("globalStopTime")?.value || "");
-  }
-  if (!sanitized) {
-    state.scheduleEditing = {
-      ...state.scheduleEditing,
-      error: "24시간 형식(HH:MM)으로 시간을 입력한 뒤 저장하세요.",
-    };
-    updateScheduleEditingUI();
-    return;
-  }
-  await submitStopScheduleUpdate({
-    enabled: currentToggle,
-    time: sanitized,
-    reason: currentToggle ? "time-change-active" : "time-change-inactive",
-    source: "save",
-  });
-}
-
-async function handleStopToggleChange(event) {
-  const toggle = event.target;
-  const wantsEnable = Boolean(toggle.checked);
-  const saved = getSavedScheduleTime();
-  const editing = state.scheduleEditing;
-  const candidate = editing.sanitizedValue || (!editing.dirty ? saved : "");
-  if (wantsEnable && !candidate) {
-    toggle.checked = false;
-    setStopScheduleEnabledUI(false, { force: true });
-    state.scheduleEditing = {
-      ...state.scheduleEditing,
-      error: "예약을 켜려면 24시간 형식(HH:MM)의 시간을 먼저 입력하세요.",
-    };
-    updateScheduleEditingUI();
-    setGlobalStatus("유효한 예약 시간을 먼저 입력해야 자동 중지 예약을 켤 수 있습니다.", "error");
-    return;
-  }
-  const pendingTime = sanitizeScheduleTime(candidate || saved);
-  state.globalDirty.stop_schedule_enabled = true;
-  updateStopScheduleStatus(
-    {
-      stop_schedule_enabled: wantsEnable,
-      stop_schedule_time: pendingTime,
-      stop_schedule_next_run: wantsEnable ? state.globalConfig.stop_schedule_next_run : null,
-      stop_schedule_last_run: state.globalConfig.stop_schedule_last_run,
-    },
-    { force: true },
-  );
-  toggle.disabled = true;
-  await submitStopScheduleUpdate({
-    enabled: wantsEnable,
-    time: candidate || saved,
-    reason: wantsEnable ? "toggle-on" : "toggle-off",
-    source: "toggle",
-  });
-  toggle.disabled = false;
-}
-
-async function submitStopScheduleUpdate(options) {
-  const { enabled, time, reason, source } = options;
-  const toggleEl = document.getElementById("globalStopEnabled");
-  const previousEnabled = Boolean(state.globalConfig.stop_schedule_enabled);
-  const sanitizedTime = sanitizeScheduleTime(time);
-  state.scheduleEditing = {
-    ...state.scheduleEditing,
-    error: "",
-    saving: source === "save",
-  };
-  updateScheduleEditingUI();
-  const payload = {
-    helo: state.globalDraft?.helo ?? "",
-    mail_from: state.globalDraft?.mail_from ?? "",
-    header: state.globalDraft?.header ?? "",
-    session_count: Number(sanitizeSessionValue(state.globalDraft?.session_count ?? GLOBAL_DEFAULTS.session_count)),
-    bcc_count: parseBccInput(state.globalDraft?.bcc_count ?? GLOBAL_DEFAULTS.bcc_count),
-    stop_schedule_enabled: Boolean(enabled),
-    stop_schedule_time: sanitizedTime,
-  };
-  try {
-    const result = await fetchJSON("/api/global/config/apply", {
-      method: "POST",
-      body: JSON.stringify(payload),
-    });
-    const serverConfig = { ...(result.config || {}), updated_at: result.updated_at || null };
-    state.globalDirty.stop_schedule_time = false;
-    state.globalDirty.stop_schedule_enabled = false;
-    state.scheduleEditing = {
-      inputValue: "",
-      sanitizedValue: "",
-      dirty: false,
-      error: "",
-      saving: false,
-    };
-    renderGlobalConfig(serverConfig);
-    const newEnabled = Boolean(serverConfig.stop_schedule_enabled);
-    const newTime = sanitizeScheduleTime(serverConfig.stop_schedule_time);
-    let message = "";
-    if (reason === "toggle-on") {
-      message = newTime
-        ? `자동 중지 예약이 매일 ${newTime}에 실행되도록 활성화되었습니다.`
-        : "자동 중지 예약을 활성화했습니다.";
-    } else if (reason === "toggle-off") {
-      message = "자동 중지 예약을 비활성화했습니다.";
-    } else if (reason === "time-change-active") {
-      message = newTime
-        ? `자동 중지 예약 시간이 ${newTime}로 변경되었습니다.`
-        : "자동 중지 예약 시간을 업데이트했습니다.";
-    } else if (reason === "time-change-inactive") {
-      message = newTime
-        ? `예약 시간이 ${newTime}로 저장되었습니다. 예약을 켜면 즉시 적용됩니다.`
-        : "예약 시간이 저장되었습니다.";
-    } else {
-      message = "자동 중지 예약을 업데이트했습니다.";
-    }
-    setGlobalStatus(message, "success");
-  } catch (err) {
-    if (toggleEl) {
-      toggleEl.checked = previousEnabled;
-    }
-    state.globalDirty.stop_schedule_enabled = false;
-    setStopScheduleEnabledUI(previousEnabled, { force: true });
-    state.scheduleEditing = {
-      ...state.scheduleEditing,
-      dirty: state.scheduleEditing.dirty,
-      saving: false,
-      error: err?.message || "변경 사항을 저장하지 못했습니다. 다시 시도하세요.",
-    };
-    updateScheduleEditingUI();
-    setGlobalStatus(err?.message || "자동 중지 예약 업데이트에 실패했습니다.", "error");
-  } finally {
-    state.globalDirty.stop_schedule_enabled = false;
-    if (source !== "save") {
-      state.scheduleEditing = {
-        ...state.scheduleEditing,
-        saving: false,
-      };
-    }
-    updateScheduleEditingUI();
   }
 }
 
@@ -2243,6 +1914,58 @@ function setGlobalStatus(message, type = "info") {
   }
 }
 
+function updateGlobalScheduleUI(options = {}) {
+  const { error } = options;
+  if (typeof error === "string") {
+    state.globalScheduleError = error;
+  } else if (error === null) {
+    state.globalScheduleError = "";
+  }
+  const toggle = document.getElementById("globalStopScheduleToggle");
+  const timeInput = document.getElementById("globalStopScheduleTime");
+  const cardEl = document.getElementById("globalScheduleCard");
+  const pillEl = document.getElementById("globalStopSchedulePill");
+  const hintEl = document.getElementById("globalStopScheduleHint");
+  const nextEl = document.getElementById("globalStopScheduleNext");
+  const lastEl = document.getElementById("globalStopScheduleLast");
+
+  const rawValue = timeInput?.value ?? state.globalDraft.stop_schedule_time ?? "";
+  const sanitized = sanitizeScheduleTime(rawValue);
+  const toggleChecked = Boolean(toggle?.checked);
+  const effectivelyEnabled = toggleChecked && Boolean(sanitized);
+
+  if (cardEl) {
+    cardEl.classList.toggle("active", effectivelyEnabled);
+  }
+  if (pillEl) {
+    pillEl.textContent = effectivelyEnabled ? "활성" : "비활성";
+    pillEl.classList.toggle("active", effectivelyEnabled);
+  }
+  if (nextEl) {
+    const serverNext = state.globalConfig.stop_schedule_next_run || null;
+    const displayNext = effectivelyEnabled
+      ? formatDate(serverNext || computeDeviceNextRun(sanitized))
+      : null;
+    nextEl.textContent = displayNext || "--";
+  }
+  if (lastEl) {
+    const serverLast = state.globalConfig.stop_schedule_last_run || null;
+    lastEl.textContent = serverLast ? (formatScheduleDate(serverLast) || "--") : "--";
+  }
+  if (hintEl) {
+    hintEl.classList.toggle("error", Boolean(state.globalScheduleError));
+    if (state.globalScheduleError) {
+      hintEl.textContent = state.globalScheduleError;
+    } else if (!sanitized) {
+      hintEl.textContent = "HH:MM 형식으로 입력하세요.";
+    } else if (!toggleChecked) {
+      hintEl.textContent = `저장된 시간 ${sanitized} · 토글을 켜면 적용됩니다.`;
+    } else {
+      hintEl.textContent = `${sanitized}에 자동 중지가 실행됩니다.`;
+    }
+  }
+}
+
 function normalizeGlobalFieldValue(field, value) {
   if (field === "active_domain") {
     return sanitizeGlobalDomain(value ?? GLOBAL_DEFAULTS.active_domain);
@@ -2253,14 +1976,11 @@ function normalizeGlobalFieldValue(field, value) {
   if (field === "bcc_count") {
     return sanitizeBccValue(value ?? "");
   }
+  if (field === "stop_schedule_enabled") {
+    return Boolean(value);
+  }
   if (field === "stop_schedule_time") {
     return sanitizeScheduleTime(value ?? "");
-  }
-  if (field === "stop_schedule_enabled") {
-    if (value === undefined || value === null) {
-      return Boolean(GLOBAL_DEFAULTS.stop_schedule_enabled);
-    }
-    return Boolean(value);
   }
   if (value === undefined || value === null) {
     return GLOBAL_DEFAULTS[field];
@@ -2274,8 +1994,8 @@ function normalizeGlobalConfig(config) {
     normalized[field] = normalizeGlobalFieldValue(field, config?.[field]);
   });
   normalized.updated_at = config?.updated_at || null;
-  normalized.stop_schedule_last_run = config?.stop_schedule_last_run || GLOBAL_META_DEFAULTS.stop_schedule_last_run;
-  normalized.stop_schedule_next_run = config?.stop_schedule_next_run || GLOBAL_META_DEFAULTS.stop_schedule_next_run;
+  normalized.stop_schedule_last_run = config?.stop_schedule_last_run || null;
+  normalized.stop_schedule_next_run = config?.stop_schedule_next_run || null;
   return normalized;
 }
 
@@ -2307,13 +2027,11 @@ function syncGlobalInputsFromDraft(options = {}) {
       if (force || document.activeElement !== input) {
         input.checked = Boolean(normalizedValue);
       }
-      if (field === "stop_schedule_enabled") {
-        setStopScheduleEnabledUI(Boolean(normalizedValue));
-      }
     } else if (force || document.activeElement !== input) {
       input.value = normalizedValue;
     }
   });
+  updateGlobalScheduleUI();
 }
 
 function applyValuesToGlobalDraft(values, options = {}) {
@@ -2332,6 +2050,7 @@ function applyValuesToGlobalDraft(values, options = {}) {
   if (force) {
     syncGlobalInputsFromDraft({ force: true });
   }
+  updateGlobalScheduleUI();
 }
 
 function initGlobalForm() {
@@ -2355,7 +2074,42 @@ function initGlobalForm() {
     }
     const input = document.getElementById(GLOBAL_INPUT_IDS[field]);
     if (!input) return;
-    if (field === "stop_schedule_enabled" || field === "stop_schedule_time") {
+    if (field === "stop_schedule_enabled") {
+      input.addEventListener("change", () => {
+        state.globalDirty[field] = true;
+        state.globalDraft[field] = input.checked;
+        if (!input.checked) {
+          state.globalScheduleError = "";
+        }
+        updateGlobalScheduleUI({ error: null });
+      });
+      return;
+    }
+    if (field === "stop_schedule_time") {
+      input.addEventListener("input", () => {
+        const formatted = formatScheduleInputValue(input.value);
+        if (input.value !== formatted) {
+          input.value = formatted;
+        }
+        state.globalDirty[field] = true;
+        state.globalDraft[field] = input.value;
+        updateGlobalScheduleUI({ error: null });
+      });
+      input.addEventListener("blur", () => {
+        const formatted = formatScheduleInputValue(input.value);
+        if (input.value !== formatted) {
+          input.value = formatted;
+        }
+        state.globalDraft[field] = input.value;
+        state.globalDirty[field] = true;
+        updateGlobalScheduleUI({ error: null });
+      });
+      input.addEventListener("keydown", (event) => {
+        if (event.key === "Enter") {
+          event.preventDefault();
+          input.blur();
+        }
+      });
       return;
     }
     input.addEventListener("input", () => {
@@ -2382,23 +2136,7 @@ function initGlobalForm() {
       });
     }
   });
-  const stopToggle = document.getElementById("globalStopEnabled");
-  if (stopToggle) {
-    stopToggle.addEventListener("change", handleStopToggleChange);
-  }
-  const stopTimeInput = document.getElementById("globalStopTime");
-  if (stopTimeInput) {
-    stopTimeInput.addEventListener("input", handleStopTimeInput);
-    stopTimeInput.addEventListener("blur", handleStopTimeBlur);
-  }
-  const stopSaveBtn = document.getElementById("globalStopTimeSaveBtn");
-  if (stopSaveBtn) {
-    stopSaveBtn.addEventListener("click", handleStopTimeSave);
-  }
-  const stopCancelBtn = document.getElementById("globalStopTimeCancelBtn");
-  if (stopCancelBtn) {
-    stopCancelBtn.addEventListener("click", handleStopTimeCancel);
-  }
+  updateGlobalScheduleUI({ error: null });
 }
 
 function renderGlobalConfig(config) {
@@ -2417,15 +2155,13 @@ function renderGlobalConfig(config) {
   const normalized = normalizeGlobalConfig(config || {});
   const updatedAtEl = document.getElementById("globalUpdatedAt");
   state.globalConfig = { ...normalized };
+  state.globalScheduleError = "";
   GLOBAL_FIELD_LIST.forEach((field) => {
     if (!state.globalDirty[field]) {
       state.globalDraft[field] = normalized[field];
     }
   });
   syncGlobalInputsFromDraft();
-  updateStopScheduleStatus(normalized);
-  const shouldForceSyncSchedule = !state.globalDirty.stop_schedule_time;
-  syncScheduleEditingFromConfig(normalized, { force: shouldForceSyncSchedule });
   if (updatedAtEl) {
     if (normalized.updated_at) {
       updatedAtEl.textContent = `마지막 적용: ${formatDate(normalized.updated_at)}`;
@@ -3035,26 +2771,18 @@ function updateSuccessCounter(card, device) {
   }
 
   const summary = latestJobSummary(job);
+  let summarySent = 0;
+  let summaryAnchor = 0;
   if (summary) {
-    const sentTotal = parseSummaryNumber(summary.sent);
-    const anchorTotal = parseSummaryNumber(summary.anchor);
-    tracker.value = sentTotal;
-    tracker.anchor = anchorTotal;
-    const counterEl = card.querySelector('[data-role="successCounter"]');
-    if (counterEl) {
-      counterEl.textContent = `누적 성공: ${formatCount(sentTotal)}건`;
-    }
-    const elapsedEl = card.querySelector('[data-role="elapsedCounter"]');
-    if (elapsedEl) {
-      const elapsed = describeElapsedStatus(job);
-      elapsedEl.textContent = `경과: ${elapsed.text} · 알박기: ${formatCount(anchorTotal)}건`;
-      if (elapsed.state) {
-        elapsedEl.dataset.state = elapsed.state;
-      } else {
-        delete elapsedEl.dataset.state;
-      }
-    }
-    return;
+    summarySent = parseSummaryNumber(
+      summary.sent_sequence
+      ?? summary.sent_absolute
+      ?? summary.sent_total
+      ?? summary.total_sent
+      ?? summary.sequence
+      ?? summary.sent,
+    );
+    summaryAnchor = parseSummaryNumber(summary.anchor);
   }
 
   const cutoffMs = typeof tracker.resetCutoff === "number" && !Number.isNaN(tracker.resetCutoff)
@@ -3062,7 +2790,7 @@ function updateSuccessCounter(card, device) {
     : null;
 
   let maxCount = 0;
-  let anchorTotal = 0;
+  let anchorFromLogs = 0;
   (device.logs || []).forEach((entry) => {
     if (!entry?.success) {
       return;
@@ -3082,18 +2810,21 @@ function updateSuccessCounter(card, device) {
       candidate = parsed.count + parsed.bccCount;
     }
     if (parsed.isPrimary && typeof parsed.anchorCount === "number" && parsed.anchorCount > 0) {
-      anchorTotal += parsed.anchorCount;
+      anchorFromLogs += parsed.anchorCount;
     }
     if (candidate > maxCount) {
       maxCount = candidate;
     }
   });
 
-  tracker.value = maxCount;
+  const sentTotal = Math.max(summarySent, maxCount);
+  const anchorTotal = Math.max(summaryAnchor, anchorFromLogs);
+
+  tracker.value = sentTotal;
   tracker.anchor = anchorTotal;
   const counterEl = card.querySelector('[data-role="successCounter"]');
   if (counterEl) {
-    counterEl.textContent = `누적 성공: ${formatCount(maxCount)}건`;
+    counterEl.textContent = `누적 성공: ${formatCount(sentTotal)}건`;
   }
   const elapsedEl = card.querySelector('[data-role="elapsedCounter"]');
   if (elapsedEl) {
@@ -3144,16 +2875,7 @@ function populateConfigForm(card, device, domain) {
   if (anchorEmailInput && document.activeElement !== anchorEmailInput) anchorEmailInput.value = cache.values.anchor_email;
   const rcptInput = card.querySelector('[data-field="rcpt_to"]');
   if (rcptInput && document.activeElement !== rcptInput) rcptInput.value = cache.values.rcpt_to;
-  const scheduleToggle = card.querySelector('[data-field="stop_schedule_enabled"]');
-  if (scheduleToggle) {
-    const enabledValue = cache.values.stop_schedule_enabled === "1";
-    scheduleToggle.checked = enabledValue;
-  }
-  const scheduleTimeInput = card.querySelector('[data-field="stop_schedule_time"]');
-  if (scheduleTimeInput && document.activeElement !== scheduleTimeInput) {
-    scheduleTimeInput.value = cache.values.stop_schedule_time || "";
-  }
-  updateDeviceSchedule(card, device, domain, config, { force: true });
+  updateDeviceSchedule(card, device, domain, config);
 }
 
 function attachCardEvents(card) {
@@ -3290,54 +3012,100 @@ function attachCardEvents(card) {
   }
 
   const scheduleToggle = card.querySelector('[data-field="stop_schedule_enabled"]');
-  if (scheduleToggle) {
-    scheduleToggle.addEventListener("change", () => {
-      const currentDevice = getDevice();
-      const domain = getActiveDomain(card, currentDevice.active_domain);
-      const normalizedValue = scheduleToggle.checked ? "1" : "0";
-      markFieldDirty(currentDevice.id, domain, "stop_schedule_enabled", normalizedValue);
-      if (!scheduleToggle.checked) {
-        markFieldDirty(currentDevice.id, domain, "stop_schedule_last_run", "");
-      }
-      const config = bestConfig(currentDevice, domain);
-      updateDeviceSchedule(card, currentDevice, domain, config, { preview: true, force: true });
-    });
-  }
-
   const scheduleTimeInput = card.querySelector('[data-field="stop_schedule_time"]');
-  if (scheduleTimeInput) {
-    scheduleTimeInput.addEventListener("input", () => {
-      const currentDevice = getDevice();
-      const domain = getActiveDomain(card, currentDevice.active_domain);
-      markFieldDirty(currentDevice.id, domain, "stop_schedule_time", scheduleTimeInput.value);
-      const config = bestConfig(currentDevice, domain);
-      updateDeviceSchedule(card, currentDevice, domain, config, { preview: true });
-    });
-    scheduleTimeInput.addEventListener("blur", () => {
-      const sanitized = sanitizeScheduleTime(scheduleTimeInput.value) || "";
-      if (scheduleTimeInput.value !== sanitized) {
-        scheduleTimeInput.value = sanitized;
-      }
-      const currentDevice = getDevice();
-      const domain = getActiveDomain(card, currentDevice.active_domain);
-      markFieldDirty(currentDevice.id, domain, "stop_schedule_time", sanitized);
-      const config = bestConfig(currentDevice, domain);
-      updateDeviceSchedule(card, currentDevice, domain, config, { preview: true, force: true });
-    });
-  }
 
-  const scheduleResetBtn = card.querySelector('[data-action="schedule-reset"]');
-  if (scheduleResetBtn) {
-    scheduleResetBtn.addEventListener("click", () => {
+  if (scheduleTimeInput) {
+    const commitTimeChange = async () => {
+      const formatted = formatScheduleInputValue(scheduleTimeInput.value);
+      if (scheduleTimeInput.value !== formatted) {
+        scheduleTimeInput.value = formatted;
+      }
+      const sanitized = sanitizeScheduleTime(scheduleTimeInput.value);
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       const config = bestConfig(currentDevice, domain);
-      if (!config?.stop_schedule_last_run) {
-        setNotice(card, "오늘 실행된 기록이 없어 초기화할 내용이 없습니다.", "info");
+      const wantsEnable = Boolean(scheduleToggle?.checked);
+      const storedTime = sanitizeScheduleTime(config?.stop_schedule_time) || "";
+
+      if (!sanitized && scheduleTimeInput.value.trim() !== "") {
+        scheduleTimeInput.value = storedTime;
+        setNotice(card, "24시간 형식(HH:MM)으로 입력하세요.", "error");
+        updateDeviceSchedule(card, currentDevice, domain, config);
         return;
       }
-      markFieldDirty(currentDevice.id, domain, "stop_schedule_last_run", "__RESET__");
-      updateDeviceSchedule(card, currentDevice, domain, config, { preview: true, force: true });
+
+      if (sanitized === storedTime && wantsEnable === Boolean(config?.stop_schedule_enabled)) {
+        updateDeviceSchedule(card, currentDevice, domain, config);
+        return;
+      }
+
+      if (wantsEnable && !sanitized) {
+        scheduleTimeInput.value = storedTime;
+        if (scheduleToggle) {
+          scheduleToggle.checked = Boolean(config?.stop_schedule_enabled);
+        }
+        setNotice(card, "예약을 켜려면 HH:MM 형식의 시간을 입력하세요.", "error");
+        updateDeviceSchedule(card, currentDevice, domain, config);
+        return;
+      }
+
+      try {
+        await requestDeviceScheduleUpdate(card, currentDevice, domain, {
+          enabled: wantsEnable && Boolean(sanitized),
+          time: sanitized,
+        });
+      } catch (err) {
+        // 오류 메시지는 requestDeviceScheduleUpdate 내부에서 처리됩니다.
+      }
+    };
+
+    scheduleTimeInput.addEventListener("input", () => {
+      const formatted = formatScheduleInputValue(scheduleTimeInput.value);
+      if (scheduleTimeInput.value !== formatted) {
+        scheduleTimeInput.value = formatted;
+      }
+    });
+    scheduleTimeInput.addEventListener("blur", commitTimeChange);
+    scheduleTimeInput.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        commitTimeChange();
+      }
+    });
+  }
+
+  if (scheduleToggle) {
+    scheduleToggle.addEventListener("change", async () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      const config = bestConfig(currentDevice, domain);
+      const timeInput = card.querySelector('[data-field="stop_schedule_time"]');
+      const formatted = formatScheduleInputValue(timeInput?.value ?? "");
+      if (timeInput && timeInput.value !== formatted) {
+        timeInput.value = formatted;
+      }
+      const sanitized = sanitizeScheduleTime(formatted);
+      let timeForRequest = sanitized || sanitizeScheduleTime(config?.stop_schedule_time) || "";
+      const wantsEnable = Boolean(scheduleToggle.checked);
+
+      if (wantsEnable && !timeForRequest) {
+        scheduleToggle.checked = Boolean(config?.stop_schedule_enabled);
+        if (timeInput) {
+          timeInput.value = sanitizeScheduleTime(config?.stop_schedule_time) || "";
+        }
+        setNotice(card, "예약을 켜려면 HH:MM 형식의 시간을 입력하세요.", "error");
+        updateDeviceSchedule(card, currentDevice, domain, config);
+        return;
+      }
+
+      try {
+        await requestDeviceScheduleUpdate(card, currentDevice, domain, {
+          enabled: wantsEnable,
+          time: wantsEnable ? timeForRequest : sanitized,
+        });
+      } catch (err) {
+        // 이미 처리됨
+      }
     });
   }
 
@@ -3646,13 +3414,12 @@ function buildDeviceCard(device) {
       <div class="device-schedule-body">
         <div class="schedule-time-wrapper">
           <input type="text" class="schedule-time-input" data-field="stop_schedule_time" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" placeholder="예: 02:30">
-          <button type="button" class="ghost small" data-action="schedule-reset">오늘 다시 실행</button>
         </div>
         <div class="device-schedule-meta">
           <span>다음 실행: <strong data-role="scheduleNextRun">--</strong></span>
           <span>마지막 실행: <strong data-role="scheduleLastRun">--</strong></span>
         </div>
-        <div class="device-schedule-hint" data-role="scheduleHint">예약을 켜면 지정 시간에 자동으로 발송을 멈춥니다.</div>
+        <div class="device-schedule-hint" data-role="scheduleHint">예약을 켜면 지정 시간에 자동 중지됩니다.</div>
       </div>
     </div>
     <div class="log-box">
@@ -4060,20 +3827,20 @@ async function handleGlobalApply() {
   const headerInput = document.getElementById("globalHeader");
   const sessionInput = document.getElementById("globalSessionCount");
   const bccInput = document.getElementById("globalBccCount");
-  const stopEnabledInput = document.getElementById("globalStopEnabled");
-  const stopTimeInput = document.getElementById("globalStopTime");
-  const stopDeployInput = document.getElementById("globalStopDeploy");
   const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
+  const scheduleToggle = document.getElementById("globalStopScheduleToggle");
+  const scheduleTimeInput = document.getElementById("globalStopScheduleTime");
   if (!applyBtn) return;
+
   const activeDomainValue = sanitizeGlobalDomain(
     activeDomainRadio?.value ?? state.globalDraft.active_domain ?? GLOBAL_DEFAULTS.active_domain,
   );
   if (!activeDomainRadio || activeDomainRadio.value !== activeDomainValue) {
-    const radios = document.querySelectorAll('input[name="globalActiveDomain"]');
-    radios.forEach((radio) => {
+    document.querySelectorAll('input[name="globalActiveDomain"]').forEach((radio) => {
       radio.checked = radio.value === activeDomainValue;
     });
   }
+
   const heloValue = heloInput?.value.trim() ?? "";
   const mailValue = mailInput?.value.trim() ?? "";
   const headerValue = headerInput?.value ?? "";
@@ -4085,37 +3852,36 @@ async function handleGlobalApply() {
   if (bccInput && bccInput.value !== bccValue) {
     bccInput.value = bccValue;
   }
-  let stopTimeValue = sanitizeScheduleTime(state.globalDraft.stop_schedule_time ?? GLOBAL_DEFAULTS.stop_schedule_time);
-  let stopEnabledValue = Boolean(stopEnabledInput?.checked);
-  if (state.scheduleEditing.dirty) {
-    stopTimeValue = getSavedScheduleTime();
-  } else if (stopTimeInput) {
-    const currentInputValue = sanitizeScheduleTime(stopTimeInput.value);
-    if (currentInputValue && currentInputValue !== stopTimeValue) {
-      stopTimeValue = currentInputValue;
-    }
-    if (stopTimeInput.value !== (currentInputValue || "")) {
-      stopTimeInput.value = currentInputValue || "";
-    }
+  const scheduleRaw = scheduleTimeInput?.value ?? state.globalDraft.stop_schedule_time ?? "";
+  const formattedSchedule = formatScheduleInputValue(scheduleRaw);
+  if (scheduleTimeInput && scheduleTimeInput.value !== formattedSchedule) {
+    scheduleTimeInput.value = formattedSchedule;
   }
-  if (!stopTimeValue) {
-    stopEnabledValue = false;
-    if (stopEnabledInput) {
-      stopEnabledInput.checked = false;
-    }
+  const sanitizedSchedule = sanitizeScheduleTime(formattedSchedule);
+  const toggleChecked = Boolean(scheduleToggle?.checked);
+  if (formattedSchedule.trim() && !sanitizedSchedule) {
+    updateGlobalScheduleUI({ error: "HH:MM 형식으로 입력하세요." });
+    scheduleTimeInput?.focus();
+    return;
   }
-  setStopScheduleEnabledUI(stopEnabledValue, { force: true });
-  const shouldDeploySchedule = Boolean(stopDeployInput?.checked);
+  if (toggleChecked && !sanitizedSchedule) {
+    updateGlobalScheduleUI({ error: "자동 중지를 활성화하려면 HH:MM 형식의 시간을 입력하세요." });
+    scheduleTimeInput?.focus();
+    return;
+  }
+
   state.globalDraft.active_domain = activeDomainValue;
   state.globalDraft.helo = heloValue;
   state.globalDraft.mail_from = mailValue;
   state.globalDraft.header = headerValue;
   state.globalDraft.session_count = sessionValue;
   state.globalDraft.bcc_count = bccValue;
-  if (!state.scheduleEditing.dirty) {
-    state.globalDraft.stop_schedule_time = stopTimeValue;
-  }
-  state.globalDraft.stop_schedule_enabled = stopEnabledValue;
+  state.globalDraft.stop_schedule_time = sanitizedSchedule || "";
+  state.globalDraft.stop_schedule_enabled = toggleChecked;
+  state.globalDirty.stop_schedule_time = true;
+  state.globalDirty.stop_schedule_enabled = true;
+  updateGlobalScheduleUI({ error: null });
+
   const payload = {
     active_domain: activeDomainValue,
     helo: heloValue,
@@ -4123,10 +3889,10 @@ async function handleGlobalApply() {
     header: headerValue,
     session_count: Number(sessionValue),
     bcc_count: parseBccInput(bccValue),
-    stop_schedule_enabled: stopEnabledValue,
-    stop_schedule_time: stopTimeValue,
-    stop_schedule_deploy: shouldDeploySchedule,
+    stop_schedule_enabled: toggleChecked && Boolean(sanitizedSchedule),
+    stop_schedule_time: sanitizedSchedule || "",
   };
+
   const originalText = applyBtn.textContent;
   applyBtn.disabled = true;
   applyBtn.textContent = "적용 중...";
@@ -4135,67 +3901,53 @@ async function handleGlobalApply() {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    const previousScheduleEnabled = Boolean(state.globalConfig.stop_schedule_enabled);
-    const previousScheduleTime = sanitizeScheduleTime(state.globalConfig.stop_schedule_time);
     const appliedFields = Array.isArray(result.applied_fields) ? result.applied_fields : [];
     const affected = Number(result.device_count ?? 0);
     const serverConfig = { ...(result.config || {}), updated_at: result.updated_at || null };
-    const newScheduleEnabled = Boolean(serverConfig.stop_schedule_enabled);
-    const newScheduleTime = sanitizeScheduleTime(serverConfig.stop_schedule_time);
-    const scheduleChanged = previousScheduleEnabled !== newScheduleEnabled || previousScheduleTime !== newScheduleTime;
-    const scheduleDeployed = appliedFields.includes("stop_schedule");
-    const scheduleDefaultUpdated = scheduleChanged && !scheduleDeployed;
-    const noDeviceUpdates = (!appliedFields.length && !scheduleDeployed) || affected <= 0;
-    if (noDeviceUpdates) {
-      if (scheduleDeployed) {
-        const message = newScheduleEnabled
-          ? `자동 중지 스케줄을 매일 ${newScheduleTime}로 전체 디바이스에 배포했습니다.`
-          : "자동 중지 스케줄을 전체 디바이스에서 비활성화하도록 배포했습니다.";
-        setGlobalStatus(message, "success");
-      } else if (scheduleDefaultUpdated) {
-        const message = newScheduleEnabled
-          ? `자동 중지 기본값을 매일 ${newScheduleTime}로 저장했습니다.`
-          : "자동 중지 기본값을 비활성화로 저장했습니다.";
-        setGlobalStatus(message, "success");
-      } else {
-        setGlobalStatus("적용할 값이 없어 기존 설정을 유지했습니다.", "info");
-      }
+    const scheduleState = result.schedule_state || {};
+    const scheduleEnabled = Boolean(scheduleState.enabled);
+    const scheduleTime = sanitizeScheduleTime(scheduleState.time) || "";
+
+    if (!appliedFields.length || affected <= 0) {
+      const summary = scheduleEnabled
+        ? `자동 중지 설정이 이미 최신 상태입니다${scheduleTime ? ` (매일 ${scheduleTime})` : ""}.`
+        : "변경할 값이 없어 기존 설정을 유지했습니다.";
+      setGlobalStatus(summary, "info");
     } else {
-      const appliedWithoutSchedule = appliedFields.filter((field) => field !== "stop_schedule");
-      const fieldLabels = appliedWithoutSchedule.map((field) => {
+      const fieldLabels = appliedFields.map((field) => {
         if (field === "active_domain") return "활성 도메인";
         if (field === "helo") return "HELO";
         if (field === "mail_from") return "MAIL FROM";
         if (field === "header") return "HEADER";
         if (field === "session_count") return "세션 수";
         if (field === "bcc_count") return "BCC 수";
-        if (field === "stop_schedule") return "자동 중지 스케줄";
+        if (field === "stop_schedule") return "자동 중지";
         return field.toUpperCase();
       });
       let message = fieldLabels.length
         ? `총 ${affected}대에 ${fieldLabels.join(", ")} 값을 적용했습니다.`
         : `총 ${affected}대에 설정을 적용했습니다.`;
-      if (scheduleDeployed) {
-        message += newScheduleEnabled
-          ? ` / 자동 중지 스케줄 배포: 매일 ${newScheduleTime}`
-          : " / 자동 중지 스케줄 비활성화 배포";
-      } else if (scheduleDefaultUpdated) {
-        message += newScheduleEnabled
-          ? ` / 자동 중지 기본값: 매일 ${newScheduleTime}`
-          : " / 자동 중지 기본값 비활성화";
-      }
+      const scheduleSummary = scheduleEnabled
+        ? `자동 중지: 활성 (매일 ${scheduleTime || "--"})`
+        : "자동 중지: 비활성";
+      message = `${message} · ${scheduleSummary}`;
       setGlobalStatus(message, "success");
     }
+
     GLOBAL_FIELD_LIST.forEach((field) => {
       state.globalDirty[field] = false;
     });
-    if (stopDeployInput) {
-      stopDeployInput.checked = false;
-    }
+
     renderGlobalConfig(serverConfig);
+    updateGlobalScheduleUI({ error: null });
     await loadDevices({ silent: true });
   } catch (err) {
     setGlobalStatus(err.message || "설정 적용에 실패했습니다.", "error");
+    GLOBAL_FIELD_LIST.forEach((field) => {
+      state.globalDirty[field] = false;
+    });
+    renderGlobalConfig(state.globalConfig);
+    updateGlobalScheduleUI({ error: null });
   } finally {
     applyBtn.disabled = false;
     applyBtn.textContent = originalText;
