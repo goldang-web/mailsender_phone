@@ -23,7 +23,7 @@ from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 
 
-APP_VERSION = "0.0.17"
+APP_VERSION = "0.0.18"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -332,7 +332,9 @@ class MailClient:
         self._recovery_failures: Dict[str, str] = {}
         self.public_ip: Optional[str] = None
         self._last_ip_refresh: float = 0.0
-        self._current_job_id: Optional[str] = None
+        self._active_job_ids: Set[str] = set()
+        self._active_jobs: Dict[str, str] = {}
+        self._priority_running: bool = False
         self._cancel_ack_sent: Set[str] = set()
         self._pending_jobs: Deque[Dict[str, object]] = deque()
         self._pending_job_ids: Set[str] = set()
@@ -931,6 +933,7 @@ class MailClient:
             new_jobs = data.get("jobs") if isinstance(data, dict) else None
             if isinstance(new_jobs, list):
                 self._queue_jobs(new_jobs)
+            self._run_priority_jobs()
         except Exception as exc:  # pylint: disable=broad-except
             print(f"[경고] 작업 보고 실패: {exc}")
 
@@ -958,7 +961,7 @@ class MailClient:
                 continue
             if not control.get("cancel_requested"):
                 continue
-            if job_id == self._current_job_id:
+            if job_id in self._active_job_ids:
                 continue
             if job_id in self._cancel_ack_sent:
                 continue
@@ -990,12 +993,77 @@ class MailClient:
             if not isinstance(job, dict):
                 continue
             job_id = str(job.get("job_id") or "").strip()
-            if not job_id or job_id == self._current_job_id:
+            if not job_id or job_id in self._active_job_ids:
                 continue
             if job_id in self._pending_job_ids:
                 continue
             self._pending_jobs.append(job)
             self._pending_job_ids.add(job_id)
+        if self._active_jobs and any(active_type == "batch_send" for active_type in self._active_jobs.values()):
+            self._run_priority_jobs()
+
+    def _run_priority_jobs(self) -> None:
+        if self._priority_running:
+            return
+        if not self._pending_jobs:
+            return
+        if not any(job_type == "batch_send" for job_type in self._active_jobs.values()):
+            return
+        singles: List[Dict[str, object]] = []
+        remaining: Deque[Dict[str, object]] = deque()
+        remaining_ids: Set[str] = set()
+        while self._pending_jobs:
+            job = self._pending_jobs.popleft()
+            if not isinstance(job, dict):
+                continue
+            job_id = str(job.get("job_id") or "").strip()
+            if not job_id:
+                continue
+            job_type = str(job.get("job_type") or "")
+            if job_type == "single_send" and job_id not in self._active_job_ids:
+                singles.append(job)
+                self._pending_job_ids.discard(job_id)
+                continue
+            remaining.append(job)
+            remaining_ids.add(job_id)
+        self._pending_jobs = remaining
+        self._pending_job_ids = remaining_ids
+        if not singles:
+            return
+        self._priority_running = True
+        try:
+            for job in singles:
+                self._execute_priority_job(job)
+        finally:
+            self._priority_running = False
+
+    def _execute_priority_job(self, job: Dict[str, object]) -> None:
+        job_id = str(job.get("job_id") or "").strip()
+        if not job_id or job_id in self._active_job_ids:
+            return
+        job_type = str(job.get("job_type") or "")
+        guard_result: Optional[JobResult] = None
+        if job_type in {"single_send", "batch_send"}:
+            guard_result = self._schedule_guard_for_job(job.get("domain"), job_id, job_type)
+        if guard_result:
+            domain_states = self.collect_domain_states()
+            self.send_job_report(guard_result, domain_states)
+            self.job_controls.pop(job_id, None)
+            self._cancel_ack_sent.discard(job_id)
+            return
+        self._active_job_ids.add(job_id)
+        self._active_jobs[job_id] = job_type
+        self._cancel_ack_sent.discard(job_id)
+        self.send_job_report(JobResult(job_id=job_id, status="running", message="작업 시작"))
+        try:
+            result = self.process_job(job)
+        finally:
+            self._active_job_ids.discard(job_id)
+            self._active_jobs.pop(job_id, None)
+        domain_states = self.collect_domain_states()
+        self.send_job_report(result, domain_states)
+        self.job_controls.pop(job_id, None)
+        self._cancel_ack_sent.discard(job_id)
 
     def _is_cancel_requested(self, job_id: str) -> bool:
         if not job_id:
@@ -1347,6 +1415,8 @@ class MailClient:
         dispatched_db_total = 0
         progress_interval = min(3.0, max(1.0, float(self.interval or 3)))
         last_report_at = time.monotonic()
+        poll_interval = max(1.0, float(self.interval or 3))
+        last_poll_at = time.monotonic()
         domain_totals: Dict[str, int] = {status: 0 for status in EMAIL_STATUSES}
 
         def build_summary() -> Dict[str, object]:
@@ -1357,9 +1427,12 @@ class MailClient:
             )
             total_candidates = sum(domain_totals.values())
             cycle_snapshot = self._cycle_snapshot(normalized)
+            absolute_sent = max(0, int(self.sent_sequences.get(normalized, 0)))
             return {
                 "processed": processed,
                 "sent": sent_count,
+                "sent_sequence": absolute_sent,
+                "sent_absolute": absolute_sent,
                 "failed": failed_count,
                 "block": block_count,
                 "bcc": bcc_processed,
@@ -1375,6 +1448,12 @@ class MailClient:
             summary_snapshot = snapshot or build_summary()
             processed_count = int(summary_snapshot.get("processed") or 0)
             sent_total = int(summary_snapshot.get("sent") or 0)
+            absolute_sent = int(
+                summary_snapshot.get("sent_sequence")
+                or summary_snapshot.get("sent_absolute")
+                or summary_snapshot.get("sent_total")
+                or 0
+            )
             failed_total = int(summary_snapshot.get("failed") or 0)
             block_total = int(summary_snapshot.get("block") or 0)
             bcc_total = int(summary_snapshot.get("bcc") or 0)
@@ -1386,6 +1465,8 @@ class MailClient:
                 f"실패={failed_total} 차단={block_total} BCC={bcc_total} "
                 f"알박기={anchor_total} 잔여={remaining_total}"
             )
+            if absolute_sent:
+                message = f"{message} · 누적={absolute_sent}"
             if cycles_completed > 0:
                 message = f"{message} · {cycles_completed}회 순환 완료"
             return message
@@ -1404,6 +1485,33 @@ class MailClient:
             )
             self._maybe_flush_sent_sequences()
             last_report_at = now_point
+
+        def maybe_poll_updates(force: bool = False) -> None:
+            nonlocal last_poll_at
+            now_point = time.monotonic()
+            if not force and now_point - last_poll_at < poll_interval:
+                return
+            try:
+                response = self.heartbeat([], [])
+            except requests.RequestException as exc:
+                print(f"[진행] 상태 동기화 실패: {exc}")
+                last_poll_at = now_point
+                return
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[진행] 상태 동기화 중 예외: {exc}")
+                last_poll_at = now_point
+                return
+            last_poll_at = now_point
+            configs = response.get("configs") if isinstance(response, dict) else None
+            if isinstance(configs, dict) and configs:
+                self.apply_configs(configs)
+            new_jobs = response.get("jobs") if isinstance(response, dict) else None
+            if isinstance(new_jobs, list):
+                self._queue_jobs(new_jobs)
+            controls = response.get("job_controls") if isinstance(response, dict) else None
+            if isinstance(controls, list):
+                self._update_job_controls(controls)
+                self._acknowledge_cancelled_jobs()
 
         stop_requested = False
         cancel_requested = False
@@ -1943,6 +2051,7 @@ class MailClient:
                                         cancel_requested = True
                                         stop_reason = "사용자 중지 요청"
                                     check_schedule_trigger()
+                                    maybe_poll_updates()
                                     continue
                                 for future in done:
                                     group = inflight.pop(future)
@@ -1950,8 +2059,10 @@ class MailClient:
                                 if fatal_error and not inflight:
                                     break
                                 check_schedule_trigger()
+                                maybe_poll_updates()
                                 continue
                             check_schedule_trigger()
+                            maybe_poll_updates()
                             if stop_requested:
                                 break
                             group = next_group()
@@ -1966,6 +2077,7 @@ class MailClient:
                                 group = inflight.pop(future)
                                 process_future(future, group)
                             check_schedule_trigger()
+                            maybe_poll_updates()
                 finally:
                     if pending_queue:
                         release_reserved_rows(list(pending_queue))
@@ -2344,8 +2456,9 @@ class MailClient:
                     response_jobs = response.get("jobs")
                     if isinstance(response_jobs, list):
                         jobs.extend(job for job in response_jobs if isinstance(job, dict))
+                    jobs.sort(key=lambda job: 0 if str(job.get("job_type") or "") == "single_send" else 1)
                     for job in jobs:
-                        job_id = str(job.get("job_id"))
+                        job_id = str(job.get("job_id") or "").strip()
                         if job_id:
                             self._pending_job_ids.discard(job_id)
                         job_type = str(job.get("job_type") or "")
@@ -2360,7 +2473,8 @@ class MailClient:
                                 self._cancel_ack_sent.discard(job_id)
                             continue
                         if job_id:
-                            self._current_job_id = job_id
+                            self._active_job_ids.add(job_id)
+                            self._active_jobs[job_id] = job_type
                             self._cancel_ack_sent.discard(job_id)
                         self.send_job_report(
                             JobResult(job_id=job_id, status="running", message="작업 시작")
@@ -2369,7 +2483,8 @@ class MailClient:
                             result = self.process_job(job)
                         finally:
                             if job_id:
-                                self._current_job_id = None
+                                self._active_job_ids.discard(job_id)
+                                self._active_jobs.pop(job_id, None)
                         domain_states = self.collect_domain_states()
                         self.send_job_report(result, domain_states)
                         if job_id:

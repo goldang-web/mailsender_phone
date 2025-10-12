@@ -8,5 +8,35 @@
   "local_versions": {
     "naver": 1,
     "daum": null
+  },
+  "domain_cycles": {
+    "naver": {
+      "cycles": 0,
+      "last_completed_at": null,
+      "last_processed": null
+    },
+    "daum": {
+      "cycles": 0,
+      "last_completed_at": null,
+      "last_processed": null
+    }
+  },
+  "stop_schedule": {
+    "naver": {
+      "enabled": false,
+      "time": "",
+      "last_run": null,
+      "server_last_run": null
+    },
+    "daum": {
+      "enabled": false,
+      "time": "",
+      "last_run": null,
+      "server_last_run": null
+    }
+  },
+  "sent_sequences": {
+    "naver": 0,
+    "daum": 0
   }
 }
