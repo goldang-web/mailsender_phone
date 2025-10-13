@@ -1054,6 +1054,7 @@ def load_device_summary() -> Dict[str, Any]:
             result_payload = json.loads(row["result"]) if row["result"] else None
         except json.JSONDecodeError:
             result_payload = None
+        payload_public = sanitize_job_payload_for_output(row["job_type"], payload)
         row_keys = row.keys()
         cancel_requested_flag = bool(row["cancel_requested"]) if "cancel_requested" in row_keys else False
         job_map.setdefault(row["device_id"], []).append(
@@ -1062,7 +1063,7 @@ def load_device_summary() -> Dict[str, Any]:
                 "job_type": row["job_type"],
                 "domain": row["domain"],
                 "status": row["status"],
-                "payload": payload,
+                 "payload": payload_public,
                 "result": result_payload,
                 "created_at": row["created_at"],
                 "queued_at": row["queued_at"],
@@ -1211,6 +1212,17 @@ def serialize_job_dispatch(row: sqlite3.Row) -> Dict[str, Any]:
         "payload": load_job_payload(row),
         "created_at": row["created_at"],
     }
+
+
+def sanitize_job_payload_for_output(job_type: str, payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return None
+    sanitized = dict(payload)
+    if job_type == "imap_test":
+        sanitized.pop("password", None)
+        if not sanitized.get("use_saved_password"):
+            sanitized.pop("use_saved_password", None)
+    return sanitized
 
 
 def update_job_status(
@@ -1371,6 +1383,15 @@ def handle_job_completion(
                 ),
             )
             prune_device_logs(conn, job_row["device_id"])
+    elif job_row["job_type"] == "imap_test":
+        sanitized_payload = sanitize_job_payload_for_output(job_row["job_type"], payload)
+        conn.execute(
+            "UPDATE jobs SET payload=? WHERE id=?",
+            (
+                json.dumps(sanitized_payload, ensure_ascii=False) if sanitized_payload else None,
+                job_row["id"],
+            ),
+        )
 
 
 def cancel_active_sends(
@@ -1496,6 +1517,16 @@ class ImapSettingsPayload(BaseModel):
     username: Optional[str] = None
     password: Optional[str] = None
     delay_seconds: Optional[int] = None
+
+
+class ImapTestRequest(BaseModel):
+    username: Optional[str] = None
+    password: Optional[str] = None
+    use_saved_password: Optional[bool] = False
+    folder: Optional[str] = Field(
+        default="Junk",
+        description="연결 테스트 시 선택할 메일함 (기본값 Junk)",
+    )
 
 
 class ActiveDomainRequest(BaseModel):
@@ -1960,6 +1991,51 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
     return {"config": serialize_config(to_dict(refreshed), include_secret=False)}
 
 
+@app.post("/api/devices/{device_id}/domains/{domain}/imap/test")
+def enqueue_imap_test(device_id: str, domain: str, payload: ImapTestRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="네이버 도메인에서만 IMAP 확인을 지원합니다.")
+    username = normalize_imap_username(payload.username)
+    if not username:
+        raise HTTPException(status_code=400, detail="IMAP 계정 ID를 입력하세요.")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        config_data = to_dict(config_row)
+        saved_password = config_data.get("imap_password") or ""
+        use_saved = bool(payload.use_saved_password)
+        password_value = (
+            normalize_imap_password(payload.password)
+            if payload.password is not None
+            else ""
+        )
+        if not password_value and not use_saved:
+            raise HTTPException(status_code=400, detail="비밀번호를 입력하거나 저장된 비밀번호 사용을 선택하세요.")
+        if use_saved and not saved_password and not password_value:
+            raise HTTPException(status_code=400, detail="저장된 비밀번호가 없어 사용할 수 없습니다.")
+        job_payload: Dict[str, Any] = {
+            "username": username,
+            "folder": (payload.folder or "Junk").strip() or "Junk",
+        }
+        if password_value:
+            job_payload["password"] = password_value
+        else:
+            job_payload["use_saved_password"] = True
+        job = create_job(conn, device_id, normalized, "imap_test", job_payload)
+        conn.commit()
+    public_job = dict(job)
+    public_job["payload"] = sanitize_job_payload_for_output(job["job_type"], job.get("payload"))
+    return {"job": public_job}
+
+
 @app.post("/api/devices/{device_id}/domains/{domain}/schedule")
 def update_device_schedule(device_id: str, domain: str, payload: DeviceScheduleUpdateRequest) -> Dict[str, Any]:
     normalized = normalize_domain(domain)
@@ -2244,6 +2320,65 @@ def cancel_job(job_id: str, payload: JobCancelRequest) -> Dict[str, Any]:
         "job_id": job_id,
         "status": status,
         "cancel_requested": True,
+    }
+
+
+@app.get("/api/jobs/{job_id}")
+def get_job_detail(job_id: str) -> Dict[str, Any]:
+    with db_lock, get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="작업을 찾을 수 없습니다.")
+        payload = sanitize_job_payload_for_output(row["job_type"], load_job_payload(row))
+        result_payload: Optional[Dict[str, Any]] = None
+        if row["result"]:
+            try:
+                result_payload = json.loads(row["result"])
+            except json.JSONDecodeError:
+                result_payload = None
+        progress_rows = conn.execute(
+            """
+            SELECT status, message, data, created_at
+            FROM job_progress_logs
+            WHERE job_id=?
+            ORDER BY created_at ASC
+            """,
+            (job_id,),
+        ).fetchall()
+        progress: List[Dict[str, Any]] = []
+        for progress_row in progress_rows:
+            data_payload: Optional[Dict[str, Any]] = None
+            if progress_row["data"]:
+                try:
+                    data_payload = json.loads(progress_row["data"])
+                except json.JSONDecodeError:
+                    data_payload = None
+            progress.append(
+                {
+                    "status": progress_row["status"],
+                    "message": progress_row["message"],
+                    "data": data_payload,
+                    "created_at": progress_row["created_at"],
+                }
+            )
+    return {
+        "id": row["id"],
+        "device_id": row["device_id"],
+        "domain": row["domain"],
+        "job_type": row["job_type"],
+        "status": row["status"],
+        "payload": payload,
+        "result": result_payload,
+        "created_at": row["created_at"],
+        "queued_at": row["queued_at"],
+        "started_at": row["started_at"],
+        "finished_at": row["finished_at"],
+        "cancel_requested": bool(row["cancel_requested"]),
+        "error": row["error"],
+        "progress": progress,
     }
 
 

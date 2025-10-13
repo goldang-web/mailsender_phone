@@ -1443,6 +1443,7 @@ button:not(:disabled):hover {
     </div>
     <div class="modal-footer">
       <button type="button" class="ghost" data-action="imap-cancel">취소</button>
+      <button type="button" class="secondary" id="imapTestBtn" data-action="imap-test">연결 테스트</button>
       <button type="button" id="imapSaveBtn" data-action="imap-save">저장</button>
     </div>
   </div>
@@ -1501,6 +1502,7 @@ const state = {
     passwordSaved: false,
     forceEnable: false,
     card: null,
+    testJobId: null,
   },
   pollingHandle: null,
   successCounters: {},
@@ -2659,6 +2661,10 @@ function renderDomainSummary(card, device, domain) {
   });
 }
 
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function fetchJSON(url, options = {}) {
   const response = await fetch(url, {
     headers: { "Content-Type": "application/json" },
@@ -2673,6 +2679,27 @@ async function fetchJSON(url, options = {}) {
     throw new Error(detail || "요청에 실패했습니다.");
   }
   return isJSON ? response.json() : response.text();
+}
+
+async function pollJobUntilDone(jobId, options = {}) {
+  const { timeout = 30000, interval = 1500 } = options;
+  if (!jobId) return null;
+  const started = Date.now();
+  while (Date.now() - started < timeout) {
+    if (!state.imapModal.open || state.imapModal.testJobId !== jobId) {
+      return null;
+    }
+    try {
+      const job = await fetchJSON(`/api/jobs/${jobId}`);
+      if (job && job.status && !ACTIVE_JOB_STATES.has(job.status)) {
+        return job;
+      }
+    } catch (err) {
+      console.warn("작업 상태 조회 실패:", err);
+    }
+    await delay(interval);
+  }
+  return null;
 }
 
 function statusClass(status) {
@@ -4022,6 +4049,7 @@ function openImapModal(card, device, domain, options = {}) {
   state.imapModal.passwordSaved = Boolean(config.imap_password_saved);
   state.imapModal.forceEnable = Boolean(options?.forceEnable);
   state.imapModal.card = card || null;
+  state.imapModal.testJobId = null;
 
   document.getElementById("imapModalTitle").textContent = `${device.name} · 네이버 IMAP 설정`;
   document.getElementById("imapModalSubtitle").textContent = `ID: ${device.id}`;
@@ -4042,6 +4070,11 @@ function openImapModal(card, device, domain, options = {}) {
   const saveBtn = document.getElementById("imapSaveBtn");
   saveBtn.disabled = false;
   saveBtn.textContent = "저장";
+  const testBtn = document.getElementById("imapTestBtn");
+  if (testBtn) {
+    testBtn.disabled = false;
+    testBtn.textContent = "연결 테스트";
+  }
 }
 
 function closeImapModal() {
@@ -4053,6 +4086,7 @@ function closeImapModal() {
   state.imapModal.passwordSaved = false;
   state.imapModal.forceEnable = false;
   state.imapModal.card = null;
+  state.imapModal.testJobId = null;
   setImapModalMessage("");
 }
 
@@ -4105,6 +4139,80 @@ async function submitImapModal() {
     saveBtn.disabled = false;
     saveBtn.textContent = "저장";
     setImapModalMessage(err.message || "IMAP 설정 저장에 실패했습니다.");
+  }
+}
+
+async function submitImapTest() {
+  const { deviceId, domain, passwordSaved } = state.imapModal;
+  if (!deviceId || !domain) return;
+  const username = document.getElementById("imapUsername").value.trim();
+  const passwordInput = document.getElementById("imapPassword");
+  const rawPassword = passwordInput.value;
+  if (!username) {
+    setImapModalMessage("네이버 계정 ID를 입력하세요.");
+    return;
+  }
+  const useSavedPassword = !rawPassword && passwordSaved;
+  if (!rawPassword && !useSavedPassword) {
+    setImapModalMessage("비밀번호를 입력하거나 기존 비밀번호를 먼저 저장하세요.");
+    return;
+  }
+  const payload = { username };
+  if (rawPassword) {
+    payload.password = rawPassword;
+  } else if (useSavedPassword) {
+    payload.use_saved_password = true;
+  }
+  const testBtn = document.getElementById("imapTestBtn");
+  if (testBtn) {
+    testBtn.disabled = true;
+    testBtn.textContent = "테스트 중...";
+  }
+  state.imapModal.testJobId = null;
+  try {
+    const response = await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/imap/test`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const jobId = response?.job?.id;
+    if (!jobId) {
+      throw new Error("테스트 작업 ID를 받지 못했습니다.");
+    }
+    state.imapModal.testJobId = jobId;
+    const job = await pollJobUntilDone(jobId, { timeout: 45000, interval: 1500 });
+    if (!job) {
+      setImapModalMessage("테스트 결과를 아직 받지 못했습니다. 잠시 후 다시 확인하세요.");
+      return;
+    }
+    const status = (job.status || "").toLowerCase();
+    const result = job.result || {};
+    const reason = result.reason;
+    const latency = typeof result.latency === "number" ? result.latency : null;
+    const usedSaved = Boolean(result.used_saved_password);
+    const folder = result.folder;
+    const parts = [];
+    if (folder) parts.push(`${folder} 폴더`);
+    if (latency !== null) parts.push(`지연 ${latency.toFixed(1)}초`);
+    if (usedSaved) parts.push("저장된 비밀번호 사용");
+    let message = job.message || (status === "success" ? "IMAP 연결 성공" : "IMAP 연결 실패");
+    if (status === "success" && parts.length) {
+      message = `${message} (${parts.join(" · ")})`;
+    } else if (status !== "success" && reason) {
+      message = `${message} · ${reason}`;
+    }
+    setImapModalMessage(message, status === "success" ? "success" : "error");
+    if (state.imapModal.card) {
+      setNotice(state.imapModal.card, message, status === "success" ? "success" : "error");
+    }
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setImapModalMessage(err.message || "IMAP 연결 테스트 요청에 실패했습니다.");
+  } finally {
+    state.imapModal.testJobId = null;
+    if (testBtn) {
+      testBtn.disabled = false;
+      testBtn.textContent = "연결 테스트";
+    }
   }
 }
 
@@ -4433,6 +4541,7 @@ document.getElementById("fileModal").addEventListener("click", (event) => {
 });
 
 document.querySelector('[data-action="imap-save"]').addEventListener("click", submitImapModal);
+document.querySelector('[data-action="imap-test"]').addEventListener("click", submitImapTest);
 document.querySelector('[data-action="imap-cancel"]').addEventListener("click", () => {
   closeImapModal();
 });

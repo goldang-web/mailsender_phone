@@ -1,39 +1,56 @@
-import imaplib
 import email
-from email.header import decode_header
-from datetime import datetime, timezone
+import imaplib
 import time
-from email.utils import parsedate_to_datetime, parseaddr
+from datetime import datetime, timezone
+from email.header import decode_header
+from email.utils import parseaddr, parsedate_to_datetime
+
+
+def probe_imap_connection(email_id: str, password: str, *, folder: str = "Junk", timeout: int = 30) -> dict:
+    """네이버 IMAP 서버 연결 및 폴더 선택을 검사합니다."""
+    if not email_id or not password:
+        return {"success": False, "reason": "IMAP 계정 정보가 필요합니다."}
+    mail = None
+    started = time.monotonic()
+    try:
+        mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=timeout)
+        mail.login(email_id, password)
+        status, _ = mail.select(folder, readonly=True)
+        if status != "OK":
+            return {"success": False, "reason": f"{folder} 메일함을 열 수 없습니다."}
+        latency = time.monotonic() - started
+        return {
+            "success": True,
+            "latency": latency,
+            "checked_at": datetime.utcnow().isoformat() + "Z",
+        }
+    except imaplib.IMAP4.error as exc:
+        return {"success": False, "reason": f"IMAP 인증 실패: {exc}"}
+    except Exception as exc:  # pylint: disable=broad-except
+        return {"success": False, "reason": f"IMAP 연결 오류: {exc}"}
+    finally:
+        if mail is not None:
+            try:
+                mail.logout()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
 
 def test_imap_connection(email_id, password):
     """
     IMAP 서버 연결을 테스트하는 함수
-    
+
     Args:
         email_id (str): 이메일 주소
         password (str): 이메일 비밀번호
-        
+
     Returns:
         bool: 연결 성공 여부
     """
-    try:
-        # IMAP 서버 설정
-        IMAP_SERVER = 'imap.naver.com'
-        IMAP_PORT = 993
-        
-        # IMAP 접속
-        mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
-        mail.login(email_id, password)
-        
-        # 스팸메일함 (Junk) 선택
-        mail.select("Junk", readonly=True)
-        
-        # 연결 종료
-        mail.logout()
-        return True
-    except Exception as e:
-        print(f"IMAP 연결 테스트 실패: {e}")
-        return False
+    result = probe_imap_connection(email_id, password)
+    if not result.get("success"):
+        print(f"IMAP 연결 테스트 실패: {result.get('reason')}")
+    return bool(result.get("success"))
 
 def check_latest_emails(email_id, password, check_time, num_emails=5, sender_name=None, from_email=None):
     """
