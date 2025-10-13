@@ -423,6 +423,15 @@ def verify_delivery(
     mail = None
     observed_senders = []
     try:
+        print(
+            "[IMAP 도착확인][디버그] 비교 시작 · "
+            f"계정 {email_id} · "
+            f"MAIL FROM {normalized_from} · "
+            f"허용 {allowed}s · "
+            f"검색 {search_limit}건 · "
+            f"대기 {delay_before_check:.1f}s",
+            flush=True,
+        )
         mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=30)
         mail.login(email_id, password)
         mail.select("Junk", readonly=True)
@@ -465,6 +474,12 @@ def verify_delivery(
                     header_addresses.setdefault(candidate, header_name)
                     if len(observed_senders) < 10:
                         observed_senders.append(candidate)
+            print(
+                "[IMAP 도착확인][디버그] 헤더 후보 · "
+                f"SEQ {num.decode() if isinstance(num, bytes) else num} · "
+                f"{', '.join(f'{addr}({hdr})' for addr, hdr in header_addresses.items()) or '없음'}",
+                flush=True,
+            )
             if normalized_from not in header_addresses:
                 continue
             date_header = msg.get("Date")
@@ -483,6 +498,11 @@ def verify_delivery(
                 if abs(latency_seconds) <= 300:
                     latency_seconds = 0.0
                 else:
+                    print(
+                        "[IMAP 도착확인][디버그] 수신 시각이 발송 이전 · 5분 초과 무시 · "
+                        f"SEQ {num}",
+                        flush=True,
+                    )
                     continue
             latency = max(0.0, latency_seconds)
             matched_header = header_addresses.get(normalized_from)
@@ -497,16 +517,31 @@ def verify_delivery(
                 "delay_before_check": delay_before_check,
             }
             if latency <= allowed:
+                print(
+                    "[IMAP 도착확인][디버그] 성공 판정 · "
+                    f"SEQ {num} · 지연 {latency:.1f}s · 허용 {allowed}s",
+                    flush=True,
+                )
                 return {
                     "status": "success",
                     "reason": None,
                     **payload_common,
                 }
+            print(
+                "[IMAP 도착확인][디버그] 허용 초과 · "
+                f"SEQ {num} · 지연 {latency:.1f}s · 허용 {allowed}s",
+                flush=True,
+            )
             return {
                 "status": "failure",
                 "reason": f"허용 지연 {allowed}s 초과",
                 **payload_common,
             }
+        print(
+            "[IMAP 도착확인][디버그] 대상 MAIL FROM 미발견 · "
+            f"확인 후보 {len(observed_senders)}개",
+            flush=True,
+        )
         return {
             "status": "failure",
             "latency": None,

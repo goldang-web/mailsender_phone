@@ -785,6 +785,15 @@ class MailClient:
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
 
         def task() -> None:
+            self._log_imap_console(
+                "자동 확인 시작 · "
+                f"도메인 {normalized} · "
+                f"메일 FROM {mail_from} · "
+                f"발송시각 {sent_at_value.isoformat()} · "
+                f"대기 {delay_seconds:.1f}s · "
+                f"허용지연 {allowed_delay_value}s · "
+                f"종류 {send_type}"
+            )
             if delay_seconds > 0:
                 time.sleep(delay_seconds)
             checked_at_iso = utc_now_iso()
@@ -2623,6 +2632,24 @@ class MailClient:
         success = bool(summary.get("success"))
         mail_info = summary.get("mail") or {}
         reason = summary.get("reason")
+        total = summary.get("total")
+        used_saved = summary.get("used_saved_password") or False
+        self._log_imap_console(
+            "최신 메일 확인 결과 · "
+            f"성공 {success} · "
+            f"총 {total}건 · "
+            f"ID {mail_info.get('sequence','-')} · "
+            f"저장비번 {used_saved}"
+        )
+        if mail_info:
+            self._log_imap_console(
+                "  ↳ 헤더 비교 · "
+                f"From {mail_info.get('from') or mail_info.get('from_address') or '-'} · "
+                f"Subject {mail_info.get('subject') or '-'} · "
+                f"수신 {mail_info.get('received_at_iso') or mail_info.get('date_header') or '-'}"
+            )
+        if reason:
+            self._log_imap_console(f"  ↳ 실패 사유: {reason}")
 
         def _shorten(value: Optional[str], *, length: int = 60) -> str:
             if not value:
