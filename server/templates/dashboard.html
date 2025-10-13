@@ -2601,6 +2601,20 @@ function updateSingleSendControls(card, device) {
     const imapBlock = card.querySelector('[data-role="imapBlock"]');
     const username = (imapBlock?.dataset?.imapUsername || "").trim();
     const isNaverDomain = activeDomain === "naver";
+    const holdStatus = imapBlock?.dataset?.imapHoldStatus || "";
+    const holdSetAt = Number(imapBlock?.dataset?.imapHoldSetAt || "0");
+    const holdCheckedAt = imapBlock?.dataset?.imapHoldCheckedAt || "";
+    const lastCheckedMarker = imapBlock?.dataset?.imapLastCheckedAt || "";
+    const holdExpired = holdSetAt > 0 && Date.now() - holdSetAt > IMAP_HOLD_EXPIRY_MS;
+    if (holdExpired && imapBlock) {
+      delete imapBlock.dataset.imapHoldStatus;
+      delete imapBlock.dataset.imapHoldCheckedAt;
+      delete imapBlock.dataset.imapHoldSetAt;
+      delete imapBlock.dataset.imapHoldCountdown;
+      delete imapBlock.dataset.imapHoldCountdownStart;
+      clearImapCountdown(card);
+    }
+    const holdActive = !holdExpired && holdStatus === "checking" && holdCheckedAt === lastCheckedMarker;
     if (isActive) {
       imapCheckBtn.disabled = true;
       imapCheckBtn.classList.add("is-running");
@@ -2608,7 +2622,13 @@ function updateSingleSendControls(card, device) {
       imapCheckBtn.title = "단일 발송 작업이 완료될 때까지 기다려주세요.";
     } else {
       imapCheckBtn.classList.remove("is-running");
-      if (!isNaverDomain) {
+      if (holdActive) {
+        imapCheckBtn.disabled = true;
+        imapCheckBtn.classList.add("is-running");
+        imapCheckBtn.textContent = "도착 확인 중...";
+        imapCheckBtn.title = "IMAP 도착 여부 확인 중입니다.";
+        startImapCountdown(card, imapBlock);
+      } else if (!isNaverDomain) {
         imapCheckBtn.disabled = true;
         imapCheckBtn.textContent = "네이버 전용";
         imapCheckBtn.title = "네이버 도메인을 선택하면 사용할 수 있습니다.";
@@ -2623,6 +2643,30 @@ function updateSingleSendControls(card, device) {
       }
     }
   }
+}
+
+function markImapStatusChecking(card, options = {}) {
+  const block = card.querySelector('[data-role="imapBlock"]');
+  if (!block) return false;
+  const statusEl = block.querySelector('[data-role="imapStatus"]');
+  if (!statusEl) return false;
+  block.dataset.imapHoldStatus = "checking";
+  block.dataset.imapHoldCheckedAt = block.dataset.imapLastCheckedAt || "";
+  block.dataset.imapHoldSetAt = String(Date.now());
+  const delayCandidate = typeof options.delaySeconds === "number" ? options.delaySeconds : Number(block.dataset.imapSingleDelay || "0");
+  const delaySeconds = Number.isFinite(delayCandidate) ? Math.max(0, Math.round(delayCandidate)) : 0;
+  if (delaySeconds > 0) {
+    block.dataset.imapHoldCountdown = String(delaySeconds);
+    delete block.dataset.imapHoldCountdownStart;
+  } else {
+    delete block.dataset.imapHoldCountdown;
+    delete block.dataset.imapHoldCountdownStart;
+  }
+  statusEl.textContent = "도착 확인 중";
+  statusEl.className = "imap-status warning";
+  updateImapCountdownMeta(card, block);
+  clearImapCountdown(card);
+  return true;
 }
 
 function updateBatchControls(card, device) {
@@ -3170,6 +3214,63 @@ function setNotice(card, message, type = "success") {
   }, 3500);
 }
 
+const IMAP_HOLD_EXPIRY_MS = 180000;
+
+function clearImapCountdown(card) {
+  if (card.__imapCountdownTimer) {
+    clearInterval(card.__imapCountdownTimer);
+    card.__imapCountdownTimer = null;
+  }
+}
+
+function computeImapHoldRemaining(block) {
+  if (!block) return 0;
+  const totalSeconds = Number(block.dataset.imapHoldCountdown || "0");
+  const startedAt = Number(block.dataset.imapHoldCountdownStart || "0");
+  if (!totalSeconds || !startedAt) {
+    return 0;
+  }
+  const elapsed = (Date.now() - startedAt) / 1000;
+  return Math.max(0, Math.ceil(totalSeconds - elapsed));
+}
+
+function updateImapCountdownMeta(card, block) {
+  if (!block) return;
+  const metaEl = block.querySelector('[data-role="imapMeta"]');
+  if (!metaEl) return;
+  const remaining = computeImapHoldRemaining(block);
+  if (remaining > 0) {
+    metaEl.textContent = `확인까지 ${remaining}초`;
+  } else {
+    metaEl.textContent = "IMAP 도착 여부를 확인 중입니다.";
+  }
+}
+
+function startImapCountdown(card, block) {
+  if (!block) return;
+  const totalSeconds = Number(block.dataset.imapHoldCountdown || "0");
+  if (!totalSeconds) {
+    updateImapCountdownMeta(card, block);
+    return;
+  }
+  if (!block.dataset.imapHoldCountdownStart || block.dataset.imapHoldCountdownStart === "0") {
+    block.dataset.imapHoldCountdownStart = String(Date.now());
+  }
+  updateImapCountdownMeta(card, block);
+  clearImapCountdown(card);
+  card.__imapCountdownTimer = window.setInterval(() => {
+    if (!block.isConnected) {
+      clearImapCountdown(card);
+      return;
+    }
+    if (block.dataset.imapHoldStatus !== "checking") {
+      clearImapCountdown(card);
+      return;
+    }
+    updateImapCountdownMeta(card, block);
+  }, 1000);
+}
+
 function renderImapSection(card, device, domain) {
   const block = card.querySelector('[data-role="imapBlock"]');
   if (!block) return;
@@ -3182,6 +3283,13 @@ function renderImapSection(card, device, domain) {
     block.dataset.imapBatchDelay = String(IMAP_DEFAULT_BATCH_DELAY);
     block.dataset.imapFailureAction = "none";
     block.dataset.imapPasswordSaved = "0";
+    delete block.dataset.imapHoldStatus;
+    delete block.dataset.imapHoldCheckedAt;
+    delete block.dataset.imapHoldSetAt;
+    delete block.dataset.imapHoldCountdown;
+    delete block.dataset.imapHoldCountdownStart;
+    block.dataset.imapLastCheckedAt = "";
+    block.dataset.imapLastStatus = "";
     const anchorMetaEl = block.querySelector('[data-role="imapAnchorMeta"]');
     if (anchorMetaEl) {
       anchorMetaEl.textContent = "알박기 확인: 사용 안 함";
@@ -3197,15 +3305,18 @@ function renderImapSection(card, device, domain) {
   const statusEl = block.querySelector('[data-role="imapStatus"]');
   const metaEl = block.querySelector('[data-role="imapMeta"]');
   const anchorMetaEl = block.querySelector('[data-role="imapAnchorMeta"]');
+  const holdStatus = block.dataset.imapHoldStatus || "";
+  const holdCheckedAt = block.dataset.imapHoldCheckedAt || "";
+  const holdSetAt = Number(block.dataset.imapHoldSetAt || "0");
+  const lastStatus = config.imap_last_status || "";
+  const checkedAt = config.imap_last_checked_at;
+  const receivedAt = config.imap_last_received_at || checkedAt;
+  const latencyValue = Number(config.imap_last_latency);
+  const reasonText = config.imap_last_error || "";
   let statusClass = "off";
   let statusText = "IMAP 확인 비활성";
   let metaText = "네이버 도메인에서 계정을 설정하면 도착 여부를 자동으로 확인합니다.";
   if (config.imap_enabled) {
-    const lastStatus = config.imap_last_status || "";
-    const checkedAt = config.imap_last_checked_at;
-    const receivedAt = config.imap_last_received_at || checkedAt;
-    const latencyValue = Number(config.imap_last_latency);
-    const reasonText = config.imap_last_error || "";
     statusClass = "warning";
     statusText = "IMAP 확인 대기 중";
     if (lastStatus === "success") {
@@ -3226,6 +3337,21 @@ function renderImapSection(card, device, domain) {
     } else {
       metaText = "발송 후 자동으로 도착 여부를 확인합니다.";
     }
+  }
+  const currentCheckedMarker = checkedAt || "";
+  const holdExpired = holdSetAt > 0 && Date.now() - holdSetAt > IMAP_HOLD_EXPIRY_MS;
+  if (holdStatus === "checking" && !holdExpired && holdCheckedAt === currentCheckedMarker) {
+    statusClass = "warning";
+    statusText = "도착 확인 중";
+    const remaining = computeImapHoldRemaining(block);
+    metaText = remaining > 0 ? `확인까지 ${remaining}초` : "IMAP 도착 여부를 확인 중입니다.";
+  } else if (holdStatus) {
+    delete block.dataset.imapHoldStatus;
+    delete block.dataset.imapHoldCheckedAt;
+    delete block.dataset.imapHoldSetAt;
+    delete block.dataset.imapHoldCountdown;
+    delete block.dataset.imapHoldCountdownStart;
+    clearImapCountdown(card);
   }
   statusEl.textContent = statusText;
   statusEl.className = `imap-status ${statusClass}`;
@@ -3265,6 +3391,11 @@ function renderImapSection(card, device, domain) {
   block.dataset.imapBatchDelay = String(imapBatchDelayValue);
   block.dataset.imapFailureAction = failureActionValue;
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
+  block.dataset.imapLastCheckedAt = currentCheckedMarker;
+  block.dataset.imapLastStatus = lastStatus || "";
+  if (!(holdStatus === "checking" && !holdExpired && holdCheckedAt === currentCheckedMarker)) {
+    clearImapCountdown(card);
+  }
 }
 
 function populateConfigForm(card, device, domain) {
@@ -3687,6 +3818,8 @@ function attachCardEvents(card) {
       }
 
       const rcptTo = rawUsername.includes("@") ? rawUsername : `${rawUsername}@naver.com`;
+      const singleDelaySeconds = Number(imapBlock?.dataset?.imapSingleDelay || "0");
+      markImapStatusChecking(card, { delaySeconds: singleDelaySeconds });
       let jobScheduled = false;
 
       const resetImapButton = () => {
