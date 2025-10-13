@@ -417,6 +417,7 @@ class MailClient:
             domain: DATA_DIR / domain / f"{domain}.db" for domain in DOMAINS
         }
         self.connected = False
+        self._disconnect_logged = False
         self.job_controls: Dict[str, Dict[str, object]] = {}
         self._state_errors: Dict[str, str] = {}
         self._recovery_failures: Dict[str, str] = {}
@@ -3014,6 +3015,7 @@ class MailClient:
                     response = self.heartbeat(domain_states, [])
                     if not self.connected:
                         print("[연결] 서버와 동기화되었습니다.")
+                        self._disconnect_logged = False
                     self.connected = True
                     configs = response.get("configs") or {}
                     self.apply_configs(configs)
@@ -3067,15 +3069,11 @@ class MailClient:
                             self.job_controls.pop(job_id, None)
                             self._cancel_ack_sent.discard(job_id)
                     time.sleep(self.interval)
-                except requests.RequestException as exc:
-                    if self.connected:
-                        print(f"[네트워크 오류] {exc}. {self.interval}초 후 재시도합니다.")
-                    try:
-                        self.session.close()
-                    except Exception:
-                        pass
-                    self.session = requests.Session()
-                    self._configure_session()
+                except requests.RequestException:
+                    if not self._disconnect_logged:
+                        print("[연결 끊김] 대시보드 서버가 닫혀 있습니다. 백그라운드 발송은 계속하고 재연결을 시도합니다.")
+                        self._disconnect_logged = True
+                    self._reset_session()
                     self.connected = False
                     time.sleep(self.interval)
                 except KeyboardInterrupt:
