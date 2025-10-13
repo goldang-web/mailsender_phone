@@ -394,7 +394,8 @@ header {
   min-height: 220px;
 }
 .substitution-modal-card {
-  width: min(640px, 95vw);
+  width: min(1240px, 96vw);
+  max-width: 1240px;
 }
 .substitution-modal-body {
   display: flex;
@@ -418,19 +419,33 @@ header {
   color: var(--color-muted);
   margin: 0;
 }
+.substitution-toolbar-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .substitution-toolbar button {
   flex: 0 0 auto;
 }
 .substitution-table {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
 }
 .substitution-row {
   display: grid;
-  grid-template-columns: auto minmax(120px, 1fr) minmax(120px, 1fr) auto;
-  gap: 8px;
-  align-items: stretch;
+  grid-template-columns:
+    auto
+    minmax(132px, 0.9fr)
+    minmax(200px, 1.1fr)
+    minmax(170px, 0.85fr)
+    auto
+    minmax(220px, 1.25fr)
+    auto;
+  grid-template-areas: "handle key original encoding refresh value delete";
+  gap: 12px;
+  align-items: start;
+  --substitution-field-offset: 24px;
 }
 .substitution-row.dragging {
   opacity: 0.65;
@@ -460,20 +475,28 @@ header {
   position: relative;
 }
 .substitution-handle {
+  grid-area: handle;
+  width: 34px;
+  height: 34px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 32px;
   padding: 0;
   border: 1px solid var(--color-border);
-  background: var(--color-surface);
+  background: var(--color-surface-subtle);
   color: var(--color-muted-strong);
   border-radius: 6px;
   cursor: grab;
-  font-size: 16px;
-  line-height: 1;
+  font-size: 0;
   touch-action: none;
   user-select: none;
+  margin-top: var(--substitution-field-offset);
+  align-self: start;
+}
+.substitution-handle svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
 }
 .substitution-handle:focus-visible {
   outline: 2px solid var(--color-primary);
@@ -485,18 +508,75 @@ header {
 .substitution-row.dragging .substitution-handle {
   cursor: grabbing;
 }
+.substitution-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.substitution-cell.no-label {
+  gap: 0;
+  padding-top: var(--substitution-field-offset);
+}
+.key-cell {
+  grid-area: key;
+}
+.source-cell {
+  grid-area: original;
+}
+.encoding-cell {
+  grid-area: encoding;
+}
+.substitution-refresh-cell,
+.refresh-cell {
+  grid-area: refresh;
+  align-items: flex-start;
+}
+.value-cell {
+  grid-area: value;
+}
 .substitution-row .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   margin: 0;
 }
 .substitution-row .field span {
   font-size: 12px;
+  color: var(--color-muted);
 }
 .substitution-row .field input {
-  min-height: 34px;
+  min-height: 36px;
   font-size: 13px;
   padding: 6px 10px;
+  border-radius: 8px;
+}
+.substitution-row .field select {
+  min-height: 36px;
+  font-size: 13px;
+  padding: 6px 28px 6px 10px;
+  appearance: none;
+  background-color: var(--color-surface);
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+}
+.substitution-row .field input[readonly] {
+  background: var(--color-surface-subtle);
+  color: var(--color-muted-strong);
+}
+.substitution-row .field input[readonly]:focus {
+  border-color: var(--color-border-strong);
+  box-shadow: none;
+}
+.substitution-row .field select:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+  outline: none;
 }
 .substitution-row.invalid .field input {
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-bg);
+}
+.substitution-row.invalid .field select {
   border-color: var(--color-danger-border);
   background: var(--color-danger-bg);
 }
@@ -504,16 +584,33 @@ header {
   border-color: var(--color-danger);
   box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.2);
 }
+.substitution-refresh-btn {
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+}
+.substitution-row[data-refreshing="true"] .substitution-refresh-btn {
+  opacity: 0.65;
+  pointer-events: none;
+}
 .substitution-row button.substitution-delete {
+  grid-area: delete;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 36px;
-  padding: 0 16px;
-  border-radius: 10px;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
   justify-self: end;
-  align-self: end;
+  align-self: start;
+  margin-top: var(--substitution-field-offset);
   transition: background-color 0.24s ease, color 0.24s ease, box-shadow 0.24s ease, transform 0.18s ease;
+}
+.substitution-row button.substitution-delete svg {
+  width: 17px;
+  height: 17px;
+  fill: currentColor;
 }
 .substitution-row button.substitution-delete:focus-visible {
   outline: 2px solid var(--color-danger);
@@ -537,6 +634,49 @@ header {
 }
 .substitution-feedback.success {
   color: var(--color-success);
+}
+@media (max-width: 1080px) {
+  .substitution-modal-card {
+    width: min(95vw, 960px);
+  }
+}
+@media (max-width: 960px) {
+  .substitution-row {
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas:
+      "handle key"
+      "handle original"
+      "handle encoding"
+      "handle refresh"
+      "handle value"
+      "handle delete";
+    align-items: start;
+    --substitution-field-offset: 12px;
+  }
+  .substitution-row button.substitution-delete {
+    justify-self: start;
+  }
+  .substitution-cell {
+    gap: 4px;
+  }
+  .substitution-cell.no-label {
+    padding-top: var(--substitution-field-offset);
+  }
+}
+@media (max-width: 640px) {
+  button.icon-button {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+  }
+  .substitution-handle {
+    width: 32px;
+    height: 32px;
+  }
+  .substitution-handle svg {
+    width: 14px;
+    height: 14px;
+  }
 }
 .domain-radio-group {
   display: inline-flex;
@@ -1267,6 +1407,29 @@ button.small {
   padding: 6px 12px;
   font-size: 12px;
 }
+button.icon-button {
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
+}
+button.icon-button.small {
+  width: 32px;
+  height: 32px;
+}
+button.icon-button svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+  transition: transform 0.24s ease;
+}
+button.icon-button[data-state="loading"] svg {
+  animation: substitution-spin 0.9s linear infinite;
+}
 button.secondary {
   background: var(--color-border);
   color: var(--color-muted-strong);
@@ -1295,6 +1458,14 @@ button:disabled {
 button:not(:disabled):hover {
   transform: translateY(-1px);
   box-shadow: 0 10px 18px var(--shadow-hover);
+}
+@keyframes substitution-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 .log-box {
   border: 1px solid var(--color-border);
@@ -1737,7 +1908,10 @@ button:not(:disabled):hover {
       <div class="modal-message" id="substitutionModalMessage"></div>
       <div class="substitution-toolbar">
         <p class="substitution-hint">변수명은 공백 없이 작성하고, 동일한 이름을 중복 등록할 수 없습니다.</p>
-        <button type="button" class="secondary" id="substitutionAddRowBtn">행 추가</button>
+        <div class="substitution-toolbar-actions">
+          <button type="button" class="ghost" id="substitutionRefreshAllBtn">전체 새로고침</button>
+          <button type="button" class="secondary" id="substitutionAddRowBtn">행 추가</button>
+        </div>
       </div>
       <div class="substitution-table" id="substitutionTable"></div>
       <div class="substitution-feedback" id="substitutionFeedback"></div>
@@ -1900,6 +2074,12 @@ const state = {
   substitutionDraft: [],
   substitutionDirty: false,
   substitutionInvalidRows: new Set(),
+  substitutionPreview: {
+    timers: new Map(),
+    tokens: new Map(),
+    pending: new Set(),
+    globalPending: false,
+  },
   substitutionFeedbackTimer: null,
   substitutionModal: {
     open: false,
@@ -1943,6 +2123,81 @@ const JOB_STATUS_LABELS = {
   cancelled: "중지됨",
 };
 const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
+
+const SUBSTITUTION_ENCODING_OPTIONS = [
+  { value: "none", label: "없음" },
+  { value: "html_hex_min", label: "HTML 엔티티 (&#xNN;)" },
+  { value: "html_dec", label: "HTML 엔티티 (&#DD;)" },
+  { value: "html_hex_fixed", label: "HTML 엔티티 (&#xNNNN;)" },
+  { value: "html_random", label: "HTML 엔티티 (랜덤)" },
+  { value: "quoted_printable_utf8", label: "Quoted-Printable (=XX, UTF-8)" },
+  { value: "quoted_printable_euckr", label: "Quoted-Printable (=XX, EUC-KR)" },
+  { value: "mime_b64_utf8", label: "MIME Encoded-Word (=?UTF-8?B?...?=)" },
+];
+
+const SUBSTITUTION_ENCODING_ALIAS = {
+  "": "none",
+  none: "none",
+  plain: "none",
+  raw: "none",
+  html_hex_min: "html_hex_min",
+  "html-hex-min": "html_hex_min",
+  html_dec: "html_dec",
+  "html-dec": "html_dec",
+  html_hex_fixed: "html_hex_fixed",
+  "html-hex-fixed": "html_hex_fixed",
+  html_random: "html_random",
+  "html-random": "html_random",
+  random: "html_random",
+  quoted_printable_utf8: "quoted_printable_utf8",
+  "quoted-printable-utf8": "quoted_printable_utf8",
+  qp_utf8: "quoted_printable_utf8",
+  qp: "quoted_printable_utf8",
+  quoted_printable_euckr: "quoted_printable_euckr",
+  quoted_printable_euc_kr: "quoted_printable_euckr",
+  "quoted_printable_euc-kr": "quoted_printable_euckr",
+  "quoted-printable-euckr": "quoted_printable_euckr",
+  "quoted-printable-euc-kr": "quoted_printable_euckr",
+  qp_euckr: "quoted_printable_euckr",
+  "qp_euc-kr": "quoted_printable_euckr",
+  mime_b64_utf8: "mime_b64_utf8",
+  mime_utf8: "mime_b64_utf8",
+  mime: "mime_b64_utf8",
+};
+
+const SUBSTITUTION_RECOMPUTE_DELAY = 260;
+const SUBSTITUTION_ICON_MARKUP = {
+  drag: `
+    <svg viewBox="0 0 20 20" aria-hidden="true" focusable="false">
+      <path d="M7 4a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0Zm9 0a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0ZM7 10a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0Zm9 0a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0ZM7 16a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0Zm9 0a1.5 1.5 0 11-3 0 1.5 1.5 0 013 0Z" fill="currentColor"/>
+    </svg>
+  `,
+  refresh: `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M21 12a9 9 0 11-2.64-6.36" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M21 5v4.5h-4.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `,
+  spinner: `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 3a9 9 0 018.485 5.515" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M12 21a9 9 0 110-18" opacity="0.15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `,
+  trash: `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M9.75 4.5h4.5m-7.5 3h10.5m-9 0v11.25a1.5 1.5 0 001.5 1.5h6a1.5 1.5 0 001.5-1.5V7.5m-6 4.5v6m3-6v6" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `,
+};
+
+function normalizeSubstitutionEncoding(value) {
+  if (value === null || value === undefined) {
+    return "none";
+  }
+  const key = String(value).trim().toLowerCase();
+  return SUBSTITUTION_ENCODING_ALIAS[key] || "none";
+}
 
 const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
@@ -2650,15 +2905,56 @@ function normalizeSubstitutionRules(rules) {
     return [];
   }
   return rules
-    .map((rule) => ({
-      key: typeof rule?.key === "string" ? rule.key.trim() : "",
-      value: typeof rule?.value === "string" ? rule.value.trim() : "",
-    }))
+    .map((rule) => {
+      const key = typeof rule?.key === "string" ? rule.key.trim() : "";
+      let source = typeof rule?.source === "string" ? rule.source : "";
+      const value = typeof rule?.value === "string" ? rule.value : "";
+      if (!source && value) {
+        source = value;
+      }
+      const encoding = normalizeSubstitutionEncoding(rule?.encoding);
+      return {
+        key,
+        source,
+        encoding,
+        value,
+      };
+    })
     .filter((rule) => rule.key);
 }
 
 function cloneSubstitutionRules(rules) {
-  return normalizeSubstitutionRules(rules).map((rule) => ({ key: rule.key, value: rule.value }));
+  return normalizeSubstitutionRules(rules).map((rule) => ({
+    key: rule.key,
+    source: typeof rule.source === "string" ? rule.source : "",
+    encoding: normalizeSubstitutionEncoding(rule.encoding),
+    value: typeof rule.value === "string" ? rule.value : "",
+  }));
+}
+
+function getSubstitutionPreviewState() {
+  if (!state.substitutionPreview) {
+    state.substitutionPreview = {
+      timers: new Map(),
+      tokens: new Map(),
+      pending: new Set(),
+      globalPending: false,
+    };
+  }
+  const preview = state.substitutionPreview;
+  if (!(preview.timers instanceof Map)) {
+    preview.timers = new Map();
+  }
+  if (!(preview.tokens instanceof Map)) {
+    preview.tokens = new Map();
+  }
+  if (!(preview.pending instanceof Set)) {
+    preview.pending = new Set();
+  }
+  if (typeof preview.globalPending !== "boolean") {
+    preview.globalPending = false;
+  }
+  return preview;
 }
 
 function renderSubstitutionDraft() {
@@ -2686,14 +2982,27 @@ function renderSubstitutionDraft() {
     empty.className = "substitution-empty";
     empty.textContent = "치환 변수가 없습니다. '행 추가' 버튼으로 새 변수를 등록하세요.";
     container.appendChild(empty);
+    const refreshAllBtn = document.getElementById("substitutionRefreshAllBtn");
+    if (refreshAllBtn) {
+      refreshAllBtn.disabled = true;
+      refreshAllBtn.textContent = "전체 새로고침";
+      refreshAllBtn.removeAttribute("data-state");
+    }
+    updateSubstitutionModalButtons();
     return;
   }
+  const preview = getSubstitutionPreviewState();
   state.substitutionDraft.forEach((rule, index) => {
     const row = document.createElement("div");
     row.className = "substitution-row";
     row.dataset.index = String(index);
     if (state.substitutionInvalidRows.has(index)) {
       row.classList.add("invalid");
+    }
+    if (preview.pending.has(index)) {
+      row.dataset.refreshing = "true";
+    } else {
+      row.dataset.refreshing = "false";
     }
 
     const dragHandle = document.createElement("button");
@@ -2703,11 +3012,11 @@ function renderSubstitutionDraft() {
     dragHandle.setAttribute("aria-label", "드래그하여 순서를 변경");
     dragHandle.title = "드래그하여 순서를 변경";
     dragHandle.draggable = false;
-    dragHandle.innerHTML = '<span aria-hidden="true">≡</span>';
+    dragHandle.innerHTML = SUBSTITUTION_ICON_MARKUP.drag;
     row.appendChild(dragHandle);
 
     const keyCell = document.createElement("div");
-    keyCell.className = "substitution-cell";
+    keyCell.className = "substitution-cell key-cell";
     const keyLabel = document.createElement("label");
     keyLabel.className = "field";
     const keySpan = document.createElement("span");
@@ -2723,18 +3032,78 @@ function renderSubstitutionDraft() {
     keyCell.appendChild(keyLabel);
     row.appendChild(keyCell);
 
+    const originalCell = document.createElement("div");
+    originalCell.className = "substitution-cell source-cell";
+    const originalLabel = document.createElement("label");
+    originalLabel.className = "field";
+    const originalSpan = document.createElement("span");
+    originalSpan.textContent = "원본";
+    const originalInput = document.createElement("input");
+    originalInput.type = "text";
+    originalInput.placeholder = "예: 반가워";
+    originalInput.autocomplete = "off";
+    originalInput.dataset.subField = "source";
+    originalInput.value = typeof rule?.source === "string" ? rule.source : "";
+    originalLabel.appendChild(originalSpan);
+    originalLabel.appendChild(originalInput);
+    originalCell.appendChild(originalLabel);
+    row.appendChild(originalCell);
+
+    const encodingCell = document.createElement("div");
+    encodingCell.className = "substitution-cell encoding-cell";
+    const encodingLabel = document.createElement("label");
+    encodingLabel.className = "field";
+    const encodingSpan = document.createElement("span");
+    encodingSpan.textContent = "인코딩";
+    const encodingSelect = document.createElement("select");
+    encodingSelect.dataset.subField = "encoding";
+    SUBSTITUTION_ENCODING_OPTIONS.forEach((option) => {
+      const opt = document.createElement("option");
+      opt.value = option.value;
+      opt.textContent = option.label;
+      encodingSelect.appendChild(opt);
+    });
+    const encodingValue = normalizeSubstitutionEncoding(rule?.encoding);
+    encodingSelect.value = encodingValue;
+    encodingLabel.appendChild(encodingSpan);
+    encodingLabel.appendChild(encodingSelect);
+    encodingCell.appendChild(encodingLabel);
+    row.appendChild(encodingCell);
+
+    const refreshCell = document.createElement("div");
+    refreshCell.className = "substitution-cell substitution-refresh-cell refresh-cell no-label";
+    const refreshBtn = document.createElement("button");
+    refreshBtn.type = "button";
+    refreshBtn.className = "ghost icon-button substitution-refresh-btn";
+    refreshBtn.dataset.subAction = "refresh-row";
+    refreshBtn.setAttribute("aria-label", "이 행 새로고침");
+    refreshBtn.title = "이 행 새로고침";
+    if (preview.pending.has(index) || preview.globalPending) {
+      refreshBtn.dataset.state = "loading";
+      refreshBtn.disabled = true;
+      refreshBtn.innerHTML = SUBSTITUTION_ICON_MARKUP.spinner;
+    } else {
+      refreshBtn.removeAttribute("data-state");
+      refreshBtn.disabled = false;
+      refreshBtn.innerHTML = SUBSTITUTION_ICON_MARKUP.refresh;
+    }
+    refreshCell.appendChild(refreshBtn);
+    row.appendChild(refreshCell);
+
     const valueCell = document.createElement("div");
-    valueCell.className = "substitution-cell";
+    valueCell.className = "substitution-cell value-cell";
     const valueLabel = document.createElement("label");
     valueLabel.className = "field";
     const valueSpan = document.createElement("span");
-    valueSpan.textContent = "치환값";
+    valueSpan.textContent = "치환 문구";
     const valueInput = document.createElement("input");
     valueInput.type = "text";
-    valueInput.placeholder = "예: naver.com";
+    valueInput.placeholder = "자동 생성";
     valueInput.autocomplete = "off";
+    valueInput.readOnly = true;
     valueInput.dataset.subField = "value";
     valueInput.value = typeof rule?.value === "string" ? rule.value : "";
+    valueInput.title = valueInput.value;
     valueLabel.appendChild(valueSpan);
     valueLabel.appendChild(valueInput);
     valueCell.appendChild(valueLabel);
@@ -2742,9 +3111,11 @@ function renderSubstitutionDraft() {
 
     const deleteBtn = document.createElement("button");
     deleteBtn.type = "button";
-    deleteBtn.className = "danger small substitution-delete";
+    deleteBtn.className = "danger icon-button substitution-delete";
     deleteBtn.dataset.subAction = "delete";
-    deleteBtn.textContent = "삭제";
+    deleteBtn.setAttribute("aria-label", "이 행 삭제");
+    deleteBtn.title = "이 행 삭제";
+    deleteBtn.innerHTML = SUBSTITUTION_ICON_MARKUP.trash;
     row.appendChild(deleteBtn);
 
     container.appendChild(row);
@@ -2754,29 +3125,60 @@ function renderSubstitutionDraft() {
     const restored = container.querySelector(
       `.substitution-row[data-index="${activeDescriptor.index}"] input[data-sub-field="${activeDescriptor.field}"]`
     );
-    if (restored) {
+    const fallbackSelect = container.querySelector(
+      `.substitution-row[data-index="${activeDescriptor.index}"] [data-sub-field="${activeDescriptor.field}"]`
+    );
+    const targetField = restored || fallbackSelect;
+    if (targetField) {
       try {
-        restored.focus({ preventScroll: true });
+        targetField.focus({ preventScroll: true });
       } catch (err) {
-        restored.focus();
+        targetField.focus();
       }
-      const { selectionStart, selectionEnd } = activeDescriptor;
-      if (
-        typeof selectionStart === "number" &&
-        typeof selectionEnd === "number" &&
-        selectionStart >= 0 &&
-        selectionEnd >= selectionStart
-      ) {
-        try {
-          restored.setSelectionRange(selectionStart, selectionEnd);
-        } catch (err) {
-          restored.setSelectionRange(restored.value.length, restored.value.length);
+      if (targetField instanceof HTMLInputElement) {
+        const { selectionStart, selectionEnd } = activeDescriptor;
+        if (
+          typeof selectionStart === "number" &&
+          typeof selectionEnd === "number" &&
+          selectionStart >= 0 &&
+          selectionEnd >= selectionStart
+        ) {
+          try {
+            targetField.setSelectionRange(selectionStart, selectionEnd);
+          } catch (err) {
+            targetField.setSelectionRange(targetField.value.length, targetField.value.length);
+          }
+        } else {
+          targetField.setSelectionRange(targetField.value.length, targetField.value.length);
         }
-      } else {
-        restored.setSelectionRange(restored.value.length, restored.value.length);
       }
     }
   }
+  const refreshAllBtn = document.getElementById("substitutionRefreshAllBtn");
+  if (refreshAllBtn) {
+    if (!state.substitutionDraft.length) {
+      refreshAllBtn.disabled = true;
+      refreshAllBtn.textContent = "전체 새로고침";
+      refreshAllBtn.removeAttribute("data-state");
+    } else if (preview.globalPending) {
+      refreshAllBtn.disabled = true;
+      refreshAllBtn.textContent = "전체 새로고침 중...";
+      refreshAllBtn.dataset.state = "loading";
+    } else {
+      refreshAllBtn.disabled = false;
+      refreshAllBtn.textContent = "전체 새로고침";
+      refreshAllBtn.removeAttribute("data-state");
+    }
+  }
+}
+
+function clearSubstitutionPreviewTracking() {
+  const preview = getSubstitutionPreviewState();
+  preview.timers.forEach((timer) => clearTimeout(timer));
+  preview.timers = new Map();
+  preview.tokens = new Map();
+  preview.pending = new Set();
+  preview.globalPending = false;
 }
 
 function updateSubstitutionRowValidity() {
@@ -2824,7 +3226,7 @@ function handleSubstitutionAddRow(event) {
   if (event) {
     event.preventDefault();
   }
-  state.substitutionDraft.push({ key: "", value: "" });
+  state.substitutionDraft.push({ key: "", source: "", encoding: "none", value: "" });
   const newIndex = state.substitutionDraft.length - 1;
   renderSubstitutionDraft();
   state.substitutionInvalidRows = new Set([newIndex]);
@@ -2841,11 +3243,11 @@ function handleSubstitutionAddRow(event) {
 }
 
 function handleSubstitutionInput(event) {
-  const input = event.target;
-  if (!input || !input.dataset || !input.dataset.subField) {
+  const target = event.target;
+  if (!target || !target.dataset || !target.dataset.subField) {
     return;
   }
-  const row = input.closest(".substitution-row");
+  const row = target.closest(".substitution-row");
   if (!row) {
     return;
   }
@@ -2853,36 +3255,165 @@ function handleSubstitutionInput(event) {
   if (Number.isNaN(index)) {
     return;
   }
-  const field = input.dataset.subField;
-  const value = input.value;
+  const field = target.dataset.subField;
   if (!state.substitutionDraft[index]) {
-    state.substitutionDraft[index] = { key: "", value: "" };
+    state.substitutionDraft[index] = { key: "", source: "", encoding: "none", value: "" };
   }
-  state.substitutionDraft[index][field] = value;
+  let nextValue = target.value;
+  if (field === "encoding") {
+    nextValue = normalizeSubstitutionEncoding(nextValue);
+    target.value = nextValue;
+  }
+  state.substitutionDraft[index][field] = nextValue;
   state.substitutionDirty = true;
   if (state.substitutionInvalidRows.has(index)) {
     state.substitutionInvalidRows.delete(index);
     row.classList.remove("invalid");
   }
   setSubstitutionFeedback("", "info", { persist: false });
+  if (field === "encoding") {
+    scheduleSubstitutionRecompute(index, { immediate: true });
+  } else if (field === "source") {
+    scheduleSubstitutionRecompute(index);
+  }
   validateSubstitutionDraft({ showMessage: false });
 }
 
-function handleSubstitutionDelete(event) {
-  const button = event.target.closest("[data-sub-action=\"delete\"]");
+function handleSubstitutionClick(event) {
+  const button = event.target.closest("[data-sub-action]");
   if (!button) return;
-  event.preventDefault();
+  const action = button.dataset.subAction;
   const row = button.closest(".substitution-row");
   if (!row) return;
   const index = Number(row.dataset.index);
   if (Number.isNaN(index)) return;
-  state.substitutionDraft.splice(index, 1);
-  state.substitutionDirty = true;
-  state.substitutionInvalidRows = new Set();
+  if (action === "delete") {
+    event.preventDefault();
+    state.substitutionDraft.splice(index, 1);
+    state.substitutionDirty = true;
+    state.substitutionInvalidRows = new Set();
+    clearSubstitutionPreviewTracking();
+    renderSubstitutionDraft();
+    updateSubstitutionRowValidity();
+    setSubstitutionFeedback("", "info", { persist: false });
+    validateSubstitutionDraft({ showMessage: false });
+    return;
+  }
+  if (action === "refresh-row") {
+    event.preventDefault();
+    scheduleSubstitutionRecompute(index, { immediate: true });
+  }
+}
+
+function scheduleSubstitutionRecompute(index, options = {}) {
+  if (!Number.isInteger(index) || index < 0) {
+    return;
+  }
+  const { immediate = false } = options;
+  const preview = getSubstitutionPreviewState();
+  if (preview.timers.has(index)) {
+    clearTimeout(preview.timers.get(index));
+    preview.timers.delete(index);
+  }
+  if (immediate) {
+    performSubstitutionRecompute(index);
+    return;
+  }
+  const timer = setTimeout(() => {
+    preview.timers.delete(index);
+    performSubstitutionRecompute(index);
+  }, SUBSTITUTION_RECOMPUTE_DELAY);
+  preview.timers.set(index, timer);
+}
+
+async function performSubstitutionRecompute(index) {
+  const preview = getSubstitutionPreviewState();
+  if (preview.timers.has(index)) {
+    clearTimeout(preview.timers.get(index));
+    preview.timers.delete(index);
+  }
+  if (!Array.isArray(state.substitutionDraft) || !state.substitutionDraft[index]) {
+    return;
+  }
+  const rule = state.substitutionDraft[index];
+  const sourceText = typeof rule?.source === "string" ? rule.source : "";
+  const encoding = normalizeSubstitutionEncoding(rule?.encoding);
+  const token = (preview.tokens.get(index) || 0) + 1;
+  preview.tokens.set(index, token);
+  if (!sourceText) {
+    rule.value = "";
+    preview.pending.delete(index);
+    renderSubstitutionDraft();
+    validateSubstitutionDraft({ showMessage: false });
+    return;
+  }
+  preview.pending.add(index);
   renderSubstitutionDraft();
-  updateSubstitutionRowValidity();
-  setSubstitutionFeedback("", "info", { persist: false });
-  validateSubstitutionDraft({ showMessage: false });
+  try {
+    const response = await requestSubstitutionPreview([{ source: sourceText, encoding }]);
+    const results = Array.isArray(response?.results) ? response.results : [];
+    if (preview.tokens.get(index) !== token) {
+      return;
+    }
+    rule.value = typeof results[0] === "string" ? results[0] : "";
+    preview.pending.delete(index);
+    renderSubstitutionDraft();
+    validateSubstitutionDraft({ showMessage: false });
+  } catch (err) {
+    preview.pending.delete(index);
+    renderSubstitutionDraft();
+    state.substitutionInvalidRows.add(index);
+    updateSubstitutionRowValidity();
+    setSubstitutionFeedback(err?.message || "치환 결과를 계산하지 못했습니다.", "error", { persist: true });
+  }
+}
+
+async function refreshAllSubstitutionRows() {
+  if (!Array.isArray(state.substitutionDraft) || state.substitutionDraft.length === 0) {
+    return;
+  }
+  const preview = getSubstitutionPreviewState();
+  preview.timers.forEach((timer) => clearTimeout(timer));
+  preview.timers = new Map();
+  preview.tokens = new Map();
+  const payload = state.substitutionDraft.map((rule) => ({
+    source: typeof rule?.source === "string" ? rule.source : "",
+    encoding: normalizeSubstitutionEncoding(rule?.encoding),
+  }));
+  preview.pending = new Set(payload.map((_, idx) => idx));
+  preview.globalPending = true;
+  renderSubstitutionDraft();
+  try {
+    const response = await requestSubstitutionPreview(payload);
+    const results = Array.isArray(response?.results) ? response.results : [];
+    state.substitutionDraft.forEach((rule, idx) => {
+      const value = typeof results[idx] === "string" ? results[idx] : "";
+      rule.value = value;
+    });
+    preview.pending.clear();
+    preview.globalPending = false;
+    renderSubstitutionDraft();
+    validateSubstitutionDraft({ showMessage: false });
+  } catch (err) {
+    preview.pending.clear();
+    preview.globalPending = false;
+    renderSubstitutionDraft();
+    setSubstitutionFeedback(err?.message || "전체 새로고침에 실패했습니다.", "error", { persist: true });
+  }
+}
+
+async function requestSubstitutionPreview(items) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return { results: [] };
+  }
+  const payloadItems = items.map((item) => ({
+    source: typeof item?.source === "string" ? item.source : "",
+    encoding: normalizeSubstitutionEncoding(item?.encoding),
+  }));
+  return fetchJSON("/api/substitution/encode", {
+    method: "POST",
+    body: JSON.stringify({ items: payloadItems }),
+  });
 }
 
 function cleanupSubstitutionDragVisuals() {
@@ -3084,6 +3615,7 @@ function finishSubstitutionPointerDrag(options = {}) {
   }
   draft.splice(insertIndex, 0, moved);
   state.substitutionDirty = true;
+  clearSubstitutionPreviewTracking();
   renderSubstitutionDraft();
   validateSubstitutionDraft({ showMessage: false });
   setSubstitutionFeedback("", "info", { persist: false });
@@ -3110,8 +3642,10 @@ function prepareSubstitutionPayload(source = state.substitutionDraft) {
   let message = "";
   (Array.isArray(source) ? source : []).forEach((rule, index) => {
     const key = typeof rule?.key === "string" ? rule.key.trim() : "";
-    const value = typeof rule?.value === "string" ? rule.value.trim() : "";
-    if (!key && !value) {
+    const sourceText = typeof rule?.source === "string" ? rule.source : "";
+    const encoding = normalizeSubstitutionEncoding(rule?.encoding);
+    const value = typeof rule?.value === "string" ? rule.value : "";
+    if (!key && !sourceText && !value) {
       invalidRows.add(index);
       if (!message) {
         message = "빈 행이 있습니다. 값 입력 후 저장하거나 삭제하세요.";
@@ -3125,10 +3659,17 @@ function prepareSubstitutionPayload(source = state.substitutionDraft) {
       }
       return;
     }
+    if (!sourceText) {
+      invalidRows.add(index);
+      if (!message) {
+        message = `${key} 원본을 입력하세요.`;
+      }
+      return;
+    }
     if (!value) {
       invalidRows.add(index);
       if (!message) {
-        message = `${key} 치환값을 입력하세요.`;
+        message = `${key} 치환 문구가 비어 있습니다. 새로고침을 눌러 계산하세요.`;
       }
       return;
     }
@@ -3142,7 +3683,7 @@ function prepareSubstitutionPayload(source = state.substitutionDraft) {
       return;
     }
     seen.set(token, index);
-    sanitized.push({ key, value });
+    sanitized.push({ key, source: sourceText, encoding, value });
   });
   return {
     ok: invalidRows.size === 0,
@@ -3223,6 +3764,7 @@ function resetSubstitutionDraft() {
   } else {
     resetSubstitutionDragState();
   }
+  clearSubstitutionPreviewTracking();
   state.substitutionDraft = cloneSubstitutionRules(state.substitutionRules);
   state.substitutionInvalidRows = new Set();
   renderSubstitutionDraft();
@@ -3313,11 +3855,19 @@ function initSubstitutionSection() {
   const container = document.getElementById("substitutionTable");
   if (!container) return;
   container.addEventListener("input", handleSubstitutionInput);
-  container.addEventListener("click", handleSubstitutionDelete);
+  container.addEventListener("change", handleSubstitutionInput);
+  container.addEventListener("click", handleSubstitutionClick);
   container.addEventListener("pointerdown", handleSubstitutionPointerDown);
   const addBtn = document.getElementById("substitutionAddRowBtn");
   if (addBtn) {
     addBtn.addEventListener("click", handleSubstitutionAddRow);
+  }
+  const refreshAllBtn = document.getElementById("substitutionRefreshAllBtn");
+  if (refreshAllBtn) {
+    refreshAllBtn.addEventListener("click", (event) => {
+      event.preventDefault();
+      refreshAllSubstitutionRows();
+    });
   }
   const openBtn = document.getElementById("substitutionManageBtn");
   if (openBtn) {

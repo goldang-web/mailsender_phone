@@ -18,6 +18,8 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
+from encoding_utils import encode_substitution_value, normalize_encoding_name
+
 DOMAINS = ("naver", "daum")
 DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
 
@@ -343,20 +345,40 @@ def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[D
                 raise ValueError("치환 변수 항목 형식이 올바르지 않습니다.")
             continue
         key = str(data.get("key") or "").strip()
-        value = str(data.get("value") or "").strip()
+        source = str(data.get("source") or "")
+        encoding = normalize_encoding_name(data.get("encoding"))
+        raw_value = data.get("value")
+        value = str(raw_value) if raw_value is not None else ""
+        if not source and value:
+            source = value
         if not key:
             if strict:
                 raise ValueError("변수명은 비워둘 수 없습니다.")
             continue
-        if strict and not value:
-            raise ValueError(f"'{key}' 치환값을 입력하세요.")
+        try:
+            computed_value = encode_substitution_value(source, encoding)
+        except UnicodeEncodeError as exc:
+            if encoding == "quoted_printable_euckr":
+                raise ValueError(f"'{key}' 원본을 EUC-KR로 변환할 수 없습니다.") from exc
+            raise ValueError(f"'{key}' 치환 값을 생성하는 중 오류가 발생했습니다.") from exc
+        if not computed_value:
+            if strict:
+                raise ValueError(f"'{key}' 치환 값을 입력하세요.")
+            continue
         key_token = key.lower()
         if key_token in seen_keys:
             if strict:
                 raise ValueError(f"'{key}' 변수명이 중복되었습니다.")
             continue
         seen_keys.add(key_token)
-        sanitized.append({"key": key, "value": value})
+        sanitized.append(
+            {
+                "key": key,
+                "source": source,
+                "encoding": encoding,
+                "value": computed_value,
+            }
+        )
     return sanitized
 
 
@@ -2143,6 +2165,21 @@ class FileListResponse(BaseModel):
 class SubstitutionRule(BaseModel):
     key: str
     value: str
+    source: str = ""
+    encoding: str = "none"
+
+
+class SubstitutionPreviewItem(BaseModel):
+    source: Optional[str] = ""
+    encoding: Optional[str] = None
+
+
+class SubstitutionPreviewRequest(BaseModel):
+    items: List[SubstitutionPreviewItem] = Field(default_factory=list)
+
+
+class SubstitutionPreviewResponse(BaseModel):
+    results: List[str] = Field(default_factory=list)
 
 
 class GlobalConfigPayload(BaseModel):
@@ -2210,6 +2247,29 @@ def dashboard(request: Request) -> HTMLResponse:
 @app.get("/api/devices")
 def list_devices() -> Dict[str, Any]:
     return load_device_summary()
+
+
+@app.post("/api/substitution/encode", response_model=SubstitutionPreviewResponse)
+def preview_substitution_endpoint(payload: SubstitutionPreviewRequest) -> SubstitutionPreviewResponse:
+    items = payload.items or []
+    results: List[str] = []
+    for index, item in enumerate(items, start=1):
+        source = item.source or ""
+        encoding = normalize_encoding_name(item.encoding)
+        try:
+            encoded = encode_substitution_value(source, encoding)
+        except UnicodeEncodeError as exc:
+            if encoding == "quoted_printable_euckr":
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{index}번 행: EUC-KR로 변환할 수 없는 문자가 포함되어 있습니다.",
+                ) from exc
+            raise HTTPException(
+                status_code=400,
+                detail=f"{index}번 행: 치환 값을 생성하지 못했습니다.",
+            ) from exc
+        results.append(encoded)
+    return SubstitutionPreviewResponse(results=results)
 
 
 @app.get("/api/global/config", response_model=GlobalConfigResponse)

@@ -4,6 +4,7 @@ FastAPI 기반의 대시보드와 REST API를 제공하여 다중 디바이스 �
 
 ## 제공 기능
 - 웹 대시보드: 디바이스별 설정 편집, 단일/전체 발송, 워커 상태 모니터링
+- 치환 변수 관리: 원본 문자열과 인코딩 규칙을 조합해 자동으로 치환 문구를 생성
 - 파일 관리: 도메인별 DB 파일 업로드·미리보기·삭제·Inject 트리거
 - 디바이스 API: 등록, 하트비트, 작업 큐, 작업 결과 보고, 파일 다운로드
 - 발송 및 Inject 기록을 위한 SQLite 스토리지 관리
@@ -14,6 +15,11 @@ uv venv .venv
 source .venv/bin/activate
 uv pip install fastapi uvicorn
 uvicorn server.main:app --host 0.0.0.0 --port 8000
+```
+
+## 테스트
+```bash
+python3 -m unittest discover -s tests
 ```
 
 ## 주요 경로
