@@ -23,6 +23,7 @@ env/
 # Client runtime artifacts
 client/data/
 client/logs/
+client/settings.json
 
 # Server runtime artifacts
 server/control.db
