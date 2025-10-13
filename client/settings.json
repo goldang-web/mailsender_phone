@@ -35,6 +35,20 @@
       "server_last_run": null
     }
   },
+  "imap_settings": {
+    "naver": {
+      "enabled": false,
+      "username": "",
+      "password": "",
+      "delay_seconds": 20
+    },
+    "daum": {
+      "enabled": false,
+      "username": "",
+      "password": "",
+      "delay_seconds": 20
+    }
+  },
   "sent_sequences": {
     "naver": 0,
     "daum": 0
