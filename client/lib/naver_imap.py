@@ -25,7 +25,7 @@ def probe_imap_connection(email_id: str, password: str, *, folder: str = "Junk",
         return {
             "success": True,
             "latency": latency,
-            "checked_at": datetime.utcnow().isoformat() + "Z",
+            "checked_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
     except imaplib.IMAP4.error as exc:
         latency = time.monotonic() - started

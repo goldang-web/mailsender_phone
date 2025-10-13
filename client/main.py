@@ -13,7 +13,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
-from datetime import datetime
+from datetime import datetime, timezone
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -34,6 +34,14 @@ LOG_DIR = BASE_DIR / "logs"
 
 DOMAINS = ("naver", "daum")
 EMAIL_STATUSES = ("pending", "reserved", "sent", "block", "failed", "removed")
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def utc_now_iso() -> str:
+    return utc_now().isoformat().replace("+00:00", "Z")
 
 DEFAULT_CONFIG: Dict[str, object] = {
     "server_url": "http://127.0.0.1:8000",
@@ -779,7 +787,7 @@ class MailClient:
         def task() -> None:
             if delay_seconds > 0:
                 time.sleep(delay_seconds)
-            checked_at_iso = datetime.utcnow().isoformat() + "Z"
+            checked_at_iso = utc_now_iso()
             try:
                 result = verify_delivery(
                     email_id=username,
@@ -1609,7 +1617,7 @@ class MailClient:
             header_text=config.get("header", ""),
             bcc_emails=bcc_emails,
         )
-        sent_at = datetime.utcnow()
+        sent_at = utc_now()
         response_text = response_text or ""
         status = "success" if success else "failed"
         status_line, detail_line = self._smtp_status_and_detail(response_text)
@@ -2060,7 +2068,7 @@ class MailClient:
                     bcc_emails=bcc_emails,
                 )
                 response_text = response_text or ""
-                sent_at = datetime.utcnow()
+                sent_at = utc_now()
                 delivery_status = self._classify_delivery(success, response_text)
                 status_line, detail_line = self._smtp_status_and_detail(response_text)
                 return DispatchOutcome(
