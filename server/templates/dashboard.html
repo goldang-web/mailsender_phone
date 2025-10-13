@@ -857,6 +857,115 @@ button.card-delete-btn:disabled {
 .device-schedule-hint {
   font-size: 11px;
   color: var(--color-muted-soft);
+  margin-top: 4px;
+}
+
+.imap-block {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-subtle);
+}
+
+.imap-block.hidden {
+  display: none;
+}
+
+.imap-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.imap-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  color: var(--color-heading);
+}
+
+.imap-toggle input[type="checkbox"] {
+  width: 18px;
+  height: 18px;
+}
+
+.imap-status {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 4px;
+  color: var(--color-muted-strong);
+}
+
+.imap-status.success {
+  color: var(--color-success);
+}
+
+.imap-status.warning {
+  color: var(--color-warning);
+}
+
+.imap-status.error {
+  color: var(--color-danger);
+}
+
+.imap-status.off {
+  color: var(--color-muted);
+}
+
+.imap-meta {
+  font-size: 12px;
+  color: var(--color-subtext);
+  line-height: 1.5;
+}
+
+#imapModal .modal-card {
+  width: 380px;
+  max-width: calc(100vw - 40px);
+}
+
+.imap-form .field {
+  margin-bottom: 14px;
+}
+
+.imap-form label span {
+  display: block;
+  font-size: 13px;
+  color: var(--color-subtext);
+  margin-bottom: 4px;
+}
+
+.imap-form small {
+  font-weight: 400;
+  color: var(--color-muted);
+}
+
+.imap-form input[type="number"] {
+  width: 100%;
+}
+
+.imap-form .checkbox-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.imap-form .checkbox-field span {
+  margin-bottom: 0;
+}
+
+.imap-anchor-meta {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+
+.imap-anchor-meta strong {
+  color: var(--color-text);
 }
 button {
   cursor: pointer;
@@ -1071,6 +1180,13 @@ button:not(:disabled):hover {
   display: flex;
   flex-direction: column;
   gap: 16px;
+}
+.modal-footer {
+  padding: 16px 22px;
+  border-top: 1px solid var(--color-border);
+  display: flex;
+  justify-content: center;
+  gap: 12px;
 }
 .file-upload {
   display: flex;
@@ -1298,6 +1414,40 @@ button:not(:disabled):hover {
   </div>
 </div>
 
+<div id="imapModal" class="modal hidden">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div>
+        <h2 id="imapModalTitle">네이버 IMAP 설정</h2>
+        <div class="meta" id="imapModalSubtitle"></div>
+      </div>
+      <button class="ghost" data-action="close-imap">닫기</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-message" id="imapModalMessage"></div>
+      <form id="imapForm" class="imap-form" autocomplete="off">
+        <label class="field">
+          <span>네이버 계정 ID</span>
+          <input type="text" id="imapUsername" autocomplete="username" required>
+        </label>
+        <label class="field">
+          <span>비밀번호 <small>(변경 시에만 입력)</small></span>
+          <input type="password" id="imapPassword" autocomplete="new-password" placeholder="">
+        </label>
+        <label class="field">
+          <span>허용 지연 시간 (초)</span>
+          <input type="number" id="imapDelaySeconds" min="5" max="600" required title="발송 후 IMAP으로 도착 여부를 확인할 때 허용할 최대 대기 시간입니다. 알박기 메일도 이 값을 기준으로 확인합니다.">
+        </label>
+        <p class="field-hint">알박기 메일도 동일한 허용 지연을 사용하며, 상황에 따라 대기 시간이 자동 조정됩니다.</p>
+      </form>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="ghost" data-action="imap-cancel">취소</button>
+      <button type="button" id="imapSaveBtn" data-action="imap-save">저장</button>
+    </div>
+  </div>
+</div>
+
 <script>
 const GLOBAL_FIELD_LIST = [
   "active_domain",
@@ -1330,6 +1480,10 @@ const GLOBAL_INPUT_IDS = {
   stop_schedule_time: "globalStopScheduleTime",
 };
 
+const IMAP_DEFAULT_DELAY = 20;
+const IMAP_MIN_DELAY = 5;
+const IMAP_MAX_DELAY = 600;
+
 const state = {
   devices: [],
   lastSync: null,
@@ -1338,6 +1492,15 @@ const state = {
     deviceId: null,
     domain: null,
     deviceName: "",
+  },
+  imapModal: {
+    open: false,
+    deviceId: null,
+    domain: "naver",
+    deviceName: "",
+    passwordSaved: false,
+    forceEnable: false,
+    card: null,
   },
   pollingHandle: null,
   successCounters: {},
@@ -2545,6 +2708,17 @@ function bestConfig(device, domain) {
     stop_schedule_time: "",
     stop_schedule_last_run: null,
     stop_schedule_next_run: null,
+    imap_enabled: false,
+    imap_username: "",
+    imap_password_saved: false,
+    imap_delay_seconds: IMAP_DEFAULT_DELAY,
+    imap_last_status: "",
+    imap_last_checked_at: null,
+    imap_last_latency: null,
+    imap_last_error: "",
+    imap_last_mail_from: "",
+    imap_last_sent_at: null,
+    imap_last_received_at: null,
   };
 }
 
@@ -2854,6 +3028,82 @@ function setNotice(card, message, type = "success") {
   }, 3500);
 }
 
+function renderImapSection(card, device, domain) {
+  const block = card.querySelector('[data-role="imapBlock"]');
+  if (!block) return;
+  const isNaver = domain === "naver";
+  block.classList.toggle("hidden", !isNaver);
+  if (!isNaver) {
+    block.dataset.imapUsername = "";
+    block.dataset.imapDelay = String(IMAP_DEFAULT_DELAY);
+    block.dataset.imapPasswordSaved = "0";
+    const anchorMetaEl = block.querySelector('[data-role="imapAnchorMeta"]');
+    if (anchorMetaEl) {
+      anchorMetaEl.textContent = "알박기 확인: 사용 안 함";
+      anchorMetaEl.title = "네이버 도메인에서만 알박기 도착 확인을 제공합니다.";
+    }
+    return;
+  }
+  const config = bestConfig(device, domain);
+  const toggle = block.querySelector('[data-field="imap_enabled"]');
+  if (toggle) {
+    toggle.checked = Boolean(config.imap_enabled);
+  }
+  const statusEl = block.querySelector('[data-role="imapStatus"]');
+  const metaEl = block.querySelector('[data-role="imapMeta"]');
+  const anchorMetaEl = block.querySelector('[data-role="imapAnchorMeta"]');
+  let statusClass = "off";
+  let statusText = "IMAP 확인 비활성";
+  let metaText = "네이버 도메인에서 계정을 설정하면 도착 여부를 자동으로 확인합니다.";
+  if (config.imap_enabled) {
+    const lastStatus = config.imap_last_status || "";
+    const checkedAt = config.imap_last_checked_at;
+    const receivedAt = config.imap_last_received_at || checkedAt;
+    const latencyValue = Number(config.imap_last_latency);
+    const reasonText = config.imap_last_error || "";
+    statusClass = "warning";
+    statusText = "IMAP 확인 대기 중";
+    if (lastStatus === "success") {
+      statusClass = "success";
+      statusText = "최근 확인 성공";
+      const latencyText = Number.isFinite(latencyValue) ? `${latencyValue.toFixed(1)}초` : "-";
+      metaText = `${receivedAt ? `도착: ${formatDate(receivedAt)}` : "최근 확인"} · 지연 ${latencyText}`;
+    } else if (lastStatus === "failure") {
+      statusClass = "error";
+      statusText = "최근 확인 실패";
+      metaText = `${checkedAt ? formatDate(checkedAt) : "최근 확인"} · ${reasonText || "허용 지연 초과"}`;
+    } else if (lastStatus === "error") {
+      statusClass = "error";
+      statusText = "IMAP 확인 오류";
+      metaText = reasonText || "IMAP 확인 중 오류가 발생했습니다.";
+    } else if (checkedAt) {
+      metaText = `최근 확인: ${formatDate(checkedAt)}`;
+    } else {
+      metaText = "발송 후 자동으로 도착 여부를 확인합니다.";
+    }
+  }
+  statusEl.textContent = statusText;
+  statusEl.className = `imap-status ${statusClass}`;
+  metaEl.textContent = metaText;
+  const imapDelayValue = clampNumber(
+    config.imap_delay_seconds ?? IMAP_DEFAULT_DELAY,
+    IMAP_MIN_DELAY,
+    IMAP_MAX_DELAY,
+    IMAP_DEFAULT_DELAY,
+  );
+  if (anchorMetaEl) {
+    if (!config.imap_enabled) {
+      anchorMetaEl.textContent = "알박기 확인: IMAP 비활성";
+    } else {
+      anchorMetaEl.textContent = `알박기 확인: 허용 지연 ${imapDelayValue}초 기준 자동 검사`;
+    }
+    anchorMetaEl.title = "허용 지연 시간으로 단일 발송과 알박기 메일 모두를 확인하며, 내부적으로 필요한 만큼 자동으로 대기합니다.";
+  }
+  block.dataset.imapUsername = config.imap_username || "";
+  block.dataset.imapDelay = String(imapDelayValue);
+  block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
+}
+
 function populateConfigForm(card, device, domain) {
   const config = bestConfig(device, domain);
   const cache = ensureFieldCache(device.id, domain, config);
@@ -2876,6 +3126,7 @@ function populateConfigForm(card, device, domain) {
   const rcptInput = card.querySelector('[data-field="rcpt_to"]');
   if (rcptInput && document.activeElement !== rcptInput) rcptInput.value = cache.values.rcpt_to;
   updateDeviceSchedule(card, device, domain, config);
+  renderImapSection(card, device, domain);
 }
 
 function attachCardEvents(card) {
@@ -2959,6 +3210,52 @@ function attachCardEvents(card) {
       }
     });
   });
+
+  const imapToggle = card.querySelector('[data-field="imap_enabled"]');
+  if (imapToggle) {
+    imapToggle.addEventListener("change", async (evt) => {
+      const toggledOn = evt.target.checked;
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      if (domain !== "naver") {
+        evt.target.checked = false;
+        setNotice(card, "네이버 도메인을 선택하면 IMAP 확인을 사용할 수 있습니다.", "error");
+        return;
+      }
+      if (toggledOn) {
+        evt.target.checked = false;
+        openImapModal(card, currentDevice, domain, { forceEnable: true });
+        return;
+      }
+      evt.target.disabled = true;
+      try {
+        await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/imap`, {
+          method: "POST",
+          body: JSON.stringify({ enabled: false }),
+        });
+        setNotice(card, "IMAP 확인을 비활성화했습니다.");
+        await loadDevices({ silent: true });
+      } catch (err) {
+        evt.target.checked = true;
+        setNotice(card, err.message || "IMAP 비활성화를 처리하지 못했습니다.", "error");
+      } finally {
+        evt.target.disabled = false;
+      }
+    });
+  }
+
+  const imapSettingsBtn = card.querySelector('[data-action="imap-settings"]');
+  if (imapSettingsBtn) {
+    imapSettingsBtn.addEventListener("click", () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      if (domain !== "naver") {
+        setNotice(card, "네이버 도메인을 선택하면 IMAP 설정을 변경할 수 있습니다.", "error");
+        return;
+      }
+      openImapModal(card, currentDevice, domain, { forceEnable: false });
+    });
+  }
 
   CONFIG_FIELDS.forEach((fieldName) => {
     const el = card.querySelector(`[data-field="${fieldName}"]`);
@@ -3403,6 +3700,18 @@ function buildDeviceCard(device) {
         </div>
       </div>
     </div>
+    <div class="imap-block hidden" data-role="imapBlock">
+      <div class="imap-header">
+        <label class="imap-toggle">
+          <input type="checkbox" data-field="imap_enabled">
+          <span>네이버 IMAP 도착 확인</span>
+        </label>
+        <button type="button" class="ghost small" data-action="imap-settings">계정 설정</button>
+      </div>
+      <div class="imap-status off" data-role="imapStatus">네이버 도메인에서만 사용할 수 있습니다.</div>
+      <div class="imap-meta" data-role="imapMeta">네이버 발송 시 도착 여부를 자동으로 확인합니다.</div>
+      <div class="imap-anchor-meta" data-role="imapAnchorMeta" title="허용 지연 시간으로 단일 발송과 알박기 메일을 자동 확인합니다.">알박기 확인: 사용 안 함</div>
+    </div>
     <div class="device-schedule" data-role="deviceSchedule">
       <div class="device-schedule-header">
         <label class="schedule-toggle">
@@ -3693,6 +4002,110 @@ function closeFileModal() {
   state.modal.deviceId = null;
   state.modal.domain = null;
   document.getElementById("fileModal").classList.add("hidden");
+}
+
+function setImapModalMessage(message, type = "error") {
+  const box = document.getElementById("imapModalMessage");
+  box.textContent = message || "";
+  box.className = message ? `modal-message ${type === "success" ? "success" : ""}` : "modal-message";
+}
+
+function openImapModal(card, device, domain, options = {}) {
+  if (domain !== "naver") {
+    return;
+  }
+  const config = bestConfig(device, domain);
+  state.imapModal.open = true;
+  state.imapModal.deviceId = device.id;
+  state.imapModal.domain = domain;
+  state.imapModal.deviceName = device.name;
+  state.imapModal.passwordSaved = Boolean(config.imap_password_saved);
+  state.imapModal.forceEnable = Boolean(options?.forceEnable);
+  state.imapModal.card = card || null;
+
+  document.getElementById("imapModalTitle").textContent = `${device.name} · 네이버 IMAP 설정`;
+  document.getElementById("imapModalSubtitle").textContent = `ID: ${device.id}`;
+  setImapModalMessage("");
+
+  const usernameInput = document.getElementById("imapUsername");
+  const passwordInput = document.getElementById("imapPassword");
+  const delayInput = document.getElementById("imapDelaySeconds");
+
+  usernameInput.value = config.imap_username || "";
+  passwordInput.value = "";
+  passwordInput.placeholder = config.imap_password_saved ? "변경 시에만 입력" : "비밀번호를 입력하세요";
+  const blockDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapDelay;
+  const delayValue = clampNumber(blockDelay ?? config.imap_delay_seconds ?? IMAP_DEFAULT_DELAY, IMAP_MIN_DELAY, IMAP_MAX_DELAY, IMAP_DEFAULT_DELAY);
+  delayInput.value = delayValue;
+
+  document.getElementById("imapModal").classList.remove("hidden");
+  const saveBtn = document.getElementById("imapSaveBtn");
+  saveBtn.disabled = false;
+  saveBtn.textContent = "저장";
+}
+
+function closeImapModal() {
+  document.getElementById("imapModal").classList.add("hidden");
+  state.imapModal.open = false;
+  state.imapModal.deviceId = null;
+  state.imapModal.domain = "naver";
+  state.imapModal.deviceName = "";
+  state.imapModal.passwordSaved = false;
+  state.imapModal.forceEnable = false;
+  state.imapModal.card = null;
+  setImapModalMessage("");
+}
+
+async function submitImapModal() {
+  const { deviceId, domain, passwordSaved, card } = state.imapModal;
+  if (!deviceId || !domain) {
+    return;
+  }
+  const username = document.getElementById("imapUsername").value.trim();
+  const passwordInput = document.getElementById("imapPassword");
+  const rawPassword = passwordInput.value;
+  const delayInput = document.getElementById("imapDelaySeconds");
+  const delayValue = clampNumber(delayInput.value, IMAP_MIN_DELAY, IMAP_MAX_DELAY, IMAP_DEFAULT_DELAY);
+  delayInput.value = delayValue;
+
+  if (!username) {
+    setImapModalMessage("네이버 계정 ID를 입력하세요.");
+    return;
+  }
+  if (!passwordSaved && !rawPassword) {
+    setImapModalMessage("비밀번호를 입력하세요.");
+    return;
+  }
+
+  const payload = {
+    enabled: true,
+    username,
+    delay_seconds: delayValue,
+  };
+  if (rawPassword) {
+    payload.password = rawPassword;
+  }
+
+  const saveBtn = document.getElementById("imapSaveBtn");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "저장 중...";
+  setImapModalMessage("");
+
+  try {
+    await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/imap`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    if (card) {
+      setNotice(card, "IMAP 확인 설정을 저장했습니다.");
+    }
+    closeImapModal();
+    await loadDevices({ silent: true });
+  } catch (err) {
+    saveBtn.disabled = false;
+    saveBtn.textContent = "저장";
+    setImapModalMessage(err.message || "IMAP 설정 저장에 실패했습니다.");
+  }
 }
 
 async function handleFileAction(target) {
@@ -4017,6 +4430,23 @@ document.getElementById("fileModal").addEventListener("click", (event) => {
   if (event.target === document.getElementById("fileModal")) {
     closeFileModal();
   }
+});
+
+document.querySelector('[data-action="imap-save"]').addEventListener("click", submitImapModal);
+document.querySelector('[data-action="imap-cancel"]').addEventListener("click", () => {
+  closeImapModal();
+});
+document.querySelector('[data-action="close-imap"]').addEventListener("click", () => {
+  closeImapModal();
+});
+document.getElementById("imapModal").addEventListener("click", (event) => {
+  if (event.target === document.getElementById("imapModal")) {
+    closeImapModal();
+  }
+});
+document.getElementById("imapForm").addEventListener("submit", (event) => {
+  event.preventDefault();
+  submitImapModal();
 });
 
 const editDevicesBtn = document.getElementById("editDevicesBtn");

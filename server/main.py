@@ -7,7 +7,7 @@ import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 DOMAINS = ("naver", "daum")
+DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
 
 DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "helo": "",
@@ -30,7 +31,21 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "stop_schedule_enabled": False,
     "stop_schedule_time": "",
     "stop_schedule_last_run": None,
+    "imap_enabled": False,
+    "imap_username": "",
+    "imap_password": "",
+    "imap_delay_seconds": 20,
+    "imap_last_status": "",
+    "imap_last_checked_at": None,
+    "imap_last_latency": None,
+    "imap_last_error": "",
+    "imap_last_mail_from": "",
+    "imap_last_sent_at": None,
+    "imap_last_received_at": None,
 }
+
+IMAP_DELAY_MIN_SECONDS = 5
+IMAP_DELAY_MAX_SECONDS = 600
 
 
 app = FastAPI(title="MailSender Control Server")
@@ -144,6 +159,60 @@ def sanitize_stop_schedule_last_run(value: Any) -> Optional[str]:
             return parsed_dt.date().isoformat()
         except ValueError:
             return None
+
+
+def sanitize_imap_enabled(value: Any) -> bool:
+    return sanitize_stop_schedule_enabled(value)
+
+
+def normalize_imap_username(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def normalize_imap_password(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def sanitize_imap_delay(
+    value: Any,
+    *,
+    default: Optional[int] = None,
+    minimum: Optional[int] = None,
+) -> int:
+    effective_default = default if default is not None else DEFAULT_DOMAIN_CONFIG["imap_delay_seconds"]
+    effective_min = minimum if minimum is not None else IMAP_DELAY_MIN_SECONDS
+    try:
+        delay = int(value)
+    except (TypeError, ValueError):
+        delay = effective_default
+    delay = max(effective_min, min(IMAP_DELAY_MAX_SECONDS, delay))
+    return delay
+
+
+def sanitize_imap_status(value: Any) -> str:
+    if value is None:
+        return ""
+    candidate = str(value).strip().lower()
+    allowed = {"success", "failure", "error", "skipped", "disabled"}
+    if candidate in allowed:
+        return candidate
+    return "error" if candidate else ""
+
+
+def sanitize_imap_latency(value: Any) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        latency = float(value)
+    except (TypeError, ValueError):
+        return None
+    if latency < 0:
+        return None
+    return latency
 
 
 def get_local_now() -> datetime:
@@ -326,6 +395,99 @@ def get_conn() -> sqlite3.Connection:
     return conn
 
 
+def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
+    """Rebuild device_configs table without legacy IMAP anchor columns."""
+    conn.execute("PRAGMA foreign_keys=OFF")
+    try:
+        conn.execute("ALTER TABLE device_configs RENAME TO device_configs_legacy")
+        conn.execute(
+            """
+            CREATE TABLE device_configs (
+                device_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                helo TEXT DEFAULT '',
+                smtp_host TEXT DEFAULT '',
+                smtp_port INTEGER DEFAULT 25,
+                mail_from TEXT DEFAULT '',
+                header TEXT DEFAULT '',
+                session_count INTEGER DEFAULT 1,
+                bcc_count INTEGER DEFAULT 0,
+                anchor_interval INTEGER DEFAULT 0,
+                anchor_email TEXT DEFAULT '',
+                rcpt_to TEXT DEFAULT '',
+                client_db_version INTEGER DEFAULT 0,
+                client_total INTEGER DEFAULT 0,
+                client_pending INTEGER DEFAULT 0,
+                client_sent INTEGER DEFAULT 0,
+                client_failed INTEGER DEFAULT 0,
+                client_block INTEGER DEFAULT 0,
+                client_removed INTEGER DEFAULT 0,
+                client_updated_at TEXT,
+                client_reserved INTEGER DEFAULT 0,
+                client_remaining INTEGER DEFAULT 0,
+                client_cycle_completed INTEGER DEFAULT 0,
+                client_cycle_count INTEGER DEFAULT 0,
+                client_last_cycle_at TEXT,
+                client_last_cycle_processed INTEGER DEFAULT 0,
+                stop_schedule_enabled INTEGER NOT NULL DEFAULT 0,
+                stop_schedule_time TEXT DEFAULT '',
+                stop_schedule_last_run TEXT,
+                imap_enabled INTEGER NOT NULL DEFAULT 0,
+                imap_username TEXT DEFAULT '',
+                imap_password TEXT DEFAULT '',
+                imap_delay_seconds INTEGER NOT NULL DEFAULT 20,
+                imap_last_status TEXT DEFAULT '',
+                imap_last_checked_at TEXT,
+                imap_last_latency REAL,
+                imap_last_error TEXT,
+                imap_last_mail_from TEXT,
+                imap_last_sent_at TEXT,
+                imap_last_received_at TEXT,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, domain),
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO device_configs (
+                device_id, domain, helo, smtp_host, smtp_port,
+                mail_from, header, session_count, bcc_count,
+                anchor_interval, anchor_email, rcpt_to,
+                client_db_version, client_total, client_pending,
+                client_sent, client_failed, client_block, client_removed,
+                client_updated_at, client_reserved, client_remaining,
+                client_cycle_completed, client_cycle_count,
+                client_last_cycle_at, client_last_cycle_processed,
+                stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
+                imap_enabled, imap_username, imap_password, imap_delay_seconds,
+                imap_last_status, imap_last_checked_at, imap_last_latency,
+                imap_last_error, imap_last_mail_from, imap_last_sent_at,
+                imap_last_received_at, updated_at
+            )
+            SELECT
+                device_id, domain, helo, smtp_host, smtp_port,
+                mail_from, header, session_count, bcc_count,
+                anchor_interval, anchor_email, rcpt_to,
+                client_db_version, client_total, client_pending,
+                client_sent, client_failed, client_block, client_removed,
+                client_updated_at, client_reserved, client_remaining,
+                client_cycle_completed, client_cycle_count,
+                client_last_cycle_at, client_last_cycle_processed,
+                stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
+                imap_enabled, imap_username, imap_password, imap_delay_seconds,
+                imap_last_status, imap_last_checked_at, imap_last_latency,
+                imap_last_error, imap_last_mail_from, imap_last_sent_at,
+                imap_last_received_at, updated_at
+            FROM device_configs_legacy
+            """
+        )
+        conn.execute("DROP TABLE device_configs_legacy")
+    finally:
+        conn.execute("PRAGMA foreign_keys=ON")
+
+
 def _init_db() -> None:
     with db_lock, get_conn() as conn:
         conn.executescript(
@@ -443,6 +605,12 @@ def _init_db() -> None:
             row["name"]
             for row in conn.execute("PRAGMA table_info(device_configs)").fetchall()
         }
+        if {"imap_anchor_enabled", "imap_anchor_delay_seconds"} & config_columns:
+            _remove_anchor_imap_columns(conn)
+            config_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(device_configs)").fetchall()
+            }
         device_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(devices)").fetchall()
@@ -497,6 +665,50 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN stop_schedule_last_run TEXT"
             )
+        if "imap_enabled" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        if "imap_username" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_username TEXT DEFAULT ''"
+            )
+        if "imap_password" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_password TEXT DEFAULT ''"
+            )
+        if "imap_delay_seconds" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_delay_seconds INTEGER NOT NULL DEFAULT 20"
+            )
+        if "imap_last_status" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_last_status TEXT DEFAULT ''"
+            )
+        if "imap_last_checked_at" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_last_checked_at TEXT"
+            )
+        if "imap_last_latency" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_last_latency REAL"
+            )
+        if "imap_last_error" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_last_error TEXT"
+            )
+        if "imap_last_mail_from" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_last_mail_from TEXT"
+            )
+        if "imap_last_sent_at" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_last_sent_at TEXT"
+            )
+        if "imap_last_received_at" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_last_received_at TEXT"
+            )
         job_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
@@ -543,9 +755,14 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     mail_from, header, session_count, bcc_count,
                     anchor_interval, anchor_email, rcpt_to,
                     stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
+                    imap_enabled, imap_username, imap_password, imap_delay_seconds,
+                    imap_last_status, imap_last_checked_at, imap_last_latency, imap_last_error, imap_last_mail_from,
+                    imap_last_sent_at, imap_last_received_at,
                     updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                )
                 ON CONFLICT(device_id, domain) DO NOTHING
                 """,
                 (
@@ -564,6 +781,17 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     1 if DEFAULT_DOMAIN_CONFIG["stop_schedule_enabled"] else 0,
                     DEFAULT_DOMAIN_CONFIG["stop_schedule_time"],
                     DEFAULT_DOMAIN_CONFIG["stop_schedule_last_run"],
+                    1 if DEFAULT_DOMAIN_CONFIG["imap_enabled"] else 0,
+                    DEFAULT_DOMAIN_CONFIG["imap_username"],
+                    DEFAULT_DOMAIN_CONFIG["imap_password"],
+                    DEFAULT_DOMAIN_CONFIG["imap_delay_seconds"],
+                    DEFAULT_DOMAIN_CONFIG["imap_last_status"],
+                    DEFAULT_DOMAIN_CONFIG["imap_last_checked_at"],
+                    DEFAULT_DOMAIN_CONFIG["imap_last_latency"],
+                    DEFAULT_DOMAIN_CONFIG["imap_last_error"],
+                    DEFAULT_DOMAIN_CONFIG["imap_last_mail_from"],
+                    DEFAULT_DOMAIN_CONFIG["imap_last_sent_at"],
+                    DEFAULT_DOMAIN_CONFIG["imap_last_received_at"],
                     now,
                 ),
             )
@@ -605,7 +833,7 @@ def load_device_configs(device_id: str, *, conn: Optional[sqlite3.Connection] = 
     return result
 
 
-def serialize_config(row: Dict[str, Any]) -> Dict[str, Any]:
+def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dict[str, Any]:
     raw_session = row.get("session_count", 1)
     try:
         session_value = int(raw_session)
@@ -616,6 +844,21 @@ def serialize_config(row: Dict[str, Any]) -> Dict[str, Any]:
     schedule_time = sanitize_stop_schedule_time(row.get("stop_schedule_time"))
     schedule_last_run = sanitize_stop_schedule_last_run(row.get("stop_schedule_last_run"))
     schedule_next_run = compute_next_stop_schedule(schedule_time) if schedule_enabled and schedule_time else None
+    imap_enabled = sanitize_imap_enabled(row.get("imap_enabled"))
+    imap_username = normalize_imap_username(row.get("imap_username"))
+    imap_delay = sanitize_imap_delay(row.get("imap_delay_seconds"))
+    imap_status = sanitize_imap_status(row.get("imap_last_status"))
+    imap_checked_at = row.get("imap_last_checked_at")
+    imap_latency = sanitize_imap_latency(row.get("imap_last_latency"))
+    imap_error = str(row.get("imap_last_error") or "")
+    imap_mail_from = str(row.get("imap_last_mail_from") or "")
+    imap_last_sent = row.get("imap_last_sent_at")
+    imap_last_received = row.get("imap_last_received_at")
+    password_raw = row.get("imap_password") or ""
+    if include_secret:
+        imap_password = password_raw
+    else:
+        imap_password = "********" if password_raw else ""
     return {
         "domain": row["domain"],
         "helo": row.get("helo", ""),
@@ -647,6 +890,18 @@ def serialize_config(row: Dict[str, Any]) -> Dict[str, Any]:
         "client_last_cycle_at": row.get("client_last_cycle_at"),
         "client_last_cycle_processed": row.get("client_last_cycle_processed", 0),
         "client_updated_at": row.get("client_updated_at"),
+        "imap_enabled": imap_enabled,
+        "imap_username": imap_username,
+        "imap_password": imap_password,
+        "imap_password_saved": bool(password_raw),
+        "imap_delay_seconds": imap_delay,
+        "imap_last_status": imap_status,
+        "imap_last_checked_at": imap_checked_at,
+        "imap_last_latency": imap_latency,
+        "imap_last_error": imap_error,
+        "imap_last_mail_from": imap_mail_from,
+        "imap_last_sent_at": imap_last_sent,
+        "imap_last_received_at": imap_last_received,
     }
 
 
@@ -758,7 +1013,9 @@ def load_device_summary() -> Dict[str, Any]:
             conn.commit()
     config_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for row in config_rows:
-        config_map.setdefault(row["device_id"], {})[row["domain"]] = serialize_config(to_dict(row))
+        config_map.setdefault(row["device_id"], {})[row["domain"]] = serialize_config(
+            to_dict(row), include_secret=False
+        )
     file_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
     for row in file_rows:
         file_map.setdefault(row["device_id"], {})[row["domain"]] = {
@@ -1116,6 +1373,93 @@ def handle_job_completion(
             prune_device_logs(conn, job_row["device_id"])
 
 
+def cancel_active_sends(
+    conn: sqlite3.Connection,
+    cancel_message: str,
+    device_id: Optional[str] = None,
+    job_types: Optional[Iterable[str]] = None,
+) -> Dict[str, int]:
+    allowed_types = tuple({job_type for job_type in (job_types or ("batch_send", "single_send")) if job_type})
+    if not allowed_types:
+        return {"total_jobs": 0, "cancelled": 0, "cancel_requested": 0}
+    query = """
+        SELECT jobs.*, devices.status AS device_status
+        FROM jobs
+        JOIN devices ON devices.id = jobs.device_id
+        WHERE jobs.job_type IN ({job_type_placeholders})
+          AND jobs.status IN ('pending', 'dispatched', 'running')
+    """
+    job_type_placeholders = ",".join(["?"] * len(allowed_types))
+    query = query.format(job_type_placeholders=job_type_placeholders)
+    params: List[str] = list(allowed_types)
+    if device_id:
+        query = f"{query} AND jobs.device_id=?"
+        params.append(device_id)
+    job_rows = conn.execute(query, tuple(params)).fetchall()
+    cancelled = 0
+    cancel_requested = 0
+    for job_row in job_rows:
+        status = job_row["status"]
+        job_id = job_row["id"]
+        job_device_id = job_row["device_id"]
+        device_status = job_row["device_status"]
+        if status == "pending" or device_status != "connected":
+            updated_row = update_job_status(
+                conn,
+                job_device_id,
+                job_id,
+                "cancelled",
+                cancel_message,
+                None,
+                cancel_message,
+            )
+            if updated_row:
+                pseudo_report = JobReportPayload(
+                    job_id=updated_row["id"],
+                    status="cancelled",
+                    message=cancel_message,
+                    result=None,
+                    error=cancel_message,
+                )
+                handle_job_completion(conn, updated_row, pseudo_report)
+            cancelled += 1
+            continue
+        if job_row["cancel_requested"]:
+            continue
+        conn.execute(
+            "UPDATE jobs SET cancel_requested=1 WHERE id=?",
+            (job_id,),
+        )
+        refreshed_row = conn.execute(
+            "SELECT * FROM jobs WHERE id=?",
+            (job_id,),
+        ).fetchone()
+        record_job_progress(conn, refreshed_row or job_row, "cancel_requested", cancel_message, None)
+        cancel_requested += 1
+    return {
+        "total_jobs": len(job_rows),
+        "cancelled": cancelled,
+        "cancel_requested": cancel_requested,
+    }
+
+
+def handle_auto_stop(
+    conn: sqlite3.Connection,
+    reason: str,
+    *,
+    origin: str = "auto",
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    result = cancel_active_sends(conn, reason)
+    payload = {
+        "reason": reason,
+        "origin": origin,
+        "result": result,
+        "metadata": metadata or {},
+    }
+    return payload
+
+
 class RegisterRequest(BaseModel):
     device_name: str = Field(..., min_length=1)
     device_id: Optional[str] = Field(default=None, description="기존 디바이스 ID (선택)")
@@ -1145,6 +1489,13 @@ class DeviceConfigPayload(BaseModel):
 
 class UpdateConfigRequest(DeviceConfigPayload):
     pass
+
+
+class ImapSettingsPayload(BaseModel):
+    enabled: Optional[bool] = None
+    username: Optional[str] = None
+    password: Optional[str] = None
+    delay_seconds: Optional[int] = None
 
 
 class ActiveDomainRequest(BaseModel):
@@ -1182,12 +1533,29 @@ class JobReportPayload(BaseModel):
     error: Optional[str] = None
 
 
+class ImapReportPayload(BaseModel):
+    domain: str
+    status: str
+    sent_at: Optional[str] = None
+    received_at: Optional[str] = None
+    latency: Optional[float] = None
+    reason: Optional[str] = None
+    job_id: Optional[str] = None
+    send_type: Optional[str] = None
+    mail_from: Optional[str] = None
+    trigger_stop: Optional[bool] = False
+    anchor: Optional[bool] = False
+    checked_at: Optional[str] = None
+    delay_seconds: Optional[int] = None
+
+
 class HeartbeatRequest(BaseModel):
     device_name: str
     active_domain: Optional[str] = "naver"
     domain_states: List[DomainStatePayload] = Field(default_factory=list)
     job_reports: List[JobReportPayload] = Field(default_factory=list)
     public_ip: Optional[str] = Field(default=None, description="현재 공인 IP 주소")
+    imap_reports: List[ImapReportPayload] = Field(default_factory=list)
 
 
 class JobDispatchPayload(BaseModel):
@@ -1439,7 +1807,7 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
 def register_device(payload: RegisterRequest) -> RegisterResponse:
     device = ensure_device(payload.device_id or uuid.uuid4().hex, payload.device_name, payload.public_ip)
     raw_configs = load_device_configs(device["id"])
-    configs = {domain: serialize_config(row) for domain, row in raw_configs.items()}
+    configs = {domain: serialize_config(row, include_secret=True) for domain, row in raw_configs.items()}
     return RegisterResponse(
         device_id=device["id"],
         name=device["name"],
@@ -1503,7 +1871,93 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
         ).fetchone()
     if not config_row:
         raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
-    return serialize_config(to_dict(config_row))
+    return serialize_config(to_dict(config_row), include_secret=False)
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/imap")
+def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettingsPayload) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="네이버 도메인에서만 IMAP 확인을 지원합니다.")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        config = to_dict(config_row)
+        desired_enabled = sanitize_imap_enabled(payload.enabled if payload.enabled is not None else config.get("imap_enabled"))
+        username = normalize_imap_username(payload.username if payload.username is not None else config.get("imap_username"))
+        if payload.password is not None:
+            password = normalize_imap_password(payload.password)
+        else:
+            password = config.get("imap_password", "")
+        delay_value = (
+            sanitize_imap_delay(payload.delay_seconds)
+            if payload.delay_seconds is not None
+            else sanitize_imap_delay(config.get("imap_delay_seconds"))
+        )
+        if desired_enabled and (not username or not password):
+            raise HTTPException(status_code=400, detail="IMAP을 활성화하려면 계정 ID와 비밀번호가 필요합니다.")
+        now = now_ts()
+        if desired_enabled:
+            status_value = ""
+            error_text = ""
+            checked_at = None
+        else:
+            status_value = "disabled"
+            error_text = ""
+            checked_at = now
+        latency_reset = None
+        sent_reset = None
+        received_reset = None
+        mail_from_value = config.get("mail_from") or config.get("imap_last_mail_from") or ""
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET imap_enabled=?,
+                imap_username=?,
+                imap_password=?,
+                imap_delay_seconds=?,
+                imap_last_status=?,
+                imap_last_checked_at=?,
+                imap_last_error=?,
+                imap_last_latency=?,
+                imap_last_sent_at=?,
+                imap_last_received_at=?,
+                imap_last_mail_from=?,
+                updated_at=?
+            WHERE device_id=? AND domain=?
+            """,
+            (
+                1 if desired_enabled else 0,
+                username,
+                password,
+                delay_value,
+                status_value,
+                checked_at,
+                error_text,
+                latency_reset,
+                sent_reset,
+                received_reset,
+                mail_from_value,
+                now,
+                device_id,
+                normalized,
+            ),
+        )
+        conn.commit()
+        refreshed = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+    return {"config": serialize_config(to_dict(refreshed), include_secret=False)}
 
 
 @app.post("/api/devices/{device_id}/domains/{domain}/schedule")
@@ -1562,7 +2016,7 @@ def update_device_schedule(device_id: str, domain: str, payload: DeviceScheduleU
         ).fetchone()
     if not refreshed:
         raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
-    return {"config": serialize_config(to_dict(refreshed))}
+    return {"config": serialize_config(to_dict(refreshed), include_secret=False)}
 
 
 @app.post("/api/devices/{device_id}/active-domain")
@@ -1797,61 +2251,9 @@ def cancel_job(job_id: str, payload: JobCancelRequest) -> Dict[str, Any]:
 def request_global_stop(payload: GlobalStopRequest) -> Dict[str, Any]:
     cancel_message = (payload.reason or "").strip() or "사용자가 전체 중지를 요청했습니다."
     with db_lock, get_conn() as conn:
-        job_rows = conn.execute(
-            """
-            SELECT jobs.*, devices.status AS device_status
-            FROM jobs
-            JOIN devices ON devices.id = jobs.device_id
-            WHERE jobs.job_type IN ('batch_send', 'single_send')
-              AND jobs.status IN ('pending', 'dispatched', 'running')
-            """,
-        ).fetchall()
-        cancelled = 0
-        cancel_requested = 0
-        for job_row in job_rows:
-            status = job_row["status"]
-            job_id = job_row["id"]
-            device_id = job_row["device_id"]
-            device_status = job_row["device_status"]
-            if status == "pending" or device_status != "connected":
-                updated_row = update_job_status(
-                    conn,
-                    device_id,
-                    job_id,
-                    "cancelled",
-                    cancel_message,
-                    None,
-                    cancel_message,
-                )
-                if updated_row:
-                    pseudo_report = JobReportPayload(
-                        job_id=updated_row["id"],
-                        status="cancelled",
-                        message=cancel_message,
-                        result=None,
-                        error=cancel_message,
-                    )
-                    handle_job_completion(conn, updated_row, pseudo_report)
-                cancelled += 1
-                continue
-            if job_row["cancel_requested"]:
-                continue
-            conn.execute(
-                "UPDATE jobs SET cancel_requested=1 WHERE id=?",
-                (job_id,),
-            )
-            refreshed_row = conn.execute(
-                "SELECT * FROM jobs WHERE id=?",
-                (job_id,),
-            ).fetchone()
-            record_job_progress(conn, refreshed_row or job_row, "cancel_requested", cancel_message, None)
-            cancel_requested += 1
+        result = cancel_active_sends(conn, cancel_message)
         conn.commit()
-    return {
-        "total_jobs": len(job_rows),
-        "cancelled": cancelled,
-        "cancel_requested": cancel_requested,
-    }
+    return result
 
 
 def fetch_device_file(conn: sqlite3.Connection, device_id: str, domain: str, file_id: int) -> sqlite3.Row:
@@ -2120,6 +2522,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             """,
             (payload.device_name, normalized_active, now, public_ip, now, device_id),
         )
+        schedule_triggers: List[str] = []
         for state in payload.domain_states:
             domain = normalize_domain(state.domain)
             cycle_completed_value: Optional[int]
@@ -2127,7 +2530,22 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 cycle_completed_value = None
             else:
                 cycle_completed_value = 1 if state.cycle_completed else 0
+            config_row = conn.execute(
+                """
+                SELECT stop_schedule_last_run
+                FROM device_configs
+                WHERE device_id=? AND domain=?
+                """,
+                (device_id, domain),
+            ).fetchone()
+            previous_last_run = (
+                sanitize_stop_schedule_last_run(config_row["stop_schedule_last_run"])
+                if config_row
+                else None
+            )
             state_last_run = sanitize_stop_schedule_last_run(state.stop_schedule_last_run)
+            if state_last_run and state_last_run != previous_last_run:
+                schedule_triggers.append(domain)
             conn.execute(
                 """
                 UPDATE device_configs
@@ -2168,6 +2586,122 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     domain,
                 ),
             )
+        schedule_auto_stop_result: Optional[Dict[str, int]] = None
+        if schedule_triggers:
+            reason_parts = [f"{DOMAIN_LABELS.get(domain, domain)} 예약된 자동 정지 실행" for domain in schedule_triggers]
+            schedule_reason = " / ".join(reason_parts) if reason_parts else "예약된 자동 정지 실행"
+            schedule_auto_stop_result = cancel_active_sends(
+                conn,
+                schedule_reason,
+                device_id=device_id,
+                job_types=("batch_send",),
+            )
+            if schedule_auto_stop_result.get("cancelled") or schedule_auto_stop_result.get("cancel_requested"):
+                print(f"[SCHEDULE] 디바이스 {device_id} 자동 중지: {schedule_reason}")
+        auto_stop_context: Optional[Dict[str, Any]] = None
+        for report in payload.imap_reports or []:
+            try:
+                normalized_domain = normalize_domain(report.domain)
+            except HTTPException:
+                continue
+            if normalized_domain != "naver":
+                continue
+            config_row = conn.execute(
+                "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+                (device_id, normalized_domain),
+            ).fetchone()
+            if not config_row:
+                continue
+            config_snapshot = to_dict(config_row)
+            status_value = sanitize_imap_status(report.status)
+            checked_at_value = report.checked_at or now
+            latency_value = sanitize_imap_latency(report.latency)
+            reason_text = (report.reason or "").strip()
+            sent_at_value = report.sent_at or config_snapshot.get("imap_last_sent_at")
+            received_at_value = report.received_at or config_snapshot.get("imap_last_received_at")
+            anchor_flag = bool(report.anchor)
+            if report.delay_seconds is not None:
+                delay_value = sanitize_imap_delay(
+                    report.delay_seconds,
+                    minimum=0 if anchor_flag else None,
+                )
+            else:
+                delay_value = sanitize_imap_delay(
+                    config_snapshot.get("imap_delay_seconds"),
+                    minimum=0 if anchor_flag else None,
+                )
+            if anchor_flag:
+                delay_storage_value = sanitize_imap_delay(config_snapshot.get("imap_delay_seconds"))
+            else:
+                delay_storage_value = delay_value
+            mail_from_value = (report.mail_from or config_snapshot.get("imap_last_mail_from")
+                               or config_snapshot.get("mail_from") or "")
+            error_value = "" if status_value == "success" else reason_text
+            conn.execute(
+                """
+                UPDATE device_configs
+                SET imap_last_status=?,
+                    imap_last_checked_at=?,
+                    imap_last_latency=?,
+                    imap_last_error=?,
+                    imap_last_mail_from=?,
+                    imap_last_sent_at=?,
+                    imap_last_received_at=?,
+                    imap_delay_seconds=?,
+                    updated_at=?
+                WHERE device_id=? AND domain=?
+                """,
+                (
+                    status_value,
+                    checked_at_value,
+                    latency_value,
+                    error_value,
+                    mail_from_value,
+                    sent_at_value,
+                    received_at_value,
+                    delay_storage_value,
+                    now,
+                    device_id,
+                    normalized_domain,
+                ),
+            )
+            should_stop = bool(report.trigger_stop) and status_value in {"failure", "error"}
+            if should_stop and auto_stop_context is None:
+                detail_parts: List[str] = []
+                if reason_text:
+                    detail_parts.append(reason_text)
+                if latency_value is not None:
+                    detail_parts.append(f"지연 {latency_value:.1f}s")
+                if delay_value:
+                    detail_parts.append(f"허용 {delay_value}s")
+                detail_text = " · ".join(detail_parts) if detail_parts else "허용 지연 초과"
+                stop_reason = f"IMAP 체크 실패 - 디바이스 {device_id} ({report.send_type or 'unknown'})"
+                meta = {
+                    "device_id": device_id,
+                    "domain": normalized_domain,
+                    "send_type": report.send_type or "unknown",
+                    "job_id": report.job_id,
+                    "latency": latency_value,
+                    "allowed_delay": delay_value,
+                    "mail_from": mail_from_value,
+                    "detail": detail_text,
+                    "anchor": anchor_flag,
+                }
+                if detail_text:
+                    stop_reason = f"{stop_reason}: {detail_text}"
+                auto_stop_context = {
+                    "reason": stop_reason,
+                    "metadata": meta,
+                }
+        auto_stop_result: Optional[Dict[str, Any]] = None
+        if auto_stop_context is not None:
+            auto_stop_result = handle_auto_stop(
+                conn,
+                auto_stop_context["reason"],
+                origin="imap",
+                metadata=auto_stop_context.get("metadata"),
+            )
+            print(f"[IMAP] 자동 전체 중지: {auto_stop_context['reason']}")
         dispatched_jobs: List[JobDispatchPayload] = []
         for report in payload.job_reports:
             updated_row = update_job_status(
@@ -2221,7 +2755,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
         conn.commit()
     active_domain = device_row["active_domain"] if device_row else normalized_active
     public_ip_value = device_row["public_ip"] if device_row else public_ip
-    configs = {row["domain"]: serialize_config(to_dict(row)) for row in config_rows}
+    configs = {row["domain"]: serialize_config(to_dict(row), include_secret=True) for row in config_rows}
     job_controls = [
         JobControlPayload(job_id=row["id"], cancel_requested=bool(row["cancel_requested"]))
         for row in control_rows

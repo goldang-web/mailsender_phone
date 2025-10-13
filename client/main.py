@@ -7,6 +7,7 @@ import sys
 import time
 import uuid
 import os
+import threading
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -21,9 +22,10 @@ from urllib3.util.retry import Retry
 from smtp_utils import send_via_telnet
 from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
+from lib.naver_imap import verify_delivery
 
 
-APP_VERSION = "0.0.22"
+APP_VERSION = "0.0.27"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -43,7 +45,12 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "local_versions": {},
     "domain_cycles": {},
     "stop_schedule": {},
+    "imap_settings": {},
 }
+
+IMAP_DELAY_MIN_SECONDS = 5
+IMAP_DELAY_MAX_SECONDS = 600
+IMAP_DEFAULT_DELAY_SECONDS = 20
 
 DOMAIN_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -237,6 +244,27 @@ def now_iso() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime())
 
 
+def sanitize_imap_delay(
+    value: Optional[object],
+    *,
+    default: Optional[int] = None,
+    minimum: Optional[int] = None,
+) -> int:
+    effective_default = default if default is not None else IMAP_DEFAULT_DELAY_SECONDS
+    effective_min = minimum if minimum is not None else IMAP_DELAY_MIN_SECONDS
+    try:
+        delay = int(value) if value is not None else effective_default
+    except (TypeError, ValueError):
+        delay = effective_default
+    return max(effective_min, min(IMAP_DELAY_MAX_SECONDS, delay))
+
+
+def normalize_imap_string(value: Optional[object]) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 @dataclass
 class JobResult:
     job_id: str
@@ -267,6 +295,7 @@ class DispatchOutcome:
     delivery_status: str
     status_line: str
     detail_line: Optional[str]
+    sent_at: datetime
 
 
 class MailClient:
@@ -320,6 +349,16 @@ class MailClient:
                 "server_last_run": server_last_run,
                 "needs_sync": bool(last_run_local and last_run_local != server_last_run),
             }
+        raw_imap_settings = config.get("imap_settings") or {}
+        self.imap_settings: Dict[str, Dict[str, object]] = {}
+        for domain in DOMAINS:
+            entry = raw_imap_settings.get(domain) or {}
+            self.imap_settings[domain] = {
+                "enabled": bool(entry.get("enabled")),
+                "username": normalize_imap_string(entry.get("username")),
+                "password": entry.get("password") or "",
+                "delay_seconds": sanitize_imap_delay(entry.get("delay_seconds")),
+            }
         self._schedule_events: Dict[str, Dict[str, object]] = {}
         self.session = requests.Session()
         self._configure_session()
@@ -351,6 +390,10 @@ class MailClient:
             self.sent_sequences.setdefault(domain, 0)
         self._sequence_dirty: Set[str] = set()
         self._last_sequence_flush: float = 0.0
+        self._imap_executor = ThreadPoolExecutor(max_workers=2)
+        self._imap_lock = threading.Lock()
+        self._imap_reports: Deque[Dict[str, object]] = deque()
+        self._imap_futures: Set[Future] = set()
 
     # ------------------------------------------------------------------ #
     # 설정/환경 관리
@@ -496,8 +539,10 @@ class MailClient:
         snapshot["domain_cycles"] = self.domain_cycles
         snapshot["stop_schedule"] = self._serialize_stop_schedule()
         snapshot["sent_sequences"] = self.sent_sequences
+        snapshot["imap_settings"] = self._serialize_imap_settings()
         save_config(snapshot)
         self.config["sent_sequences"] = self.sent_sequences
+        self.config["imap_settings"] = snapshot["imap_settings"]
         self._sequence_dirty.clear()
         self._last_sequence_flush = time.monotonic()
 
@@ -515,6 +560,172 @@ class MailClient:
             }
         return serialized
 
+    def _serialize_imap_settings(self) -> Dict[str, Dict[str, object]]:
+        serialized: Dict[str, Dict[str, object]] = {}
+        for domain, settings in self.imap_settings.items():
+            serialized[domain] = {
+                "enabled": bool(settings.get("enabled")),
+                "username": normalize_imap_string(settings.get("username")),
+                "password": settings.get("password") or "",
+                "delay_seconds": sanitize_imap_delay(settings.get("delay_seconds")),
+            }
+        return serialized
+
+    def _collect_imap_reports(self) -> List[Dict[str, object]]:
+        with self._imap_lock:
+            if not self._imap_reports:
+                return []
+            reports = list(self._imap_reports)
+            self._imap_reports.clear()
+        return reports
+
+    def _queue_imap_report(self, report: Dict[str, object]) -> None:
+        if not isinstance(report, dict):
+            return
+        with self._imap_lock:
+            while len(self._imap_reports) >= 100:
+                self._imap_reports.popleft()
+            self._imap_reports.append(report)
+
+    def _imap_settings_for_domain(self, domain: str) -> Dict[str, object]:
+        normalized = (domain or "").lower()
+        settings = self.imap_settings.get(normalized)
+        if settings is None:
+            settings = {
+                "enabled": False,
+                "username": "",
+                "password": "",
+                "delay_seconds": IMAP_DEFAULT_DELAY_SECONDS,
+            }
+            self.imap_settings[normalized] = settings
+        return settings
+
+    def _update_imap_settings_from_server(self, domain: str, payload: Dict[str, object]) -> None:
+        if not isinstance(payload, dict):
+            return
+        settings = self._imap_settings_for_domain(domain)
+        settings["enabled"] = bool(payload.get("imap_enabled"))
+        settings["username"] = normalize_imap_string(payload.get("imap_username"))
+        raw_password = payload.get("imap_password")
+        password_saved = bool(payload.get("imap_password_saved"))
+        if raw_password is not None:
+            if raw_password == "********" and password_saved and settings.get("password"):
+                pass
+            else:
+                settings["password"] = raw_password or ""
+        settings["delay_seconds"] = sanitize_imap_delay(payload.get("imap_delay_seconds"))
+        settings["last_status"] = payload.get("imap_last_status")
+        settings["last_checked_at"] = payload.get("imap_last_checked_at")
+        settings["last_latency"] = payload.get("imap_last_latency")
+        settings["last_error"] = payload.get("imap_last_error")
+        settings["last_mail_from"] = payload.get("imap_last_mail_from")
+        settings["last_sent_at"] = payload.get("imap_last_sent_at")
+        settings["last_received_at"] = payload.get("imap_last_received_at")
+
+    def _imap_enabled(self, domain: str) -> bool:
+        settings = self._imap_settings_for_domain(domain)
+        return bool(
+            settings.get("enabled")
+            and normalize_imap_string(settings.get("username"))
+            and (settings.get("password") or "")
+        )
+
+    def _on_imap_future_done(self, future: Future) -> None:
+        with self._imap_lock:
+            self._imap_futures.discard(future)
+
+    def _shutdown_imap_executor(self) -> None:
+        try:
+            self._imap_executor.shutdown(wait=False)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    def _submit_imap_check(
+        self,
+        *,
+        domain: str,
+        job_id: Optional[str],
+        send_type: str,
+        mail_from: str,
+        sent_at: datetime,
+        has_anchor: bool,
+        delay_before_check: Optional[float],
+        allowed_delay: Optional[int],
+        context_reason: Optional[str] = None,
+    ) -> None:
+        normalized = (domain or "").lower()
+        if normalized != "naver":
+            return
+        if not mail_from:
+            return
+        if not isinstance(sent_at, datetime):
+            return
+        settings = self._imap_settings_for_domain(normalized)
+        if not settings.get("enabled"):
+            return
+        username = normalize_imap_string(settings.get("username"))
+        password = settings.get("password") or ""
+        if not username or not password:
+            return
+        base_delay_setting = sanitize_imap_delay(settings.get("delay_seconds"))
+        allowed_delay_value = sanitize_imap_delay(
+            allowed_delay if allowed_delay is not None else base_delay_setting
+        )
+        if delay_before_check is None:
+            delay_seconds = float(base_delay_setting) if has_anchor else 0.0
+        else:
+            try:
+                delay_seconds = float(delay_before_check)
+            except (TypeError, ValueError):
+                delay_seconds = 0.0 if not has_anchor else float(base_delay_setting)
+            delay_seconds = max(0.0, delay_seconds)
+        sent_at_value = sent_at
+
+        def task() -> None:
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
+            checked_at_iso = datetime.utcnow().isoformat() + "Z"
+            try:
+                result = verify_delivery(
+                    email_id=username,
+                    password=password,
+                    mail_from=mail_from,
+                    sent_at=sent_at_value,
+                    allowed_delay=allowed_delay_value,
+                )
+                status = result.get("status", "error")
+                latency = result.get("latency")
+                received_at = result.get("received_at")
+                reason_text = result.get("reason")
+            except Exception as exc:  # pylint: disable=broad-except
+                status = "error"
+                latency = None
+                received_at = None
+                reason_text = f"IMAP 확인 실패: {exc}"
+            if status not in {"success", "failure", "error"}:
+                status = "error"
+            trigger_stop = bool(has_anchor and status in {"failure", "error"})
+            report = {
+                "domain": normalized,
+                "status": status,
+                "latency": latency,
+                "received_at": received_at,
+                "sent_at": sent_at_value.isoformat(),
+                "reason": (reason_text or context_reason or ""),
+                "job_id": job_id,
+                "send_type": send_type,
+                "mail_from": mail_from,
+                "anchor": has_anchor,
+                "trigger_stop": trigger_stop,
+                "checked_at": checked_at_iso,
+                "delay_seconds": allowed_delay_value,
+            }
+            self._queue_imap_report(report)
+
+        future = self._imap_executor.submit(task)
+        with self._imap_lock:
+            self._imap_futures.add(future)
+        future.add_done_callback(self._on_imap_future_done)
     def _maybe_flush_sent_sequences(self, force: bool = False) -> None:
         if not force and not self._sequence_dirty:
             return
@@ -704,6 +915,8 @@ class MailClient:
         return "예약된 자동 정지가 이미 실행되었습니다."
 
     def _schedule_guard_for_job(self, domain: Optional[str], job_id: str, job_type: str) -> Optional["JobResult"]:
+        if job_type != "batch_send":
+            return None
         if not domain:
             return None
         normalized = domain.lower()
@@ -881,6 +1094,9 @@ class MailClient:
         self.active_domain = data.get("active_domain", self.active_domain)
         if data.get("public_ip"):
             self.public_ip = data["public_ip"]
+        configs = data.get("configs")
+        if isinstance(configs, dict):
+            self.apply_configs(configs)
         print(f"[등록] 디바이스 ID: {self.device_id}")
         self.persist()
 
@@ -893,6 +1109,7 @@ class MailClient:
         job_reports: List[JobResult],
     ) -> Dict[str, object]:
         self.refresh_public_ip()
+        imap_reports = self._collect_imap_reports()
         payload = {
             "device_name": self.device_name,
             "active_domain": self.active_domain,
@@ -909,6 +1126,8 @@ class MailClient:
             ],
             "public_ip": self.public_ip,
         }
+        if imap_reports:
+            payload["imap_reports"] = imap_reports
         response = self._request("post", f"/api/devices/{self.device_id}/heartbeat", json=payload)
         response.raise_for_status()
         data = response.json()
@@ -1288,6 +1507,7 @@ class MailClient:
             header_text=config.get("header", ""),
             bcc_emails=bcc_emails,
         )
+        sent_at = datetime.utcnow()
         response_text = response_text or ""
         status = "success" if success else "failed"
         status_line, detail_line = self._smtp_status_and_detail(response_text)
@@ -1365,6 +1585,21 @@ class MailClient:
             print(f"  ↳ BCC 대상 {len(bcc_emails)}건 포함")
         if not success and detail_line and detail_line != status_line:
             print(f"  ↳ {detail_line}")
+        if delivery_status == "sent" and normalized_domain:
+            mail_from_value = config.get("mail_from", "")
+            settings = self._imap_settings_for_domain(normalized_domain)
+            allowed_delay = sanitize_imap_delay(settings.get("delay_seconds"))
+            self._submit_imap_check(
+                domain=normalized_domain,
+                job_id=job_id,
+                send_type="single",
+                mail_from=mail_from_value,
+                sent_at=sent_at,
+                has_anchor=False,
+                delay_before_check=None,
+                allowed_delay=allowed_delay,
+                context_reason=detail_line or status_line,
+            )
         result_payload = {
             "rcpt_to": rcpt_to,
             "domain": domain,
@@ -1707,25 +1942,27 @@ class MailClient:
                     injected_emails = [email for email in (group.injected or []) if email]
                     if injected_emails:
                         bcc_emails.extend(injected_emails)
-                    success, response_text = send_via_telnet(
-                        smtp_host=config.get("smtp_host", ""),
-                        smtp_port=int(config.get("smtp_port") or 25),
-                        helo=config.get("helo", ""),
-                        mail_from=config.get("mail_from", ""),
-                        rcpt_to=rcpt_to,
-                        header_text=config.get("header", ""),
-                        bcc_emails=bcc_emails,
-                    )
-                    response_text = response_text or ""
-                    delivery_status = self._classify_delivery(success, response_text)
-                    status_line, detail_line = self._smtp_status_and_detail(response_text)
-                    return DispatchOutcome(
-                        success=success,
-                        response_text=response_text,
-                        delivery_status=delivery_status,
-                        status_line=status_line,
-                        detail_line=detail_line,
-                    )
+                success, response_text = send_via_telnet(
+                    smtp_host=config.get("smtp_host", ""),
+                    smtp_port=int(config.get("smtp_port") or 25),
+                    helo=config.get("helo", ""),
+                    mail_from=config.get("mail_from", ""),
+                    rcpt_to=rcpt_to,
+                    header_text=config.get("header", ""),
+                    bcc_emails=bcc_emails,
+                )
+                response_text = response_text or ""
+                sent_at = datetime.utcnow()
+                delivery_status = self._classify_delivery(success, response_text)
+                status_line, detail_line = self._smtp_status_and_detail(response_text)
+                return DispatchOutcome(
+                    success=success,
+                    response_text=response_text,
+                    delivery_status=delivery_status,
+                    status_line=status_line,
+                    detail_line=detail_line,
+                    sent_at=sent_at,
+                )
 
                 def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
                     nonlocal dispatched_db_total, anchor_retry_pending
@@ -1888,6 +2125,21 @@ class MailClient:
                             }
                         )
                         print(display_line)
+                        if group.injected and normalized == "naver":
+                            mail_from_value = config.get("mail_from", "")
+                            settings = self._imap_settings_for_domain(normalized)
+                            delay_setting = sanitize_imap_delay(settings.get("delay_seconds"))
+                            self._submit_imap_check(
+                                domain=normalized,
+                                job_id=job_id,
+                                send_type="batch-anchor",
+                                mail_from=mail_from_value,
+                                sent_at=outcome.sent_at,
+                                has_anchor=True,
+                                delay_before_check=None,
+                                allowed_delay=delay_setting,
+                                context_reason=detail_for_log or outcome.status_line,
+                            )
                     else:
                         is_block = outcome.delivery_status == "block"
                         label = "Block" if is_block else "Fail"
@@ -2512,6 +2764,7 @@ class MailClient:
             print("\n[정지] 사용자가 종료했습니다.")
         finally:
             self.persist()
+            self._shutdown_imap_executor()
 
     def apply_configs(self, configs: Dict[str, Dict[str, object]]) -> None:
         if not configs:
@@ -2552,6 +2805,7 @@ class MailClient:
                 state["server_last_run"] = None
             else:
                 state["server_last_run"] = server_last_run
+            self._update_imap_settings_from_server(normalized, payload)
         if changed:
             self.persist()
 
