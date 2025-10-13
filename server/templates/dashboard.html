@@ -978,6 +978,16 @@ button.card-delete-btn:disabled {
 .imap-anchor-meta strong {
   color: var(--color-text);
 }
+
+.imap-actions {
+  margin-top: 10px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.imap-actions button {
+  min-width: 110px;
+}
 button {
   cursor: pointer;
   border: none;
@@ -1449,10 +1459,26 @@ button:not(:disabled):hover {
           </div>
         </label>
         <label class="field">
-          <span>허용 지연 시간 (초)</span>
-          <input type="number" id="imapDelaySeconds" min="5" max="600" required title="발송 후 IMAP으로 도착 여부를 확인할 때 허용할 최대 대기 시간입니다. 알박기 메일도 이 값을 기준으로 확인합니다.">
+          <span>단일 발송 확인 대기 (초)</span>
+          <input type="number" id="imapSingleDelaySeconds" min="0" max="600" required title="단일 발송 성공 후 IMAP 확인을 시작하기 전까지 기다릴 시간을 지정합니다. 0으로 설정하면 즉시 확인합니다.">
         </label>
-        <p class="field-hint">알박기 메일도 동일한 허용 지연을 사용하며, 상황에 따라 대기 시간이 자동 조정됩니다.</p>
+        <label class="field">
+          <span>전체·배치 발송 확인 대기 (초)</span>
+          <input type="number" id="imapBatchDelaySeconds" min="0" max="600" required title="BCC 포함 전체 발송 또는 알박기 점검을 시작하기 전 대기 시간을 지정합니다.">
+        </label>
+        <label class="field">
+          <span>허용 지연 시간 (초)</span>
+          <input type="number" id="imapAllowedLatencySeconds" min="5" max="600" required title="발송 후 IMAP으로 도착 여부를 확인할 때 허용할 최대 지연 시간을 지정합니다.">
+        </label>
+        <label class="field">
+          <span>확인 실패 시 대응</span>
+          <select id="imapFailureAction" title="IMAP 확인이 실패했을 때 추가로 실행할 동작을 선택합니다.">
+            <option value="none">추가 동작 없음</option>
+            <option value="stop_device">해당 디바이스 발송 중지</option>
+            <option value="stop_all">전체 발송 중지</option>
+          </select>
+        </label>
+        <p class="field-hint">대기 시간은 확인을 시작하기 전 지연을, 허용 지연은 발송과 수신 사이의 최대 허용 간격을 의미합니다. 실패 시 대응에 따라 중지 범위가 결정됩니다.</p>
       </form>
     </div>
     <div class="modal-footer">
@@ -1495,9 +1521,13 @@ const GLOBAL_INPUT_IDS = {
   stop_schedule_time: "globalStopScheduleTime",
 };
 
-const IMAP_DEFAULT_DELAY = 20;
-const IMAP_MIN_DELAY = 5;
-const IMAP_MAX_DELAY = 600;
+const IMAP_DEFAULT_ALLOWED_LATENCY = 20;
+const IMAP_ALLOWED_MIN = 5;
+const IMAP_ALLOWED_MAX = 600;
+const IMAP_DEFAULT_SINGLE_DELAY = 20;
+const IMAP_DEFAULT_BATCH_DELAY = 20;
+const IMAP_SINGLE_MIN_DELAY = 0;
+const IMAP_FAILURE_ACTIONS = ["none", "stop_device", "stop_all"];
 
 const state = {
   devices: [],
@@ -2504,6 +2534,32 @@ function latestJobSummary(job) {
   return null;
 }
 
+function applyScheduledSingleSendJob(card, currentDevice, scheduledJob) {
+  const baseDevice = card.__deviceData || currentDevice || {};
+  if (!scheduledJob) {
+    updateSingleSendControls(card, baseDevice);
+    return baseDevice;
+  }
+  const jobs = Array.isArray(baseDevice.jobs) ? [...baseDevice.jobs] : [];
+  const existingIdx = jobs.findIndex((job) => job?.id === scheduledJob.id);
+  const normalizedJob = {
+    ...scheduledJob,
+    job_type: scheduledJob.job_type || "single_send",
+    status: scheduledJob.status || "pending",
+    progress: Array.isArray(scheduledJob.progress) ? scheduledJob.progress : [],
+    cancel_requested: Boolean(scheduledJob.cancel_requested),
+  };
+  if (existingIdx >= 0) {
+    jobs[existingIdx] = { ...jobs[existingIdx], ...normalizedJob };
+  } else {
+    jobs.unshift(normalizedJob);
+  }
+  const updatedDevice = { ...baseDevice, jobs };
+  card.__deviceData = updatedDevice;
+  updateSingleSendControls(card, updatedDevice);
+  return updatedDevice;
+}
+
 function hasActiveBatchJob(device) {
   if (!device?.jobs?.length) {
     return false;
@@ -2512,29 +2568,59 @@ function hasActiveBatchJob(device) {
 }
 
 function updateSingleSendControls(card, device) {
-  const singleBtn = card.querySelector('button[data-action="single"]');
-  if (!singleBtn) {
-    return;
-  }
-  if (!singleBtn.dataset.defaultLabel) {
-    singleBtn.dataset.defaultLabel = singleBtn.textContent;
-  }
   const deviceData = device || card.__deviceData || {};
   const activeDomain = normalizeDeviceDomain(getActiveDomain(card, deviceData.active_domain));
   const job = latestSingleJob(deviceData, activeDomain);
   const isActive = job ? ACTIVE_JOB_STATES.has(job.status) : false;
   card.dataset.currentSingleJobDomain = activeDomain;
-  if (isActive) {
-    card.dataset.currentSingleJobId = job?.id || "";
-    singleBtn.disabled = true;
-    singleBtn.classList.add("is-running");
-    singleBtn.textContent = "단일 발송 중...";
-    return;
+  card.dataset.currentSingleJobId = isActive ? (job?.id || "") : "";
+
+  const singleBtn = card.querySelector('button[data-action="single"]');
+  if (singleBtn) {
+    if (!singleBtn.dataset.defaultLabel) {
+      singleBtn.dataset.defaultLabel = singleBtn.textContent;
+    }
+    if (isActive) {
+      singleBtn.disabled = true;
+      singleBtn.classList.add("is-running");
+      singleBtn.textContent = "단일 발송 중...";
+    } else {
+      singleBtn.classList.remove("is-running");
+      singleBtn.disabled = false;
+      singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
+    }
   }
-  card.dataset.currentSingleJobId = "";
-  singleBtn.classList.remove("is-running");
-  singleBtn.disabled = false;
-  singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
+
+  const imapCheckBtn = card.querySelector('button[data-action="imap-delivery-check"]');
+  if (imapCheckBtn) {
+    if (!imapCheckBtn.dataset.defaultLabel) {
+      imapCheckBtn.dataset.defaultLabel = imapCheckBtn.textContent;
+    }
+    const imapBlock = card.querySelector('[data-role="imapBlock"]');
+    const username = (imapBlock?.dataset?.imapUsername || "").trim();
+    const isNaverDomain = activeDomain === "naver";
+    if (isActive) {
+      imapCheckBtn.disabled = true;
+      imapCheckBtn.classList.add("is-running");
+      imapCheckBtn.textContent = "도착 확인 중...";
+      imapCheckBtn.title = "단일 발송 작업이 완료될 때까지 기다려주세요.";
+    } else {
+      imapCheckBtn.classList.remove("is-running");
+      if (!isNaverDomain) {
+        imapCheckBtn.disabled = true;
+        imapCheckBtn.textContent = "네이버 전용";
+        imapCheckBtn.title = "네이버 도메인을 선택하면 사용할 수 있습니다.";
+      } else if (!username) {
+        imapCheckBtn.disabled = true;
+        imapCheckBtn.textContent = "ID 필요";
+        imapCheckBtn.title = "IMAP 계정 ID를 먼저 설정하세요.";
+      } else {
+        imapCheckBtn.disabled = false;
+        imapCheckBtn.textContent = imapCheckBtn.dataset.defaultLabel || "도착 확인";
+        imapCheckBtn.title = "";
+      }
+    }
+  }
 }
 
 function updateBatchControls(card, device) {
@@ -2752,7 +2838,10 @@ function bestConfig(device, domain) {
     imap_enabled: false,
     imap_username: "",
     imap_password_saved: false,
-    imap_delay_seconds: IMAP_DEFAULT_DELAY,
+    imap_allowed_latency_seconds: IMAP_DEFAULT_ALLOWED_LATENCY,
+    imap_single_delay_seconds: IMAP_DEFAULT_SINGLE_DELAY,
+    imap_batch_delay_seconds: IMAP_DEFAULT_BATCH_DELAY,
+    imap_failure_action: "none",
     imap_last_status: "",
     imap_last_checked_at: null,
     imap_last_latency: null,
@@ -3076,7 +3165,10 @@ function renderImapSection(card, device, domain) {
   block.classList.toggle("hidden", !isNaver);
   if (!isNaver) {
     block.dataset.imapUsername = "";
-    block.dataset.imapDelay = String(IMAP_DEFAULT_DELAY);
+    block.dataset.imapAllowedLatency = String(IMAP_DEFAULT_ALLOWED_LATENCY);
+    block.dataset.imapSingleDelay = String(IMAP_DEFAULT_SINGLE_DELAY);
+    block.dataset.imapBatchDelay = String(IMAP_DEFAULT_BATCH_DELAY);
+    block.dataset.imapFailureAction = "none";
     block.dataset.imapPasswordSaved = "0";
     const anchorMetaEl = block.querySelector('[data-role="imapAnchorMeta"]');
     if (anchorMetaEl) {
@@ -3126,22 +3218,40 @@ function renderImapSection(card, device, domain) {
   statusEl.textContent = statusText;
   statusEl.className = `imap-status ${statusClass}`;
   metaEl.textContent = metaText;
-  const imapDelayValue = clampNumber(
-    config.imap_delay_seconds ?? IMAP_DEFAULT_DELAY,
-    IMAP_MIN_DELAY,
-    IMAP_MAX_DELAY,
-    IMAP_DEFAULT_DELAY,
+  const imapAllowedValue = clampNumber(
+    config.imap_allowed_latency_seconds ?? config.imap_delay_seconds ?? IMAP_DEFAULT_ALLOWED_LATENCY,
+    IMAP_ALLOWED_MIN,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_ALLOWED_LATENCY,
   );
+  const imapSingleDelayValue = clampNumber(
+    config.imap_single_delay_seconds ?? IMAP_DEFAULT_SINGLE_DELAY,
+    IMAP_SINGLE_MIN_DELAY,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_SINGLE_DELAY,
+  );
+  const imapBatchDelayValue = clampNumber(
+    config.imap_batch_delay_seconds ?? IMAP_DEFAULT_BATCH_DELAY,
+    IMAP_SINGLE_MIN_DELAY,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_BATCH_DELAY,
+  );
+  const failureActionValue = IMAP_FAILURE_ACTIONS.includes(config.imap_failure_action)
+    ? config.imap_failure_action
+    : "none";
   if (anchorMetaEl) {
     if (!config.imap_enabled) {
       anchorMetaEl.textContent = "알박기 확인: IMAP 비활성";
     } else {
-      anchorMetaEl.textContent = `알박기 확인: 허용 지연 ${imapDelayValue}초 기준 자동 검사`;
+      anchorMetaEl.textContent = `알박기 확인: 허용 지연 ${imapAllowedValue}초 · 배치 대기 ${imapBatchDelayValue}초`;
     }
     anchorMetaEl.title = "허용 지연 시간으로 단일 발송과 알박기 메일 모두를 확인하며, 내부적으로 필요한 만큼 자동으로 대기합니다.";
   }
   block.dataset.imapUsername = config.imap_username || "";
-  block.dataset.imapDelay = String(imapDelayValue);
+  block.dataset.imapAllowedLatency = String(imapAllowedValue);
+  block.dataset.imapSingleDelay = String(imapSingleDelayValue);
+  block.dataset.imapBatchDelay = String(imapBatchDelayValue);
+  block.dataset.imapFailureAction = failureActionValue;
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
 }
 
@@ -3483,24 +3593,21 @@ function attachCardEvents(card) {
       singleBtn.dataset.defaultLabel = singleBtn.textContent;
     }
 
+    const currentDevice = getDevice();
+    const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
+    const rcpt = card.querySelector('[data-field="rcpt_to"]').value.trim();
+    let jobScheduled = false;
+
     const resetButton = () => {
       singleBtn.disabled = false;
       singleBtn.classList.remove("is-loading", "is-running");
       singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
-      card.dataset.currentSingleJobId = "";
-      if (card.dataset.activeDomain) {
-        card.dataset.currentSingleJobDomain = normalizeDeviceDomain(card.dataset.activeDomain);
-      }
+      updateSingleSendControls(card, card.__deviceData || currentDevice);
     };
 
     singleBtn.disabled = true;
     singleBtn.classList.add("is-loading", "is-running");
     singleBtn.textContent = "단일 발송 중...";
-
-    const currentDevice = getDevice();
-    const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
-    const rcpt = card.querySelector('[data-field="rcpt_to"]').value.trim();
-    let jobScheduled = false;
 
     try {
       try {
@@ -3518,29 +3625,7 @@ function attachCardEvents(card) {
           body: JSON.stringify(payload),
         });
         jobScheduled = true;
-        const scheduledJob = result?.job;
-        if (scheduledJob) {
-          const baseDevice = card.__deviceData || currentDevice || {};
-          const jobs = Array.isArray(baseDevice.jobs) ? [...baseDevice.jobs] : [];
-          const existingIdx = jobs.findIndex((job) => job?.id === scheduledJob.id);
-          const normalizedJob = {
-            ...scheduledJob,
-            job_type: scheduledJob.job_type || "single_send",
-            status: scheduledJob.status || "pending",
-            progress: Array.isArray(scheduledJob.progress) ? scheduledJob.progress : [],
-            cancel_requested: Boolean(scheduledJob.cancel_requested),
-          };
-          if (existingIdx >= 0) {
-            jobs[existingIdx] = { ...jobs[existingIdx], ...normalizedJob };
-          } else {
-            jobs.unshift(normalizedJob);
-          }
-          const updatedDevice = { ...baseDevice, jobs };
-          card.__deviceData = updatedDevice;
-          updateSingleSendControls(card, updatedDevice);
-        } else {
-          updateSingleSendControls(card, card.__deviceData || currentDevice);
-        }
+        applyScheduledSingleSendJob(card, currentDevice, result?.job);
         setNotice(card, "단일 발송 작업을 추가했습니다.");
         try {
           await loadDevices();
@@ -3557,11 +3642,91 @@ function attachCardEvents(card) {
         return;
       }
       singleBtn.classList.remove("is-loading");
-      if (jobScheduled) {
-        updateSingleSendControls(card, card.__deviceData || currentDevice);
+      if (!jobScheduled) {
+        resetButton();
       }
     }
   });
+
+  const imapCheckBtn = card.querySelector('button[data-action="imap-delivery-check"]');
+  if (imapCheckBtn) {
+    imapCheckBtn.addEventListener("click", async () => {
+      if (imapCheckBtn.disabled) {
+        return;
+      }
+      if (!imapCheckBtn.dataset.defaultLabel) {
+        imapCheckBtn.dataset.defaultLabel = imapCheckBtn.textContent;
+      }
+
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      if (domain !== "naver") {
+        setNotice(card, "네이버 도메인에서만 사용할 수 있습니다.", "error");
+        updateSingleSendControls(card, currentDevice);
+        return;
+      }
+
+      const imapBlock = card.querySelector('[data-role="imapBlock"]');
+      const rawUsername = (imapBlock?.dataset?.imapUsername || "").trim();
+      if (!rawUsername) {
+        setNotice(card, "IMAP 설정에서 네이버 계정 ID를 먼저 저장하세요.", "error");
+        updateSingleSendControls(card, currentDevice);
+        return;
+      }
+
+      const rcptTo = rawUsername.includes("@") ? rawUsername : `${rawUsername}@naver.com`;
+      let jobScheduled = false;
+
+      const resetImapButton = () => {
+        imapCheckBtn.disabled = false;
+        imapCheckBtn.classList.remove("is-loading", "is-running");
+        imapCheckBtn.textContent = imapCheckBtn.dataset.defaultLabel || "도착 확인";
+        updateSingleSendControls(card, card.__deviceData || currentDevice);
+      };
+
+      imapCheckBtn.disabled = true;
+      imapCheckBtn.classList.add("is-loading", "is-running");
+      imapCheckBtn.textContent = "확인 요청 중...";
+
+      try {
+        try {
+          await ensureConfigSynced(card, currentDevice, domain);
+        } catch (err) {
+          setNotice(card, err.message || "설정을 저장하지 못했습니다.", "error");
+          resetImapButton();
+          return;
+        }
+
+        const payload = { domain, rcpt_to: rcptTo };
+        try {
+          const result = await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-single`, {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          jobScheduled = true;
+          applyScheduledSingleSendJob(card, currentDevice, result?.job);
+          setNotice(card, `IMAP 계정(${rcptTo})으로 도착 확인 메일을 보냈습니다.`);
+          try {
+            await loadDevices({ silent: true });
+          } catch (refreshErr) {
+            console.error(refreshErr);
+          }
+        } catch (err) {
+          setNotice(card, err.message || "도착 확인 요청에 실패했습니다.", "error");
+          resetImapButton();
+          return;
+        }
+      } finally {
+        if (!imapCheckBtn.isConnected) {
+          return;
+        }
+        imapCheckBtn.classList.remove("is-loading");
+        if (!jobScheduled) {
+          resetImapButton();
+        }
+      }
+    });
+  }
 
   const batchBtn = card.querySelector('button[data-action="batch"]');
   batchBtn.addEventListener("click", async () => {
@@ -3732,12 +3897,12 @@ function buildDeviceCard(device) {
           <span>단일 발송 RCPT TO</span>
           <input type="text" data-field="rcpt_to" placeholder="recipient@example.com">
         </label>
-      <div class="action-buttons">
-        <button data-action="save">설정 저장</button>
-        <button class="ghost" data-action="copy-global">전체 적용</button>
-        <button class="secondary" data-action="single">단일 발송</button>
-        <button data-action="batch">전체 발송</button>
-        <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
+        <div class="action-buttons">
+          <button data-action="save">설정 저장</button>
+          <button class="ghost" data-action="copy-global">전체 적용</button>
+          <button class="secondary" data-action="single">단일 발송</button>
+          <button data-action="batch">전체 발송</button>
+          <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
         </div>
       </div>
     </div>
@@ -3752,6 +3917,9 @@ function buildDeviceCard(device) {
       <div class="imap-status off" data-role="imapStatus">네이버 도메인에서만 사용할 수 있습니다.</div>
       <div class="imap-meta" data-role="imapMeta">네이버 발송 시 도착 여부를 자동으로 확인합니다.</div>
       <div class="imap-anchor-meta" data-role="imapAnchorMeta" title="허용 지연 시간으로 단일 발송과 알박기 메일을 자동 확인합니다.">알박기 확인: 사용 안 함</div>
+      <div class="imap-actions" data-role="imapActions">
+        <button type="button" class="secondary small" data-action="imap-delivery-check">도착 확인</button>
+      </div>
     </div>
     <div class="device-schedule" data-role="deviceSchedule">
       <div class="device-schedule-header">
@@ -4071,7 +4239,10 @@ function openImapModal(card, device, domain, options = {}) {
 
   const usernameInput = document.getElementById("imapUsername");
   const passwordInput = document.getElementById("imapPassword");
-  const delayInput = document.getElementById("imapDelaySeconds");
+  const singleDelayInput = document.getElementById("imapSingleDelaySeconds");
+  const batchDelayInput = document.getElementById("imapBatchDelaySeconds");
+  const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
+  const failureActionSelect = document.getElementById("imapFailureAction");
   const passwordToggle = document.querySelector('[data-action="imap-password-toggle"]');
 
   usernameInput.value = config.imap_username || "";
@@ -4082,9 +4253,35 @@ function openImapModal(card, device, domain, options = {}) {
     passwordToggle.textContent = "보기";
     passwordToggle.setAttribute("aria-pressed", "false");
   }
-  const blockDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapDelay;
-  const delayValue = clampNumber(blockDelay ?? config.imap_delay_seconds ?? IMAP_DEFAULT_DELAY, IMAP_MIN_DELAY, IMAP_MAX_DELAY, IMAP_DEFAULT_DELAY);
-  delayInput.value = delayValue;
+  const blockSingleDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapSingleDelay;
+  const blockBatchDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapBatchDelay;
+  const blockAllowedLatency = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapAllowedLatency;
+  const blockFailureAction = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapFailureAction;
+  const allowedLatencyValue = clampNumber(
+    blockAllowedLatency ?? config.imap_allowed_latency_seconds ?? IMAP_DEFAULT_ALLOWED_LATENCY,
+    IMAP_ALLOWED_MIN,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_ALLOWED_LATENCY,
+  );
+  allowedLatencyInput.value = allowedLatencyValue;
+  const singleDelayValue = clampNumber(
+    blockSingleDelay ?? config.imap_single_delay_seconds ?? IMAP_DEFAULT_SINGLE_DELAY,
+    IMAP_SINGLE_MIN_DELAY,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_SINGLE_DELAY,
+  );
+  singleDelayInput.value = singleDelayValue;
+  const batchDelayValue = clampNumber(
+    blockBatchDelay ?? config.imap_batch_delay_seconds ?? IMAP_DEFAULT_BATCH_DELAY,
+    IMAP_SINGLE_MIN_DELAY,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_BATCH_DELAY,
+  );
+  batchDelayInput.value = batchDelayValue;
+  if (failureActionSelect) {
+    const normalizedFailure = (blockFailureAction || config.imap_failure_action || "").toString().toLowerCase();
+    failureActionSelect.value = IMAP_FAILURE_ACTIONS.includes(normalizedFailure) ? normalizedFailure : "none";
+  }
 
   document.getElementById("imapModal").classList.remove("hidden");
   const saveBtn = document.getElementById("imapSaveBtn");
@@ -4118,9 +4315,34 @@ async function submitImapModal() {
   const username = document.getElementById("imapUsername").value.trim();
   const passwordInput = document.getElementById("imapPassword");
   const rawPassword = passwordInput.value;
-  const delayInput = document.getElementById("imapDelaySeconds");
-  const delayValue = clampNumber(delayInput.value, IMAP_MIN_DELAY, IMAP_MAX_DELAY, IMAP_DEFAULT_DELAY);
-  delayInput.value = delayValue;
+  const singleDelayInput = document.getElementById("imapSingleDelaySeconds");
+  const batchDelayInput = document.getElementById("imapBatchDelaySeconds");
+  const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
+  const failureActionSelect = document.getElementById("imapFailureAction");
+  const allowedLatencyValue = clampNumber(
+    allowedLatencyInput.value,
+    IMAP_ALLOWED_MIN,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_ALLOWED_LATENCY,
+  );
+  allowedLatencyInput.value = allowedLatencyValue;
+  const singleDelayValue = clampNumber(
+    singleDelayInput.value,
+    IMAP_SINGLE_MIN_DELAY,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_SINGLE_DELAY,
+  );
+  singleDelayInput.value = singleDelayValue;
+  const batchDelayValue = clampNumber(
+    batchDelayInput.value,
+    IMAP_SINGLE_MIN_DELAY,
+    IMAP_ALLOWED_MAX,
+    IMAP_DEFAULT_BATCH_DELAY,
+  );
+  batchDelayInput.value = batchDelayValue;
+  const failureActionValue = failureActionSelect && IMAP_FAILURE_ACTIONS.includes(failureActionSelect.value)
+    ? failureActionSelect.value
+    : "none";
 
   if (!username) {
     setImapModalMessage("네이버 계정 ID를 입력하세요.");
@@ -4134,7 +4356,11 @@ async function submitImapModal() {
   const payload = {
     enabled: true,
     username,
-    delay_seconds: delayValue,
+    single_delay_seconds: singleDelayValue,
+    batch_delay_seconds: batchDelayValue,
+    allowed_latency_seconds: allowedLatencyValue,
+    failure_action: failureActionValue,
+    delay_seconds: allowedLatencyValue,
   };
   if (rawPassword) {
     payload.password = rawPassword;

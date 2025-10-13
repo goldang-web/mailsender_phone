@@ -48,7 +48,10 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "imap_enabled": False,
     "imap_username": "",
     "imap_password": "",
-    "imap_delay_seconds": 20,
+    "imap_single_delay_seconds": 20,
+    "imap_batch_delay_seconds": 20,
+    "imap_allowed_latency_seconds": 20,
+    "imap_failure_action": "none",
     "imap_last_status": "",
     "imap_last_checked_at": None,
     "imap_last_latency": None,
@@ -60,6 +63,8 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
 
 IMAP_DELAY_MIN_SECONDS = 5
 IMAP_DELAY_MAX_SECONDS = 600
+IMAP_CHECK_DELAY_MIN_SECONDS = 0
+IMAP_FAILURE_ACTIONS = {"none", "stop_device", "stop_all"}
 
 
 app = FastAPI(title="MailSender Control Server")
@@ -197,7 +202,11 @@ def sanitize_imap_delay(
     default: Optional[int] = None,
     minimum: Optional[int] = None,
 ) -> int:
-    effective_default = default if default is not None else DEFAULT_DOMAIN_CONFIG["imap_delay_seconds"]
+    effective_default = (
+        default
+        if default is not None
+        else DEFAULT_DOMAIN_CONFIG.get("imap_batch_delay_seconds", IMAP_DELAY_MIN_SECONDS)
+    )
     effective_min = minimum if minimum is not None else IMAP_DELAY_MIN_SECONDS
     try:
         delay = int(value)
@@ -205,6 +214,29 @@ def sanitize_imap_delay(
         delay = effective_default
     delay = max(effective_min, min(IMAP_DELAY_MAX_SECONDS, delay))
     return delay
+
+
+def sanitize_imap_allowed_latency(value: Any, *, default: Optional[int] = None) -> int:
+    effective_default = (
+        default
+        if default is not None
+        else DEFAULT_DOMAIN_CONFIG.get("imap_allowed_latency_seconds", IMAP_DELAY_MIN_SECONDS)
+    )
+    try:
+        latency = int(value)
+    except (TypeError, ValueError):
+        latency = effective_default
+    latency = max(IMAP_DELAY_MIN_SECONDS, min(IMAP_DELAY_MAX_SECONDS, latency))
+    return latency
+
+
+def sanitize_imap_failure_action(value: Any) -> str:
+    if not value:
+        return "none"
+    candidate = str(value).strip().lower()
+    if candidate in IMAP_FAILURE_ACTIONS:
+        return candidate
+    return "none"
 
 
 def sanitize_imap_status(value: Any) -> str:
@@ -450,6 +482,10 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_username TEXT DEFAULT '',
                 imap_password TEXT DEFAULT '',
                 imap_delay_seconds INTEGER NOT NULL DEFAULT 20,
+                imap_single_delay_seconds INTEGER NOT NULL DEFAULT 20,
+                imap_batch_delay_seconds INTEGER NOT NULL DEFAULT 20,
+                imap_allowed_latency_seconds INTEGER NOT NULL DEFAULT 20,
+                imap_failure_action TEXT NOT NULL DEFAULT 'none',
                 imap_last_status TEXT DEFAULT '',
                 imap_last_checked_at TEXT,
                 imap_last_latency REAL,
@@ -475,7 +511,10 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 client_cycle_completed, client_cycle_count,
                 client_last_cycle_at, client_last_cycle_processed,
                 stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
-                imap_enabled, imap_username, imap_password, imap_delay_seconds,
+                imap_enabled, imap_username, imap_password, imap_delay_seconds, imap_single_delay_seconds,
+                imap_delay_seconds AS imap_batch_delay_seconds,
+                imap_delay_seconds AS imap_allowed_latency_seconds,
+                'none' AS imap_failure_action,
                 imap_last_status, imap_last_checked_at, imap_last_latency,
                 imap_last_error, imap_last_mail_from, imap_last_sent_at,
                 imap_last_received_at, updated_at
@@ -490,7 +529,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 client_cycle_completed, client_cycle_count,
                 client_last_cycle_at, client_last_cycle_processed,
                 stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
-                imap_enabled, imap_username, imap_password, imap_delay_seconds,
+                imap_enabled, imap_username, imap_password, imap_delay_seconds, imap_delay_seconds AS imap_single_delay_seconds,
                 imap_last_status, imap_last_checked_at, imap_last_latency,
                 imap_last_error, imap_last_mail_from, imap_last_sent_at,
                 imap_last_received_at, updated_at
@@ -695,6 +734,28 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_delay_seconds INTEGER NOT NULL DEFAULT 20"
             )
+        if "imap_single_delay_seconds" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_single_delay_seconds INTEGER NOT NULL DEFAULT 20"
+            )
+        if "imap_batch_delay_seconds" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_batch_delay_seconds INTEGER NOT NULL DEFAULT 20"
+            )
+            conn.execute(
+                "UPDATE device_configs SET imap_batch_delay_seconds=imap_delay_seconds WHERE imap_delay_seconds IS NOT NULL"
+            )
+        if "imap_allowed_latency_seconds" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_allowed_latency_seconds INTEGER NOT NULL DEFAULT 20"
+            )
+            conn.execute(
+                "UPDATE device_configs SET imap_allowed_latency_seconds=imap_delay_seconds WHERE imap_delay_seconds IS NOT NULL"
+            )
+        if "imap_failure_action" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_failure_action TEXT NOT NULL DEFAULT 'none'"
+            )
         if "imap_last_status" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_last_status TEXT DEFAULT ''"
@@ -817,7 +878,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     1 if DEFAULT_DOMAIN_CONFIG["imap_enabled"] else 0,
                     DEFAULT_DOMAIN_CONFIG["imap_username"],
                     DEFAULT_DOMAIN_CONFIG["imap_password"],
-                    DEFAULT_DOMAIN_CONFIG["imap_delay_seconds"],
+                    DEFAULT_DOMAIN_CONFIG["imap_allowed_latency_seconds"],
                     DEFAULT_DOMAIN_CONFIG["imap_last_status"],
                     DEFAULT_DOMAIN_CONFIG["imap_last_checked_at"],
                     DEFAULT_DOMAIN_CONFIG["imap_last_latency"],
@@ -879,7 +940,27 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     schedule_next_run = compute_next_stop_schedule(schedule_time) if schedule_enabled and schedule_time else None
     imap_enabled = sanitize_imap_enabled(row.get("imap_enabled"))
     imap_username = normalize_imap_username(row.get("imap_username"))
-    imap_delay = sanitize_imap_delay(row.get("imap_delay_seconds"))
+    raw_allowed_latency = row.get("imap_allowed_latency_seconds")
+    if raw_allowed_latency is None:
+        raw_allowed_latency = row.get("imap_delay_seconds")
+    imap_allowed_latency = sanitize_imap_allowed_latency(
+        raw_allowed_latency,
+        default=DEFAULT_DOMAIN_CONFIG.get("imap_allowed_latency_seconds"),
+    )
+    raw_batch_delay = row.get("imap_batch_delay_seconds")
+    if raw_batch_delay is None:
+        raw_batch_delay = row.get("imap_delay_seconds")
+    imap_batch_delay = sanitize_imap_delay(
+        raw_batch_delay,
+        default=DEFAULT_DOMAIN_CONFIG.get("imap_batch_delay_seconds"),
+        minimum=IMAP_CHECK_DELAY_MIN_SECONDS,
+    )
+    imap_single_delay = sanitize_imap_delay(
+        row.get("imap_single_delay_seconds"),
+        default=DEFAULT_DOMAIN_CONFIG.get("imap_single_delay_seconds"),
+        minimum=IMAP_CHECK_DELAY_MIN_SECONDS,
+    )
+    imap_failure_action = sanitize_imap_failure_action(row.get("imap_failure_action"))
     imap_status = sanitize_imap_status(row.get("imap_last_status"))
     imap_checked_at = row.get("imap_last_checked_at")
     imap_latency = sanitize_imap_latency(row.get("imap_last_latency"))
@@ -927,7 +1008,11 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "imap_username": imap_username,
         "imap_password": imap_password,
         "imap_password_saved": bool(password_raw),
-        "imap_delay_seconds": imap_delay,
+        "imap_batch_delay_seconds": imap_batch_delay,
+        "imap_single_delay_seconds": imap_single_delay,
+        "imap_allowed_latency_seconds": imap_allowed_latency,
+        "imap_failure_action": imap_failure_action,
+        "imap_delay_seconds": imap_allowed_latency,
         "imap_last_status": imap_status,
         "imap_last_checked_at": imap_checked_at,
         "imap_last_latency": imap_latency,
@@ -1549,7 +1634,11 @@ class ImapSettingsPayload(BaseModel):
     enabled: Optional[bool] = None
     username: Optional[str] = None
     password: Optional[str] = None
-    delay_seconds: Optional[int] = None
+    single_delay_seconds: Optional[int] = None
+    batch_delay_seconds: Optional[int] = None
+    allowed_latency_seconds: Optional[int] = None
+    failure_action: Optional[str] = None
+    delay_seconds: Optional[int] = None  # legacy alias
 
 
 class ImapTestRequest(BaseModel):
@@ -1611,6 +1700,8 @@ class ImapReportPayload(BaseModel):
     anchor: Optional[bool] = False
     checked_at: Optional[str] = None
     delay_seconds: Optional[int] = None
+    allowed_latency_seconds: Optional[int] = None
+    failure_action: Optional[str] = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -1960,10 +2051,43 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
             password = normalize_imap_password(payload.password)
         else:
             password = config.get("imap_password", "")
-        delay_value = (
-            sanitize_imap_delay(payload.delay_seconds)
-            if payload.delay_seconds is not None
-            else sanitize_imap_delay(config.get("imap_delay_seconds"))
+        allowed_latency_source = (
+            payload.allowed_latency_seconds
+            if payload.allowed_latency_seconds is not None
+            else payload.delay_seconds
+        )
+        allowed_latency_value = sanitize_imap_allowed_latency(
+            allowed_latency_source
+            if allowed_latency_source is not None
+            else config.get("imap_allowed_latency_seconds")
+        )
+        batch_delay_source = (
+            payload.batch_delay_seconds
+            if payload.batch_delay_seconds is not None
+            else payload.delay_seconds
+        )
+        batch_delay_value = sanitize_imap_delay(
+            batch_delay_source
+            if batch_delay_source is not None
+            else config.get("imap_batch_delay_seconds"),
+            default=DEFAULT_DOMAIN_CONFIG.get("imap_batch_delay_seconds"),
+            minimum=IMAP_CHECK_DELAY_MIN_SECONDS,
+        )
+        single_delay_value = (
+            sanitize_imap_delay(
+                payload.single_delay_seconds,
+                default=DEFAULT_DOMAIN_CONFIG.get("imap_single_delay_seconds"),
+                minimum=IMAP_CHECK_DELAY_MIN_SECONDS,
+            )
+            if payload.single_delay_seconds is not None
+            else sanitize_imap_delay(
+                config.get("imap_single_delay_seconds"),
+                default=DEFAULT_DOMAIN_CONFIG.get("imap_single_delay_seconds"),
+                minimum=IMAP_CHECK_DELAY_MIN_SECONDS,
+            )
+        )
+        failure_action_value = sanitize_imap_failure_action(
+            payload.failure_action if payload.failure_action is not None else config.get("imap_failure_action")
         )
         if desired_enabled and (not username or not password):
             raise HTTPException(status_code=400, detail="IMAP을 활성화하려면 계정 ID와 비밀번호가 필요합니다.")
@@ -1987,6 +2111,10 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 imap_username=?,
                 imap_password=?,
                 imap_delay_seconds=?,
+                imap_single_delay_seconds=?,
+                imap_batch_delay_seconds=?,
+                imap_allowed_latency_seconds=?,
+                imap_failure_action=?,
                 imap_last_status=?,
                 imap_last_checked_at=?,
                 imap_last_error=?,
@@ -2001,7 +2129,11 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 1 if desired_enabled else 0,
                 username,
                 password,
-                delay_value,
+                allowed_latency_value,
+                single_delay_value,
+                batch_delay_value,
+                allowed_latency_value,
+                failure_action_value,
                 status_value,
                 checked_at,
                 error_text,
@@ -2767,6 +2899,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             if schedule_auto_stop_result.get("cancelled") or schedule_auto_stop_result.get("cancel_requested"):
                 print(f"[SCHEDULE] 디바이스 {device_id} 자동 중지: {schedule_reason}")
         auto_stop_context: Optional[Dict[str, Any]] = None
+        device_stop_context: Optional[Dict[str, Any]] = None
         for report in payload.imap_reports or []:
             try:
                 normalized_domain = normalize_domain(report.domain)
@@ -2788,20 +2921,24 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             sent_at_value = report.sent_at or config_snapshot.get("imap_last_sent_at")
             received_at_value = report.received_at or config_snapshot.get("imap_last_received_at")
             anchor_flag = bool(report.anchor)
-            if report.delay_seconds is not None:
-                delay_value = sanitize_imap_delay(
-                    report.delay_seconds,
-                    minimum=0 if anchor_flag else None,
-                )
-            else:
-                delay_value = sanitize_imap_delay(
-                    config_snapshot.get("imap_delay_seconds"),
-                    minimum=0 if anchor_flag else None,
-                )
+            raw_allowed_latency = (
+                getattr(report, "allowed_latency_seconds", None)
+                if hasattr(report, "allowed_latency_seconds")
+                else None
+            )
+            if raw_allowed_latency is None:
+                raw_allowed_latency = report.delay_seconds
+            allowed_latency_value = sanitize_imap_allowed_latency(
+                raw_allowed_latency,
+                default=config_snapshot.get("imap_allowed_latency_seconds"),
+            )
             if anchor_flag:
-                delay_storage_value = sanitize_imap_delay(config_snapshot.get("imap_delay_seconds"))
+                allowed_storage_value = sanitize_imap_allowed_latency(
+                    config_snapshot.get("imap_allowed_latency_seconds"),
+                    default=allowed_latency_value,
+                )
             else:
-                delay_storage_value = delay_value
+                allowed_storage_value = allowed_latency_value
             mail_from_value = (report.mail_from or config_snapshot.get("imap_last_mail_from")
                                or config_snapshot.get("mail_from") or "")
             error_value = "" if status_value == "success" else reason_text
@@ -2816,6 +2953,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     imap_last_sent_at=?,
                     imap_last_received_at=?,
                     imap_delay_seconds=?,
+                    imap_allowed_latency_seconds=?,
                     updated_at=?
                 WHERE device_id=? AND domain=?
                 """,
@@ -2827,21 +2965,27 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     mail_from_value,
                     sent_at_value,
                     received_at_value,
-                    delay_storage_value,
+                    allowed_storage_value,
+                    allowed_storage_value,
                     now,
                     device_id,
                     normalized_domain,
                 ),
             )
-            should_stop = bool(report.trigger_stop) and status_value in {"failure", "error"}
-            if should_stop and auto_stop_context is None:
+            failure_action = sanitize_imap_failure_action(config_snapshot.get("imap_failure_action"))
+            should_stop = (
+                bool(report.trigger_stop)
+                and status_value in {"failure", "error"}
+                and failure_action != "none"
+            )
+            if should_stop:
                 detail_parts: List[str] = []
                 if reason_text:
                     detail_parts.append(reason_text)
                 if latency_value is not None:
                     detail_parts.append(f"지연 {latency_value:.1f}s")
-                if delay_value:
-                    detail_parts.append(f"허용 {delay_value}s")
+                if allowed_latency_value:
+                    detail_parts.append(f"허용 {allowed_latency_value}s")
                 detail_text = " · ".join(detail_parts) if detail_parts else "허용 지연 초과"
                 stop_reason = f"IMAP 체크 실패 - 디바이스 {device_id} ({report.send_type or 'unknown'})"
                 meta = {
@@ -2850,17 +2994,32 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     "send_type": report.send_type or "unknown",
                     "job_id": report.job_id,
                     "latency": latency_value,
-                    "allowed_delay": delay_value,
+                    "allowed_latency": allowed_latency_value,
                     "mail_from": mail_from_value,
                     "detail": detail_text,
                     "anchor": anchor_flag,
+                    "failure_action": failure_action,
                 }
                 if detail_text:
                     stop_reason = f"{stop_reason}: {detail_text}"
-                auto_stop_context = {
-                    "reason": stop_reason,
-                    "metadata": meta,
-                }
+                if failure_action == "stop_device" and device_stop_context is None:
+                    device_stop_context = {
+                        "reason": stop_reason,
+                        "metadata": meta,
+                    }
+                elif failure_action == "stop_all" and auto_stop_context is None:
+                    auto_stop_context = {
+                        "reason": stop_reason,
+                        "metadata": meta,
+                    }
+        device_stop_result: Optional[Dict[str, Any]] = None
+        if device_stop_context is not None:
+            device_stop_result = cancel_active_sends(
+                conn,
+                device_stop_context["reason"],
+                device_id=device_id,
+            )
+            print(f"[IMAP] 디바이스 중지: {device_stop_context['reason']}")
         auto_stop_result: Optional[Dict[str, Any]] = None
         if auto_stop_context is not None:
             auto_stop_result = handle_auto_stop(

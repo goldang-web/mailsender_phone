@@ -25,7 +25,7 @@ from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 from lib.naver_imap import probe_imap_connection, verify_delivery
 
 
-APP_VERSION = "0.0.18"
+APP_VERSION = "0.0.29"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -48,9 +48,11 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "imap_settings": {},
 }
 
-IMAP_DELAY_MIN_SECONDS = 5
-IMAP_DELAY_MAX_SECONDS = 600
-IMAP_DEFAULT_DELAY_SECONDS = 20
+IMAP_ALLOWED_LATENCY_MIN_SECONDS = 5
+IMAP_ALLOWED_LATENCY_MAX_SECONDS = 600
+IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS = 20
+IMAP_DEFAULT_SINGLE_DELAY_SECONDS = 20
+IMAP_DEFAULT_BATCH_DELAY_SECONDS = 20
 
 DOMAIN_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -250,13 +252,35 @@ def sanitize_imap_delay(
     default: Optional[int] = None,
     minimum: Optional[int] = None,
 ) -> int:
-    effective_default = default if default is not None else IMAP_DEFAULT_DELAY_SECONDS
-    effective_min = minimum if minimum is not None else IMAP_DELAY_MIN_SECONDS
+    effective_default = default if default is not None else IMAP_DEFAULT_BATCH_DELAY_SECONDS
+    effective_min = minimum if minimum is not None else 0
     try:
         delay = int(value) if value is not None else effective_default
     except (TypeError, ValueError):
         delay = effective_default
-    return max(effective_min, min(IMAP_DELAY_MAX_SECONDS, delay))
+    return max(effective_min, min(IMAP_ALLOWED_LATENCY_MAX_SECONDS, delay))
+
+
+def sanitize_imap_allowed_latency(
+    value: Optional[object],
+    *,
+    default: Optional[int] = None,
+) -> int:
+    effective_default = default if default is not None else IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS
+    try:
+        latency = int(value) if value is not None else effective_default
+    except (TypeError, ValueError):
+        latency = effective_default
+    return max(IMAP_ALLOWED_LATENCY_MIN_SECONDS, min(IMAP_ALLOWED_LATENCY_MAX_SECONDS, latency))
+
+
+def sanitize_imap_failure_action(value: Optional[object]) -> str:
+    if value is None:
+        return "none"
+    candidate = str(value).strip().lower()
+    if candidate in {"none", "stop_device", "stop_all"}:
+        return candidate
+    return "none"
 
 
 def normalize_imap_string(value: Optional[object]) -> str:
@@ -353,11 +377,30 @@ class MailClient:
         self.imap_settings: Dict[str, Dict[str, object]] = {}
         for domain in DOMAINS:
             entry = raw_imap_settings.get(domain) or {}
+            legacy_delay = sanitize_imap_delay(entry.get("delay_seconds"))
+            allowed_latency = sanitize_imap_allowed_latency(
+                entry.get("allowed_latency_seconds"),
+                default=legacy_delay if legacy_delay else IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
+            )
+            single_delay = sanitize_imap_delay(
+                entry.get("single_delay_seconds"),
+                default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                minimum=0,
+            )
+            batch_delay = sanitize_imap_delay(
+                entry.get("batch_delay_seconds"),
+                default=legacy_delay if legacy_delay else IMAP_DEFAULT_BATCH_DELAY_SECONDS,
+                minimum=0,
+            )
             self.imap_settings[domain] = {
                 "enabled": bool(entry.get("enabled")),
                 "username": normalize_imap_string(entry.get("username")),
                 "password": entry.get("password") or "",
-                "delay_seconds": sanitize_imap_delay(entry.get("delay_seconds")),
+                "single_delay_seconds": single_delay,
+                "batch_delay_seconds": batch_delay,
+                "allowed_latency_seconds": allowed_latency,
+                "failure_action": sanitize_imap_failure_action(entry.get("failure_action")),
+                "delay_seconds": legacy_delay,
             }
         self._schedule_events: Dict[str, Dict[str, object]] = {}
         self.session = requests.Session()
@@ -567,6 +610,21 @@ class MailClient:
                 "enabled": bool(settings.get("enabled")),
                 "username": normalize_imap_string(settings.get("username")),
                 "password": settings.get("password") or "",
+                "single_delay_seconds": sanitize_imap_delay(
+                    settings.get("single_delay_seconds"),
+                    default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                    minimum=0,
+                ),
+                "batch_delay_seconds": sanitize_imap_delay(
+                    settings.get("batch_delay_seconds"),
+                    default=IMAP_DEFAULT_BATCH_DELAY_SECONDS,
+                    minimum=0,
+                ),
+                "allowed_latency_seconds": sanitize_imap_allowed_latency(
+                    settings.get("allowed_latency_seconds"),
+                    default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
+                ),
+                "failure_action": sanitize_imap_failure_action(settings.get("failure_action")),
                 "delay_seconds": sanitize_imap_delay(settings.get("delay_seconds")),
             }
         return serialized
@@ -595,7 +653,11 @@ class MailClient:
                 "enabled": False,
                 "username": "",
                 "password": "",
-                "delay_seconds": IMAP_DEFAULT_DELAY_SECONDS,
+                "single_delay_seconds": IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                "batch_delay_seconds": IMAP_DEFAULT_BATCH_DELAY_SECONDS,
+                "allowed_latency_seconds": IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
+                "failure_action": "none",
+                "delay_seconds": IMAP_DEFAULT_BATCH_DELAY_SECONDS,
             }
             self.imap_settings[normalized] = settings
         return settings
@@ -613,7 +675,26 @@ class MailClient:
                 pass
             else:
                 settings["password"] = raw_password or ""
-        settings["delay_seconds"] = sanitize_imap_delay(payload.get("imap_delay_seconds"))
+        settings["delay_seconds"] = sanitize_imap_delay(
+            payload.get("imap_batch_delay_seconds"),
+            default=IMAP_DEFAULT_BATCH_DELAY_SECONDS,
+            minimum=0,
+        )
+        settings["single_delay_seconds"] = sanitize_imap_delay(
+            payload.get("imap_single_delay_seconds"),
+            default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+            minimum=0,
+        )
+        settings["batch_delay_seconds"] = sanitize_imap_delay(
+            payload.get("imap_batch_delay_seconds"),
+            default=settings.get("delay_seconds"),
+            minimum=0,
+        )
+        settings["allowed_latency_seconds"] = sanitize_imap_allowed_latency(
+            payload.get("imap_allowed_latency_seconds"),
+            default=payload.get("imap_delay_seconds"),
+        )
+        settings["failure_action"] = sanitize_imap_failure_action(payload.get("imap_failure_action"))
         settings["last_status"] = payload.get("imap_last_status")
         settings["last_checked_at"] = payload.get("imap_last_checked_at")
         settings["last_latency"] = payload.get("imap_last_latency")
@@ -667,19 +748,33 @@ class MailClient:
         password = settings.get("password") or ""
         if not username or not password:
             return
-        base_delay_setting = sanitize_imap_delay(settings.get("delay_seconds"))
-        allowed_delay_value = sanitize_imap_delay(
-            allowed_delay if allowed_delay is not None else base_delay_setting
+        allowed_setting = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
+        allowed_delay_value = sanitize_imap_allowed_latency(
+            allowed_delay if allowed_delay is not None else allowed_setting,
+            default=allowed_setting,
+        )
+        single_delay_setting = sanitize_imap_delay(
+            settings.get("single_delay_seconds"),
+            default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+            minimum=0,
+        )
+        batch_delay_setting = sanitize_imap_delay(
+            settings.get("batch_delay_seconds"),
+            default=IMAP_DEFAULT_BATCH_DELAY_SECONDS,
+            minimum=0,
         )
         if delay_before_check is None:
-            delay_seconds = float(base_delay_setting) if has_anchor else 0.0
+            use_single = send_type == "single" and not has_anchor
+            delay_seconds = float(single_delay_setting if use_single else batch_delay_setting)
         else:
             try:
                 delay_seconds = float(delay_before_check)
             except (TypeError, ValueError):
-                delay_seconds = 0.0 if not has_anchor else float(base_delay_setting)
+                use_single = send_type == "single" and not has_anchor
+                delay_seconds = float(single_delay_setting if use_single else batch_delay_setting)
             delay_seconds = max(0.0, delay_seconds)
         sent_at_value = sent_at
+        failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
 
         def task() -> None:
             if delay_seconds > 0:
@@ -704,7 +799,10 @@ class MailClient:
                 reason_text = f"IMAP 확인 실패: {exc}"
             if status not in {"success", "failure", "error"}:
                 status = "error"
-            trigger_stop = bool(has_anchor and status in {"failure", "error"})
+            trigger_stop = bool(
+                failure_action_value in {"stop_device", "stop_all"}
+                and status in {"failure", "error"}
+            )
             report = {
                 "domain": normalized,
                 "status": status,
@@ -719,6 +817,8 @@ class MailClient:
                 "trigger_stop": trigger_stop,
                 "checked_at": checked_at_iso,
                 "delay_seconds": allowed_delay_value,
+                "allowed_latency_seconds": allowed_delay_value,
+                "failure_action": failure_action_value,
             }
             self._queue_imap_report(report)
 
@@ -1590,7 +1690,13 @@ class MailClient:
         if delivery_status == "sent" and normalized_domain:
             mail_from_value = config.get("mail_from", "")
             settings = self._imap_settings_for_domain(normalized_domain)
-            allowed_delay = sanitize_imap_delay(settings.get("delay_seconds"))
+            allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
+            single_delay = sanitize_imap_delay(
+                settings.get("single_delay_seconds"),
+                default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                minimum=0,
+            )
+            # 단일 발송 확인은 설정한 대기 시간(single_delay) 뒤에 시작하고, 허용 지연은 최대 판정 시간을 의미합니다.
             self._submit_imap_check(
                 domain=normalized_domain,
                 job_id=job_id,
@@ -1598,8 +1704,8 @@ class MailClient:
                 mail_from=mail_from_value,
                 sent_at=sent_at,
                 has_anchor=False,
-                delay_before_check=None,
-                allowed_delay=allowed_delay,
+                delay_before_check=single_delay,
+                allowed_delay=allowed_latency,
                 context_reason=detail_line or status_line,
             )
         result_payload = {
@@ -2130,7 +2236,12 @@ class MailClient:
                         if group.injected and normalized == "naver":
                             mail_from_value = config.get("mail_from", "")
                             settings = self._imap_settings_for_domain(normalized)
-                            delay_setting = sanitize_imap_delay(settings.get("delay_seconds"))
+                            allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
+                            batch_delay = sanitize_imap_delay(
+                                settings.get("batch_delay_seconds"),
+                                default=IMAP_DEFAULT_BATCH_DELAY_SECONDS,
+                                minimum=0,
+                            )
                             self._submit_imap_check(
                                 domain=normalized,
                                 job_id=job_id,
@@ -2138,8 +2249,8 @@ class MailClient:
                                 mail_from=mail_from_value,
                                 sent_at=outcome.sent_at,
                                 has_anchor=True,
-                                delay_before_check=None,
-                                allowed_delay=delay_setting,
+                                delay_before_check=batch_delay,
+                                allowed_delay=allowed_latency,
                                 context_reason=detail_for_log or outcome.status_line,
                             )
                     else:

@@ -270,7 +270,7 @@ def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_m
         allowed = int(allowed_delay)
     except (TypeError, ValueError):
         allowed = 20
-    allowed = max(0, allowed)
+    allowed = max(0, min(600, allowed))
     max_messages = max(5, min(50, int(max_messages or 15)))
     normalized_from = mail_from.strip().lower()
     mail = None
@@ -285,6 +285,7 @@ def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_m
                 "latency": None,
                 "received_at": None,
                 "reason": "메일 검색에 실패했습니다.",
+                "allowed_latency": allowed,
             }
         mail_ids = messages[0].split()
         if not mail_ids:
@@ -293,6 +294,7 @@ def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_m
                 "latency": None,
                 "received_at": None,
                 "reason": "스팸메일함이 비어 있습니다.",
+                "allowed_latency": allowed,
             }
         candidates = list(reversed(mail_ids[-max_messages:]))
         for num in candidates:
@@ -326,18 +328,21 @@ def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_m
                     "latency": latency,
                     "received_at": received_at.isoformat(),
                     "reason": None,
+                    "allowed_latency": allowed,
                 }
             return {
                 "status": "failure",
                 "latency": latency,
                 "received_at": received_at.isoformat(),
                 "reason": f"허용 지연 {allowed}s 초과",
+                "allowed_latency": allowed,
             }
         return {
             "status": "failure",
             "latency": None,
             "received_at": None,
             "reason": "발신자 메일을 찾지 못했습니다.",
+            "allowed_latency": allowed,
         }
     finally:
         try:
