@@ -386,13 +386,6 @@ def verify_delivery(
 
     if not email_id or not password:
         raise ValueError("IMAP 계정 정보가 필요합니다.")
-    if not mail_from:
-        return {
-            "status": "error",
-            "latency": None,
-            "received_at": None,
-            "reason": "MAIL FROM이 설정되지 않았습니다.",
-        }
     if isinstance(sent_at, datetime):
         sent_dt = sent_at
     else:
@@ -413,25 +406,18 @@ def verify_delivery(
         search_limit = int(max_messages or 15)
     except (TypeError, ValueError):
         search_limit = 15
-    search_limit = max(5, min(50, search_limit))
+    search_limit = max(1, min(50, search_limit))
     try:
         delay_before_check = float(check_delay) if check_delay is not None else 0.0
     except (TypeError, ValueError):
         delay_before_check = 0.0
     delay_before_check = max(0.0, min(600.0, delay_before_check))
-    normalized_from = mail_from.strip().lower()
+
+    def _fmt_local(dt: datetime) -> str:
+        return dt.astimezone().strftime("%H:%M:%S%z")
+
     mail = None
-    observed_senders = []
     try:
-        print(
-            "[IMAP 도착확인][디버그] 비교 시작 · "
-            f"계정 {email_id} · "
-            f"MAIL FROM {normalized_from} · "
-            f"허용 {allowed}s · "
-            f"검색 {search_limit}건 · "
-            f"대기 {delay_before_check:.1f}s",
-            flush=True,
-        )
         mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=30)
         mail.login(email_id, password)
         mail.select("Junk", readonly=True)
@@ -443,16 +429,26 @@ def verify_delivery(
                 "received_at": None,
                 "reason": "메일 검색에 실패했습니다.",
                 "allowed_latency": allowed,
+                "sent_at": sent_dt.isoformat(),
+                "delay_before_check": delay_before_check,
             }
         mail_ids = messages[0].split()
         if not mail_ids:
+            print("[IMAP 확인] 발송시각:", _fmt_local(sent_dt), flush=True)
+            print("[IMAP 확인] 수신시각: -", flush=True)
+            print("[IMAP 확인] 지연: 측정 불가", flush=True)
+            print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
+            print("[IMAP 확인] 판정: 메일함이 비어 있습니다.", flush=True)
             return {
                 "status": "failure",
                 "latency": None,
                 "received_at": None,
-                "reason": "스팸메일함이 비어 있습니다.",
+                "reason": "메일함이 비어 있습니다.",
                 "allowed_latency": allowed,
+                "sent_at": sent_dt.isoformat(),
+                "delay_before_check": delay_before_check,
             }
+
         candidates = list(reversed(mail_ids[-search_limit:]))
         for num in candidates:
             status, data = mail.fetch(num, "(RFC822.HEADER)")
@@ -462,26 +458,6 @@ def verify_delivery(
             if not header_bytes:
                 continue
             msg = email.message_from_bytes(header_bytes)
-            header_addresses = {}
-            for header_name in ("Return-Path", "From", "Sender", "Reply-To", "X-Original-From"):
-                for header_value in msg.get_all(header_name, []):
-                    _, addr = parseaddr(header_value)
-                    if not addr:
-                        continue
-                    candidate = addr.strip().lower()
-                    if not candidate:
-                        continue
-                    header_addresses.setdefault(candidate, header_name)
-                    if len(observed_senders) < 10:
-                        observed_senders.append(candidate)
-            print(
-                "[IMAP 도착확인][디버그] 헤더 후보 · "
-                f"SEQ {num.decode() if isinstance(num, bytes) else num} · "
-                f"{', '.join(f'{addr}({hdr})' for addr, hdr in header_addresses.items()) or '없음'}",
-                flush=True,
-            )
-            if normalized_from not in header_addresses:
-                continue
             date_header = msg.get("Date")
             if not date_header:
                 continue
@@ -493,62 +469,52 @@ def verify_delivery(
                 received_at = received_at.replace(tzinfo=timezone.utc)
             else:
                 received_at = received_at.astimezone(timezone.utc)
-            latency_seconds = (received_at - sent_dt).total_seconds()
-            if latency_seconds < 0:
-                if abs(latency_seconds) <= 300:
-                    latency_seconds = 0.0
-                else:
-                    print(
-                        "[IMAP 도착확인][디버그] 수신 시각이 발송 이전 · 5분 초과 무시 · "
-                        f"SEQ {num}",
-                        flush=True,
-                    )
-                    continue
-            latency = max(0.0, latency_seconds)
-            matched_header = header_addresses.get(normalized_from)
-            message_id = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
-            payload_common = {
+            latency_raw = (received_at - sent_dt).total_seconds()
+            print(f"[IMAP 확인] 발송시각: {_fmt_local(sent_dt)}", flush=True)
+            print(f"[IMAP 확인] 수신시각: {_fmt_local(received_at)}", flush=True)
+            print(f"[IMAP 확인] 지연: {latency_raw:.1f}초", flush=True)
+            print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
+            if latency_raw < 0:
+                print("[IMAP 확인] 판정: 발송 이후 메일이 아직 없습니다.", flush=True)
+                return {
+                    "status": "failure",
+                    "latency": None,
+                    "received_at": received_at.isoformat(),
+                    "reason": "발송 이후 메일이 아직 없습니다.",
+                    "allowed_latency": allowed,
+                    "sent_at": sent_dt.isoformat(),
+                    "delay_before_check": delay_before_check,
+                }
+            latency = max(0.0, latency_raw)
+            result_payload = {
                 "latency": latency,
                 "received_at": received_at.isoformat(),
                 "allowed_latency": allowed,
-                "matched_header": matched_header,
-                "message_id": message_id or None,
-                "candidate_addresses": sorted(set(observed_senders or [normalized_from])),
                 "delay_before_check": delay_before_check,
+                "sent_at": sent_dt.isoformat(),
             }
             if latency <= allowed:
-                print(
-                    "[IMAP 도착확인][디버그] 성공 판정 · "
-                    f"SEQ {num} · 지연 {latency:.1f}s · 허용 {allowed}s",
-                    flush=True,
-                )
-                return {
-                    "status": "success",
-                    "reason": None,
-                    **payload_common,
-                }
-            print(
-                "[IMAP 도착확인][디버그] 허용 초과 · "
-                f"SEQ {num} · 지연 {latency:.1f}s · 허용 {allowed}s",
-                flush=True,
-            )
-            return {
-                "status": "failure",
-                "reason": f"허용 지연 {allowed}s 초과",
-                **payload_common,
-            }
-        print(
-            "[IMAP 도착확인][디버그] 대상 MAIL FROM 미발견 · "
-            f"확인 후보 {len(observed_senders)}개",
-            flush=True,
-        )
+                print("[IMAP 확인] 판정: 성공", flush=True)
+                result_payload["reason"] = None
+                result_payload["status"] = "success"
+                return result_payload
+            print("[IMAP 확인] 판정: 허용 지연 초과", flush=True)
+            result_payload["reason"] = f"허용 지연 {allowed}s 초과"
+            result_payload["status"] = "failure"
+            return result_payload
+
+        print(f"[IMAP 확인] 발송시각: {_fmt_local(sent_dt)}", flush=True)
+        print("[IMAP 확인] 수신시각: -", flush=True)
+        print("[IMAP 확인] 지연: 측정 불가", flush=True)
+        print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
+        print("[IMAP 확인] 판정: 유효한 메일을 찾지 못했습니다.", flush=True)
         return {
             "status": "failure",
             "latency": None,
             "received_at": None,
-            "reason": "발신자 메일을 찾지 못했습니다.",
+            "reason": "유효한 메일을 찾지 못했습니다.",
             "allowed_latency": allowed,
-            "candidate_addresses": sorted(set(observed_senders)),
+            "sent_at": sent_dt.isoformat(),
             "delay_before_check": delay_before_check,
         }
     finally:
