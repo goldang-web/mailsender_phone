@@ -1348,7 +1348,7 @@ class MailClient:
         domain = job.get("domain")
         payload = job.get("payload") or {}
         job_id = str(job.get("job_id"))
-        print(f"[작업 수신] {job_type} (ID: {job_id})")
+        print(f"[작업 수신] {job_type} (ID: {job_id})", flush=True)
         if job_type == "inject_file":
             return self.handle_inject(domain, payload, job_id)
         if job_type == "purge_domain":
@@ -2385,8 +2385,8 @@ class MailClient:
             username = normalize_imap_string(settings.get("username"))
         if not username:
             message = "IMAP 계정 ID가 설정되지 않았습니다."
-            print(f"[IMAP 테스트] {message}")
-            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        print(f"[IMAP 테스트] {message}", flush=True)
+        return JobResult(job_id=job_id, status="failed", message=message, error=message)
         use_saved_password = bool(payload.get("use_saved_password"))
         password = payload.get("password") or ""
         used_saved_password = False
@@ -2395,10 +2395,10 @@ class MailClient:
             used_saved_password = True
         if not password:
             message = "IMAP 비밀번호를 확인할 수 없습니다."
-            print(f"[IMAP 테스트] {message}")
-            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        print(f"[IMAP 테스트] {message}", flush=True)
+        return JobResult(job_id=job_id, status="failed", message=message, error=message)
         folder = str(payload.get("folder") or "Junk").strip() or "Junk"
-        print(f"[IMAP 테스트] 계정 {username} · 폴더 {folder}")
+        print(f"[IMAP 테스트] 계정 {username} · 폴더 {folder}", flush=True)
         diagnostics = probe_imap_connection(username, password, folder=folder)
         success = bool(diagnostics.get("success"))
         latency = diagnostics.get("latency")
@@ -2417,10 +2417,10 @@ class MailClient:
         if success:
             latency_text = f"{latency:.1f}s" if isinstance(latency, (int, float)) else "-"
             message = f"IMAP 연결 성공 · {folder} 접근 · 지연 {latency_text}"
-            print(f"[IMAP 테스트] 성공 - {message}")
+            print(f"[IMAP 테스트] 성공 - {message}", flush=True)
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
         error_message = reason or "IMAP 연결 실패"
-        print(f"[IMAP 테스트] 실패 - {error_message}")
+        print(f"[IMAP 테스트] 실패 - {error_message}", flush=True)
         return JobResult(
             job_id=job_id,
             status="failed",
