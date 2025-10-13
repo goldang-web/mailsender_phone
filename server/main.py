@@ -3174,12 +3174,15 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 and failure_action != "none"
             )
             if should_stop:
+                delay_seconds_value = getattr(report, "delay_seconds", None)
                 detail_parts: List[str] = []
                 if reason_text:
                     detail_parts.append(reason_text)
+                if delay_seconds_value is not None:
+                    detail_parts.append(f"체크대기 {delay_seconds_value}s")
                 if latency_value is not None:
                     detail_parts.append(f"지연 {latency_value:.1f}s")
-                if allowed_latency_value:
+                if allowed_latency_value is not None:
                     detail_parts.append(f"허용 {allowed_latency_value}s")
                 detail_text = " · ".join(detail_parts) if detail_parts else "허용 지연 초과"
                 stop_reason = f"IMAP 체크 실패 - 디바이스 {device_id} ({report.send_type or 'unknown'})"
@@ -3190,6 +3193,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     "job_id": report.job_id,
                     "latency": latency_value,
                     "allowed_latency": allowed_latency_value,
+                    "check_delay": delay_seconds_value,
                     "mail_from": mail_from_value,
                     "detail": detail_text,
                     "anchor": anchor_flag,

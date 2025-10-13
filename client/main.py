@@ -8,6 +8,7 @@ import time
 import uuid
 import os
 import threading
+import socket
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -794,8 +795,29 @@ class MailClient:
                 f"허용지연 {allowed_delay_value}s · "
                 f"유형 {send_type}"
             )
-            if delay_seconds > 0:
-                time.sleep(delay_seconds)
+            print(f"[디버그] IMAP check delay={delay_seconds}")
+            def has_network() -> bool:
+                try:
+                    with socket.create_connection(("8.8.8.8", 53), timeout=1):
+                        return True
+                except OSError:
+                    return False
+
+            def wait_for_delay_and_network(max_delay: float) -> None:
+                if max_delay > 0:
+                    deadline = time.monotonic() + max_delay
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        time.sleep(min(1.0, remaining))
+                if has_network():
+                    return
+                self._log_imap_console("  ↳ 네트워크 연결 대기 중…")
+                while not has_network():
+                    time.sleep(1.0)
+
+            wait_for_delay_and_network(delay_seconds)
             checked_at_iso = utc_now_iso()
             try:
                 result = verify_delivery(
