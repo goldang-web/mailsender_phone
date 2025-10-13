@@ -325,6 +325,12 @@ header {
   flex-direction: column;
   gap: 16px;
 }
+.global-split {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  align-items: stretch;
+}
 .global-section {
   display: flex;
   flex-direction: column;
@@ -357,6 +363,16 @@ header {
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px;
   align-items: start;
+}
+.global-telegram-settings {
+  display: grid;
+  gap: 12px;
+}
+.telegram-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
 }
 .global-form .field {
   min-width: 0;
@@ -689,6 +705,19 @@ header {
 .field-hint.muted {
   color: var(--color-muted);
 }
+#globalTelegramStatus {
+  margin: 0;
+  min-width: 0;
+}
+#globalTelegramStatus[data-state="success"] {
+  color: var(--color-success);
+}
+#globalTelegramStatus[data-state="error"] {
+  color: var(--color-danger);
+}
+#globalTelegramStatus[data-state="info"] {
+  color: var(--color-muted);
+}
 .field-error {
   font-size: 12px;
   color: var(--color-danger);
@@ -920,6 +949,10 @@ button.card-delete-btn:disabled {
   gap: 8px;
   flex-wrap: wrap;
 }
+.field-row.tight {
+  gap: 8px;
+  align-items: center;
+}
 .field-row.helo-row {
   flex-wrap: nowrap;
   align-items: flex-end;
@@ -974,6 +1007,19 @@ button.card-delete-btn:disabled {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+.inline-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 500;
+}
+.inline-checkbox input {
+  width: auto;
+  margin: 0;
+}
+.inline-checkbox.disabled {
+  color: var(--color-muted);
 }
 .input-with-toggle input {
   flex: 1 1 auto;
@@ -1576,26 +1622,45 @@ button:not(:disabled):hover {
           </label>
         </div>
       </div>
-      <div class="global-section">
-        <h3 class="global-section-title">시간 제어</h3>
-        <div class="global-schedule">
-          <div class="global-schedule-card" id="globalScheduleCard">
-            <div class="schedule-header">
-              <label class="schedule-toggle">
-                <input type="checkbox" id="globalStopScheduleToggle">
-                <span>자동 중지</span>
-              </label>
-              <span class="schedule-status-pill" id="globalStopSchedulePill">비활성</span>
+      <div class="global-split">
+        <div class="global-section">
+          <h3 class="global-section-title">시간 제어</h3>
+          <div class="global-schedule">
+            <div class="global-schedule-card" id="globalScheduleCard">
+              <div class="schedule-header">
+                <label class="schedule-toggle">
+                  <input type="checkbox" id="globalStopScheduleToggle">
+                  <span>자동 중지</span>
+                </label>
+                <span class="schedule-status-pill" id="globalStopSchedulePill">비활성</span>
+              </div>
+              <div class="global-schedule-body">
+                <div class="schedule-time-wrapper">
+                  <input type="text" class="schedule-time-input" id="globalStopScheduleTime" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" placeholder="예: 02:30">
+                </div>
+                <div class="global-schedule-meta">
+                  <span>다음 실행: <strong id="globalStopScheduleNext">--</strong></span>
+                  <span>마지막 실행: <strong id="globalStopScheduleLast">--</strong></span>
+                </div>
+                <div class="global-schedule-hint" id="globalStopScheduleHint">HH:MM 형식으로 입력하세요.</div>
+              </div>
             </div>
-            <div class="global-schedule-body">
-              <div class="schedule-time-wrapper">
-                <input type="text" class="schedule-time-input" id="globalStopScheduleTime" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" placeholder="예: 02:30">
-              </div>
-              <div class="global-schedule-meta">
-                <span>다음 실행: <strong id="globalStopScheduleNext">--</strong></span>
-                <span>마지막 실행: <strong id="globalStopScheduleLast">--</strong></span>
-              </div>
-              <div class="global-schedule-hint" id="globalStopScheduleHint">HH:MM 형식으로 입력하세요.</div>
+          </div>
+        </div>
+        <div class="global-section">
+          <h3 class="global-section-title">알림</h3>
+          <div class="global-telegram-settings">
+            <label class="field">
+              <span>텔레그램 봇 토큰</span>
+              <input type="text" id="globalTelegramBotToken" placeholder="예: 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="field">
+              <span>텔레그램 챗 ID</span>
+              <input type="text" id="globalTelegramChatId" placeholder="예: 123456789" autocomplete="off" spellcheck="false">
+            </label>
+            <div class="telegram-actions">
+              <button type="button" class="secondary" id="globalTelegramTestBtn">텔레그램 테스트 발송</button>
+              <p class="field-hint" id="globalTelegramStatus" data-state="idle"></p>
             </div>
           </div>
         </div>
@@ -1719,14 +1784,20 @@ button:not(:disabled):hover {
           <span>허용 지연 시간 (초)</span>
           <input type="number" id="imapAllowedLatencySeconds" min="5" max="600" required title="발송 후 IMAP으로 도착 여부를 확인할 때 허용할 최대 지연 시간을 지정합니다.">
         </label>
-        <label class="field">
+        <div class="field">
           <span>확인 실패 시 대응</span>
-          <select id="imapFailureAction" title="IMAP 확인이 실패했을 때 추가로 실행할 동작을 선택합니다.">
-            <option value="none">추가 동작 없음</option>
-            <option value="stop_device">해당 디바이스 발송 중지</option>
-            <option value="stop_all">전체 발송 중지</option>
-          </select>
-        </label>
+          <div class="field-row tight">
+            <select id="imapFailureAction" title="IMAP 확인이 실패했을 때 추가로 실행할 동작을 선택합니다.">
+              <option value="none">추가 동작 없음</option>
+              <option value="stop_device">해당 디바이스 발송 중지</option>
+              <option value="stop_all">전체 발송 중지</option>
+            </select>
+            <label class="inline-checkbox" id="imapNotifyBeforeStopAllLabel" title="중지 동작 실행 전에 텔레그램 알림을 전송합니다.">
+              <input type="checkbox" id="imapNotifyBeforeStopAll">
+              <span>중지 전 텔레그램 알림</span>
+            </label>
+          </div>
+        </div>
         <p class="field-hint">대기 시간은 확인을 시작하기 전 지연을, 허용 지연은 발송과 수신 사이의 최대 허용 간격을 의미합니다. 실패 시 대응에 따라 중지 범위가 결정됩니다.</p>
       </form>
     </div>
@@ -1749,6 +1820,8 @@ const GLOBAL_FIELD_LIST = [
   "bcc_count",
   "stop_schedule_enabled",
   "stop_schedule_time",
+  "telegram_bot_token",
+  "telegram_chat_id",
 ];
 const GLOBAL_DEFAULTS = {
   active_domain: "naver",
@@ -1760,6 +1833,8 @@ const GLOBAL_DEFAULTS = {
   stop_schedule_enabled: false,
   stop_schedule_time: "",
   substitution_rules: [],
+  telegram_bot_token: "",
+  telegram_chat_id: "",
 };
 const GLOBAL_INPUT_IDS = {
   active_domain: "globalActiveDomainGroup",
@@ -1770,6 +1845,8 @@ const GLOBAL_INPUT_IDS = {
   bcc_count: "globalBccCount",
   stop_schedule_enabled: "globalStopScheduleToggle",
   stop_schedule_time: "globalStopScheduleTime",
+  telegram_bot_token: "globalTelegramBotToken",
+  telegram_chat_id: "globalTelegramChatId",
 };
 
 const IMAP_DEFAULT_ALLOWED_LATENCY = 20;
@@ -1813,8 +1890,11 @@ const state = {
     bcc_count: false,
     stop_schedule_enabled: false,
     stop_schedule_time: false,
+    telegram_bot_token: false,
+    telegram_chat_id: false,
   },
   globalStatusTimer: null,
+  telegramStatusTimer: null,
   globalScheduleError: "",
   substitutionRules: [],
   substitutionDraft: [],
@@ -1837,6 +1917,10 @@ const state = {
     offsetY: 0,
     restoreUserSelect: "",
   },
+  telegramLastSavedToken: "",
+  telegramLastSavedChat: "",
+  telegramAutoSaveHandle: null,
+  telegramSaving: false,
   deviceEditMode: false,
   filterOnlineOnly: false,
   deletingDevices: new Set(),
@@ -2392,6 +2476,31 @@ function setGlobalStatus(message, type = "info") {
       statusEl.className = "global-status";
       statusEl.textContent = "";
       state.globalStatusTimer = null;
+    }, 4000);
+  }
+}
+
+function setTelegramStatus(message, type = "info") {
+  const statusEl = document.getElementById("globalTelegramStatus");
+  if (!statusEl) return;
+  if (state.telegramStatusTimer) {
+    clearTimeout(state.telegramStatusTimer);
+    state.telegramStatusTimer = null;
+  }
+  const hasMessage = Boolean(message);
+  let stateValue = "info";
+  if (type === "success") {
+    stateValue = "success";
+  } else if (type === "error") {
+    stateValue = "error";
+  }
+  statusEl.dataset.state = hasMessage ? stateValue : "idle";
+  statusEl.textContent = message || "";
+  if (hasMessage) {
+    state.telegramStatusTimer = setTimeout(() => {
+      statusEl.dataset.state = "idle";
+      statusEl.textContent = "";
+      state.telegramStatusTimer = null;
     }, 4000);
   }
 }
@@ -3310,6 +3419,9 @@ function initGlobalForm() {
     input.addEventListener("input", () => {
       state.globalDirty[field] = true;
       state.globalDraft[field] = input.value;
+      if (field === "telegram_bot_token" || field === "telegram_chat_id") {
+        scheduleTelegramAutoSave();
+      }
     });
     if (field === "session_count") {
       input.addEventListener("blur", () => {
@@ -3328,6 +3440,11 @@ function initGlobalForm() {
         }
         state.globalDraft[field] = sanitized;
         state.globalDirty[field] = true;
+      });
+    }
+    if (field === "telegram_bot_token" || field === "telegram_chat_id") {
+      input.addEventListener("blur", () => {
+        scheduleTelegramAutoSave();
       });
     }
   });
@@ -3352,6 +3469,8 @@ function renderGlobalConfig(config) {
   state.globalConfig = { ...normalized };
   state.globalConfig.substitution_rules = cloneSubstitutionRules(normalized.substitution_rules);
   state.globalScheduleError = "";
+  state.telegramLastSavedToken = normalized.telegram_bot_token || "";
+  state.telegramLastSavedChat = normalized.telegram_chat_id || "";
   const normalizedSubs = cloneSubstitutionRules(normalized.substitution_rules);
   state.substitutionRules = normalizedSubs;
   if (!state.substitutionDirty) {
@@ -3369,6 +3488,7 @@ function renderGlobalConfig(config) {
     }
   });
   syncGlobalInputsFromDraft();
+  setTelegramStatus("", "idle");
   if (updatedAtEl) {
     if (normalized.updated_at) {
       updatedAtEl.textContent = `마지막 적용: ${formatDate(normalized.updated_at)}`;
@@ -3894,6 +4014,7 @@ function bestConfig(device, domain) {
     imap_single_delay_seconds: IMAP_DEFAULT_SINGLE_DELAY,
     imap_batch_delay_seconds: IMAP_DEFAULT_BATCH_DELAY,
     imap_failure_action: "none",
+    imap_notify_before_stop_all: false,
     imap_last_status: "",
     imap_last_checked_at: null,
     imap_last_latency: null,
@@ -4278,6 +4399,7 @@ function renderImapSection(card, device, domain) {
     block.dataset.imapSingleDelay = String(IMAP_DEFAULT_SINGLE_DELAY);
     block.dataset.imapBatchDelay = String(IMAP_DEFAULT_BATCH_DELAY);
     block.dataset.imapFailureAction = "none";
+    block.dataset.imapNotifyBeforeStopAll = "0";
     block.dataset.imapPasswordSaved = "0";
     delete block.dataset.imapHoldStatus;
     delete block.dataset.imapHoldCheckedAt;
@@ -4386,6 +4508,7 @@ function renderImapSection(card, device, domain) {
   block.dataset.imapSingleDelay = String(imapSingleDelayValue);
   block.dataset.imapBatchDelay = String(imapBatchDelayValue);
   block.dataset.imapFailureAction = failureActionValue;
+  block.dataset.imapNotifyBeforeStopAll = config.imap_notify_before_stop_all ? "1" : "0";
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
   block.dataset.imapLastCheckedAt = currentCheckedMarker;
   block.dataset.imapLastStatus = lastStatus || "";
@@ -5384,6 +5507,22 @@ function setImapModalMessage(message, type = "error") {
   box.className = message ? `modal-message ${type === "success" ? "success" : ""}` : "modal-message";
 }
 
+function updateImapNotifyControl(actionValue) {
+  const checkbox = document.getElementById("imapNotifyBeforeStopAll");
+  const label = document.getElementById("imapNotifyBeforeStopAllLabel");
+  if (!checkbox || !label) return;
+  const allow = actionValue === "stop_device" || actionValue === "stop_all";
+  checkbox.disabled = !allow;
+  checkbox.setAttribute("aria-disabled", allow ? "false" : "true");
+  label.classList.toggle("disabled", !allow);
+  if (!allow) {
+    label.setAttribute("title", "중지 동작이 없으면 텔레그램 알림을 보낼 수 없습니다.");
+    checkbox.checked = false;
+  } else {
+    label.setAttribute("title", "중지 동작 실행 전에 텔레그램 알림을 전송합니다.");
+  }
+}
+
 function openImapModal(card, device, domain, options = {}) {
   if (domain !== "naver") {
     return;
@@ -5409,6 +5548,7 @@ function openImapModal(card, device, domain, options = {}) {
   const batchDelayInput = document.getElementById("imapBatchDelaySeconds");
   const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
   const failureActionSelect = document.getElementById("imapFailureAction");
+  const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const passwordToggle = document.querySelector('[data-action="imap-password-toggle"]');
 
   usernameInput.value = config.imap_username || "";
@@ -5423,6 +5563,7 @@ function openImapModal(card, device, domain, options = {}) {
   const blockBatchDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapBatchDelay;
   const blockAllowedLatency = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapAllowedLatency;
   const blockFailureAction = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapFailureAction;
+  const blockNotifyRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapNotifyBeforeStopAll;
   const allowedLatencyValue = clampNumber(
     blockAllowedLatency ?? config.imap_allowed_latency_seconds ?? IMAP_DEFAULT_ALLOWED_LATENCY,
     IMAP_ALLOWED_MIN,
@@ -5448,6 +5589,19 @@ function openImapModal(card, device, domain, options = {}) {
     const normalizedFailure = (blockFailureAction || config.imap_failure_action || "").toString().toLowerCase();
     failureActionSelect.value = IMAP_FAILURE_ACTIONS.includes(normalizedFailure) ? normalizedFailure : "none";
   }
+  const parseFlag = (value) => {
+    if (value === undefined || value === null) return null;
+    const lowered = String(value).trim().toLowerCase();
+    if (lowered === "1" || lowered === "true") return true;
+    if (lowered === "0" || lowered === "false") return false;
+    return null;
+  };
+  if (notifyCheckbox) {
+    const configNotify = Boolean(config.imap_notify_before_stop_all);
+    const blockNotify = parseFlag(blockNotifyRaw);
+    notifyCheckbox.checked = blockNotify ?? configNotify;
+  }
+  updateImapNotifyControl(failureActionSelect?.value || "none");
 
   document.getElementById("imapModal").classList.remove("hidden");
   const saveBtn = document.getElementById("imapSaveBtn");
@@ -5532,6 +5686,9 @@ async function submitImapModal() {
     batch_delay_seconds: batchDelayValue,
     allowed_latency_seconds: allowedLatencyValue,
     failure_action: failureActionValue,
+    notify_before_stop_all: Boolean(
+      notifyCheckbox && !notifyCheckbox.disabled && notifyCheckbox.checked
+    ),
     delay_seconds: allowedLatencyValue,
   };
   if (rawPassword) {
@@ -5846,6 +6003,13 @@ document.getElementById("globalApplyBtn").addEventListener("click", () => {
   handleGlobalApply();
 });
 
+const globalTelegramTestBtn = document.getElementById("globalTelegramTestBtn");
+if (globalTelegramTestBtn) {
+  globalTelegramTestBtn.addEventListener("click", () => {
+    handleTelegramTest();
+  });
+}
+
 document.getElementById("globalSendAllBtn").addEventListener("click", () => {
   handleGlobalSendAll();
 });
@@ -5864,6 +6028,8 @@ async function handleGlobalApply() {
   const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
   const scheduleToggle = document.getElementById("globalStopScheduleToggle");
   const scheduleTimeInput = document.getElementById("globalStopScheduleTime");
+  const telegramTokenInput = document.getElementById("globalTelegramBotToken");
+  const telegramChatInput = document.getElementById("globalTelegramChatId");
   if (!applyBtn) return;
 
   const activeDomainValue = sanitizeGlobalDomain(
@@ -5885,6 +6051,14 @@ async function handleGlobalApply() {
   const bccValue = sanitizeBccValue(bccInput?.value ?? state.globalDraft.bcc_count ?? GLOBAL_DEFAULTS.bcc_count);
   if (bccInput && bccInput.value !== bccValue) {
     bccInput.value = bccValue;
+  }
+  const telegramTokenValue = telegramTokenInput?.value.trim() ?? "";
+  const telegramChatValue = telegramChatInput?.value.trim() ?? "";
+  if (telegramTokenInput && telegramTokenInput.value !== telegramTokenValue) {
+    telegramTokenInput.value = telegramTokenValue;
+  }
+  if (telegramChatInput && telegramChatInput.value !== telegramChatValue) {
+    telegramChatInput.value = telegramChatValue;
   }
   const scheduleRaw = scheduleTimeInput?.value ?? state.globalDraft.stop_schedule_time ?? "";
   const formattedSchedule = formatScheduleInputValue(scheduleRaw);
@@ -5914,6 +6088,10 @@ async function handleGlobalApply() {
   state.globalDraft.stop_schedule_enabled = toggleChecked;
   state.globalDirty.stop_schedule_time = true;
   state.globalDirty.stop_schedule_enabled = true;
+  state.globalDraft.telegram_bot_token = telegramTokenValue;
+  state.globalDraft.telegram_chat_id = telegramChatValue;
+  state.globalDirty.telegram_bot_token = true;
+  state.globalDirty.telegram_chat_id = true;
   updateGlobalScheduleUI({ error: null });
 
   const previousRulesSnapshot = JSON.stringify(state.substitutionRules);
@@ -5929,6 +6107,8 @@ async function handleGlobalApply() {
     bcc_count: parseBccInput(bccValue),
     stop_schedule_enabled: toggleChecked && Boolean(sanitizedSchedule),
     stop_schedule_time: sanitizedSchedule || "",
+    telegram_bot_token: telegramTokenValue,
+    telegram_chat_id: telegramChatValue,
   };
   payload.substitution_rules = substitutionPayload;
 
@@ -5964,6 +6144,8 @@ async function handleGlobalApply() {
         if (field === "bcc_count") return "BCC 수";
         if (field === "stop_schedule") return "자동 중지";
         if (field === "substitution_rules") return "치환 변수";
+        if (field === "telegram_bot_token") return "텔레그램 봇 토큰";
+        if (field === "telegram_chat_id") return "텔레그램 챗 ID";
         return field.toUpperCase();
       });
       let message = fieldLabels.length
@@ -5999,6 +6181,127 @@ async function handleGlobalApply() {
   } finally {
     applyBtn.disabled = false;
     applyBtn.textContent = originalText;
+  }
+}
+
+async function persistTelegramSettings(tokenValue, chatValue) {
+  if (state.telegramAutoSaveHandle) {
+    clearTimeout(state.telegramAutoSaveHandle);
+    state.telegramAutoSaveHandle = null;
+  }
+  state.telegramSaving = true;
+  try {
+    const result = await fetchJSON("/api/global/config/apply", {
+      method: "POST",
+      body: JSON.stringify({
+        telegram_bot_token: tokenValue,
+        telegram_chat_id: chatValue,
+      }),
+    });
+    const serverConfig = { ...(result.config || {}), updated_at: result.updated_at || null };
+    state.globalDirty.telegram_bot_token = false;
+    state.globalDirty.telegram_chat_id = false;
+    state.globalDraft.telegram_bot_token = tokenValue;
+    state.globalDraft.telegram_chat_id = chatValue;
+    renderGlobalConfig(serverConfig);
+    state.telegramLastSavedToken = tokenValue;
+    state.telegramLastSavedChat = chatValue;
+    return result;
+  } finally {
+    state.telegramSaving = false;
+  }
+}
+
+function scheduleTelegramAutoSave(delay = 200) {
+  if (state.telegramAutoSaveHandle) {
+    clearTimeout(state.telegramAutoSaveHandle);
+    state.telegramAutoSaveHandle = null;
+  }
+  state.telegramAutoSaveHandle = setTimeout(() => {
+    state.telegramAutoSaveHandle = null;
+    autoSaveTelegramSettings();
+  }, delay);
+}
+
+async function autoSaveTelegramSettings() {
+  if (state.telegramSaving) {
+    scheduleTelegramAutoSave(250);
+    return;
+  }
+  const tokenInput = document.getElementById("globalTelegramBotToken");
+  const chatInput = document.getElementById("globalTelegramChatId");
+  const tokenValue = tokenInput?.value.trim() ?? "";
+  const chatValue = chatInput?.value.trim() ?? "";
+  if (!tokenValue || !chatValue) {
+    return;
+  }
+  if (
+    tokenValue === state.telegramLastSavedToken &&
+    chatValue === state.telegramLastSavedChat
+  ) {
+    return;
+  }
+  setTelegramStatus("텔레그램 설정을 저장 중입니다...", "info");
+  try {
+    await persistTelegramSettings(tokenValue, chatValue);
+    setTelegramStatus("텔레그램 설정을 저장했습니다.", "success");
+  } catch (err) {
+    setTelegramStatus(err?.message || "텔레그램 설정 저장에 실패했습니다.", "error");
+  }
+}
+
+async function handleTelegramTest() {
+  const testBtn = document.getElementById("globalTelegramTestBtn");
+  const tokenInput = document.getElementById("globalTelegramBotToken");
+  const chatInput = document.getElementById("globalTelegramChatId");
+  const statusEl = document.getElementById("globalTelegramStatus");
+
+  const tokenValue = tokenInput?.value.trim() ?? "";
+  const chatValue = chatInput?.value.trim() ?? "";
+
+  if (!tokenValue) {
+    setTelegramStatus("봇 토큰을 입력하세요.", "error");
+    tokenInput?.focus();
+    return;
+  }
+  if (!chatValue) {
+    setTelegramStatus("챗 ID를 입력하세요.", "error");
+    chatInput?.focus();
+    return;
+  }
+
+  if (state.telegramStatusTimer) {
+    clearTimeout(state.telegramStatusTimer);
+    state.telegramStatusTimer = null;
+  }
+  if (statusEl) {
+    statusEl.dataset.state = "info";
+    statusEl.textContent = "테스트 메시지를 발송 중입니다...";
+  }
+  if (testBtn) {
+    testBtn.disabled = true;
+    testBtn.textContent = "발송 중...";
+  }
+
+  try {
+    await fetchJSON("/api/global/telegram/test", {
+      method: "POST",
+      body: JSON.stringify({ bot_token: tokenValue, chat_id: chatValue }),
+    });
+    try {
+      await persistTelegramSettings(tokenValue, chatValue);
+      setTelegramStatus("테스트 메시지를 발송했고 설정을 저장했습니다.", "success");
+    } catch (persistErr) {
+      const message = persistErr?.message || "설정 저장에 실패했습니다.";
+      setTelegramStatus(`테스트는 성공했지만 ${message}`, "error");
+    }
+  } catch (err) {
+    setTelegramStatus(err.message || "텔레그램 발송에 실패했습니다.", "error");
+  } finally {
+    if (testBtn) {
+      testBtn.disabled = false;
+      testBtn.textContent = "텔레그램 테스트 발송";
+    }
   }
 }
 
@@ -6080,6 +6383,12 @@ document.querySelector('[data-action="close-imap"]').addEventListener("click", (
   closeImapModal();
 });
 document.querySelector('[data-action="imap-password-toggle"]').addEventListener("click", toggleImapPasswordVisibility);
+const imapFailureActionSelect = document.getElementById("imapFailureAction");
+if (imapFailureActionSelect) {
+  imapFailureActionSelect.addEventListener("change", (event) => {
+    updateImapNotifyControl(event.target.value);
+  });
+}
 document.getElementById("imapModal").addEventListener("click", (event) => {
   if (event.target === document.getElementById("imapModal")) {
     closeImapModal();

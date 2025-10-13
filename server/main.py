@@ -6,6 +6,9 @@ import shutil
 import sqlite3
 import threading
 import uuid
+import urllib.error
+import urllib.parse
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
@@ -53,6 +56,7 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "imap_batch_delay_seconds": 20,
     "imap_allowed_latency_seconds": 20,
     "imap_failure_action": "none",
+    "imap_notify_before_stop_all": False,
     "imap_last_status": "",
     "imap_last_checked_at": None,
     "imap_last_latency": None,
@@ -90,11 +94,15 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "stop_schedule_enabled": False,
     "stop_schedule_time": "",
     "substitution_rules": [],
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
 }
 GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count")
 MAX_DEVICE_LOG_HISTORY = 10
 SUBSTITUTION_PATTERN = re.compile(r"\$\{([^{}]+)\}")
 SUBSTITUTION_TARGET_FIELDS = ("helo", "mail_from", "header", "rcpt_to", "anchor_email")
+TELEGRAM_API_BASE = "https://api.telegram.org"
+TELEGRAM_TIMEOUT_SECONDS = 5.0
 
 
 def ensure_storage_root() -> None:
@@ -184,6 +192,18 @@ def sanitize_stop_schedule_last_run(value: Any) -> Optional[str]:
             return None
 
 
+def sanitize_telegram_bot_token(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def sanitize_telegram_chat_id(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
 def sanitize_imap_enabled(value: Any) -> bool:
     return sanitize_stop_schedule_enabled(value)
 
@@ -241,6 +261,10 @@ def sanitize_imap_failure_action(value: Any) -> str:
     if candidate in IMAP_FAILURE_ACTIONS:
         return candidate
     return "none"
+
+
+def sanitize_imap_notify_before_stop_all(value: Any) -> bool:
+    return sanitize_stop_schedule_enabled(value)
 
 
 def sanitize_imap_status(value: Any) -> str:
@@ -356,7 +380,80 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     schedule_enabled = sanitize_stop_schedule_enabled(raw.get("stop_schedule_enabled"))
     sanitized["stop_schedule_enabled"] = schedule_enabled if schedule_time else False
     sanitized["substitution_rules"] = sanitize_substitution_rules(raw.get("substitution_rules"))
+    sanitized["telegram_bot_token"] = sanitize_telegram_bot_token(raw.get("telegram_bot_token"))
+    sanitized["telegram_chat_id"] = sanitize_telegram_chat_id(raw.get("telegram_chat_id"))
     return sanitized
+
+
+def send_telegram_message(bot_token: str, chat_id: str, text: str, *, timeout: float = TELEGRAM_TIMEOUT_SECONDS) -> Dict[str, Any]:
+    token = sanitize_telegram_bot_token(bot_token)
+    target_chat_id = sanitize_telegram_chat_id(chat_id)
+    if not token or not target_chat_id:
+        raise ValueError("텔레그램 봇 토큰과 챗 ID가 필요합니다.")
+    message = text or ""
+    url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
+    encoded = urllib.parse.urlencode(
+        {
+            "chat_id": target_chat_id,
+            "text": message,
+        }
+    ).encode("utf-8")
+    request = urllib.request.Request(
+        url,
+        data=encoded,
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            raw_body = response.read()
+            try:
+                payload = json.loads(raw_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("텔레그램 API 응답을 해석하지 못했습니다.") from exc
+    except urllib.error.HTTPError as exc:
+        try:
+            detail_body = exc.read().decode("utf-8")
+        except Exception:
+            detail_body = ""
+        detail_payload: Optional[Dict[str, Any]] = None
+        detail_description = ""
+        detail_error_code: Optional[int] = None
+        if detail_body:
+            try:
+                parsed = json.loads(detail_body)
+                if isinstance(parsed, dict):
+                    detail_payload = parsed
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                detail_payload = None
+        if detail_payload:
+            raw_description = detail_payload.get("description") or detail_payload.get("error")
+            if isinstance(raw_description, str):
+                detail_description = raw_description.strip()
+            try:
+                detail_error_code = int(detail_payload.get("error_code"))  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                detail_error_code = None
+        normalized_description = detail_description.lower() if detail_description else ""
+        status_code = getattr(exc, "code", None)
+        if status_code in (401, 403) or (status_code == 404 and (detail_error_code == 404 or "not found" in normalized_description)):
+            raise ValueError("텔레그램 봇 토큰이 올바르지 않습니다. BotFather에서 발급한 토큰을 사용하세요.") from exc
+        if status_code == 400 and ("chat not found" in normalized_description or "wrong chat id" in normalized_description):
+            raise ValueError("텔레그램 챗 ID를 찾을 수 없습니다. 챗 ID를 확인하세요.") from exc
+        message_text = detail_description or detail_body or getattr(exc, "reason", "") or f"HTTP {status_code}"
+        raise RuntimeError(f"HTTP {status_code}: {message_text}") from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(str(exc.reason or exc)) from exc
+    except OSError as exc:
+        raise RuntimeError(str(exc)) from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("텔레그램 API 응답 형식이 올바르지 않습니다.")
+    if not payload.get("ok"):
+        description = payload.get("description") or payload.get("error") or "알 수 없는 오류가 발생했습니다."
+        raise RuntimeError(description)
+    return payload
 
 
 def _parse_iso_dt(value: Optional[str]) -> Optional[datetime]:
@@ -534,6 +631,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_batch_delay_seconds INTEGER NOT NULL DEFAULT 20,
                 imap_allowed_latency_seconds INTEGER NOT NULL DEFAULT 20,
                 imap_failure_action TEXT NOT NULL DEFAULT 'none',
+                imap_notify_before_stop_all INTEGER NOT NULL DEFAULT 0,
                 imap_last_status TEXT DEFAULT '',
                 imap_last_checked_at TEXT,
                 imap_last_latency REAL,
@@ -804,6 +902,10 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_failure_action TEXT NOT NULL DEFAULT 'none'"
             )
+        if "imap_notify_before_stop_all" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_notify_before_stop_all INTEGER NOT NULL DEFAULT 0"
+            )
         if "imap_last_status" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_last_status TEXT DEFAULT ''"
@@ -1009,6 +1111,9 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         minimum=IMAP_CHECK_DELAY_MIN_SECONDS,
     )
     imap_failure_action = sanitize_imap_failure_action(row.get("imap_failure_action"))
+    imap_notify_before_stop_all = sanitize_imap_notify_before_stop_all(
+        row.get("imap_notify_before_stop_all")
+    )
     imap_status = sanitize_imap_status(row.get("imap_last_status"))
     imap_checked_at = row.get("imap_last_checked_at")
     imap_latency = sanitize_imap_latency(row.get("imap_last_latency"))
@@ -1060,6 +1165,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "imap_single_delay_seconds": imap_single_delay,
         "imap_allowed_latency_seconds": imap_allowed_latency,
         "imap_failure_action": imap_failure_action,
+        "imap_notify_before_stop_all": imap_notify_before_stop_all,
         "imap_delay_seconds": imap_allowed_latency,
         "imap_last_status": imap_status,
         "imap_last_checked_at": imap_checked_at,
@@ -1686,20 +1792,179 @@ def cancel_active_sends(
     }
 
 
+def format_local_timestamp() -> str:
+    return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
+
+
+def format_auto_stop_origin(origin: str) -> str:
+    normalized = (origin or "").lower()
+    if normalized == "imap":
+        return "IMAP 실패"
+    if normalized == "schedule":
+        return "예약된 자동 중지"
+    return "자동 중지"
+
+
+def format_auto_stop_metadata(metadata: Optional[Dict[str, Any]]) -> List[str]:
+    if not metadata:
+        return []
+    lines: List[str] = []
+    device_id = metadata.get("device_id")
+    if device_id:
+        lines.append(f"디바이스: {device_id}")
+    domain = metadata.get("domain")
+    if domain:
+        lines.append(f"도메인: {DOMAIN_LABELS.get(str(domain), str(domain))}")
+    domains = metadata.get("domains")
+    if isinstance(domains, (list, tuple, set)):
+        domain_labels = [DOMAIN_LABELS.get(str(item), str(item)) for item in domains if item]
+        if domain_labels:
+            lines.append(f"도메인 그룹: {', '.join(domain_labels)}")
+    send_type = metadata.get("send_type")
+    if send_type:
+        lines.append(f"발송 유형: {send_type}")
+    detail = metadata.get("detail")
+    if detail:
+        lines.append(f"세부: {detail}")
+    schedule_time = metadata.get("schedule_time")
+    if schedule_time:
+        lines.append(f"예약 시간: {schedule_time}")
+    job_id = metadata.get("job_id")
+    if job_id:
+        lines.append(f"작업 ID: {job_id}")
+    anchor_flag = metadata.get("anchor")
+    if anchor_flag:
+        lines.append("앵커 메일: 예")
+    return lines
+
+
+def build_pre_stop_message(
+    reason: str,
+    metadata: Optional[Dict[str, Any]],
+) -> str:
+    lines = [
+        "[MailSender] 중지 사전 안내",
+        f"사유: {reason}",
+        "동작: 발송 중지 동작을 곧 실행합니다.",
+        f"시각: {format_local_timestamp()}",
+    ]
+    metadata_lines = format_auto_stop_metadata(metadata)
+    if metadata_lines:
+        lines.append("추가 정보:")
+        lines.extend(f"- {entry}" for entry in metadata_lines)
+    return "\n".join(lines)
+
+
+def build_auto_stop_message(
+    reason: str,
+    origin: str,
+    metadata: Optional[Dict[str, Any]],
+    result: Optional[Dict[str, Any]],
+) -> str:
+    origin_label = format_auto_stop_origin(origin)
+    summary = result or {}
+    cancelled = summary.get("cancelled") or 0
+    cancel_requested = summary.get("cancel_requested") or 0
+    lines = [
+        "[MailSender] 자동 중지 알림",
+        f"사유: {reason}",
+        f"발생원: {origin_label}",
+        f"취소 완료: {cancelled}건 · 취소 요청: {cancel_requested}건",
+        f"시각: {format_local_timestamp()}",
+    ]
+    metadata_lines = format_auto_stop_metadata(metadata)
+    if metadata_lines:
+        lines.append("추가 정보:")
+        lines.extend(f"- {entry}" for entry in metadata_lines)
+    return "\n".join(lines)
+
+
+def maybe_dispatch_telegram_pre_stop(
+    conn: sqlite3.Connection,
+    *,
+    reason: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    try:
+        config = load_global_config(conn=conn)
+    except Exception as exc:
+        print(f"[TELEGRAM] 사전 알림 설정 로드 실패: {exc}")
+        return None
+    bot_token = sanitize_telegram_bot_token(config.get("telegram_bot_token"))
+    chat_id = sanitize_telegram_chat_id(config.get("telegram_chat_id"))
+    if not bot_token or not chat_id:
+        return None
+    message = build_pre_stop_message(reason, metadata)
+    try:
+        response = send_telegram_message(bot_token, chat_id, message)
+    except Exception as exc:
+        print(f"[TELEGRAM] 중지 사전 알림 발송 실패: {exc}")
+        return {"sent": False, "error": str(exc)}
+    print("[TELEGRAM] 중지 사전 알림 발송 성공")
+    return {"sent": True, "response": response}
+
+
+def maybe_dispatch_telegram_auto_stop(
+    conn: sqlite3.Connection,
+    *,
+    reason: str,
+    origin: str,
+    metadata: Optional[Dict[str, Any]] = None,
+    result: Optional[Dict[str, Any]] = None,
+) -> Optional[Dict[str, Any]]:
+    try:
+        config = load_global_config(conn=conn)
+    except Exception as exc:
+        print(f"[TELEGRAM] 설정 로드 실패: {exc}")
+        return None
+    bot_token = sanitize_telegram_bot_token(config.get("telegram_bot_token"))
+    chat_id = sanitize_telegram_chat_id(config.get("telegram_chat_id"))
+    if not bot_token or not chat_id:
+        return None
+    message = build_auto_stop_message(reason, origin, metadata, result)
+    try:
+        response = send_telegram_message(bot_token, chat_id, message)
+    except Exception as exc:
+        print(f"[TELEGRAM] 자동 중지 알림 발송 실패: {exc}")
+        return {"sent": False, "error": str(exc)}
+    print(f"[TELEGRAM] 자동 중지 알림 발송 성공 (origin={origin})")
+    return {"sent": True, "response": response}
+
+
 def handle_auto_stop(
     conn: sqlite3.Connection,
     reason: str,
     *,
     origin: str = "auto",
     metadata: Optional[Dict[str, Any]] = None,
+    device_id: Optional[str] = None,
+    job_types: Optional[Iterable[str]] = None,
 ) -> Dict[str, Any]:
-    result = cancel_active_sends(conn, reason)
+    result = cancel_active_sends(
+        conn,
+        reason,
+        device_id=device_id,
+        job_types=job_types,
+    )
+    notification = maybe_dispatch_telegram_auto_stop(
+        conn,
+        reason=reason,
+        origin=origin,
+        metadata=metadata,
+        result=result,
+    )
     payload = {
         "reason": reason,
         "origin": origin,
         "result": result,
         "metadata": metadata or {},
     }
+    if device_id:
+        payload["device_id"] = device_id
+    if job_types:
+        payload["job_types"] = list(job_types)
+    if notification is not None:
+        payload["notification"] = notification
     return payload
 
 
@@ -1742,6 +2007,7 @@ class ImapSettingsPayload(BaseModel):
     batch_delay_seconds: Optional[int] = None
     allowed_latency_seconds: Optional[int] = None
     failure_action: Optional[str] = None
+    notify_before_stop_all: Optional[bool] = None
     delay_seconds: Optional[int] = None  # legacy alias
 
 
@@ -1889,6 +2155,8 @@ class GlobalConfigPayload(BaseModel):
     stop_schedule_enabled: Optional[bool] = None
     stop_schedule_time: Optional[str] = None
     substitution_rules: Optional[List[SubstitutionRule]] = None
+    telegram_bot_token: Optional[str] = None
+    telegram_chat_id: Optional[str] = None
 
 
 class GlobalConfigResponse(BaseModel):
@@ -1904,6 +2172,8 @@ class GlobalConfigResponse(BaseModel):
     stop_schedule_last_run: Optional[str] = None
     stop_schedule_next_run: Optional[str] = None
     substitution_rules: List[SubstitutionRule] = Field(default_factory=list)
+    telegram_bot_token: str
+    telegram_chat_id: str
 
 
 class GlobalBatchRequest(BaseModel):
@@ -1924,6 +2194,12 @@ class ClearLogsRequest(BaseModel):
 class JobCancelRequest(BaseModel):
     device_id: str
     reason: Optional[str] = None
+
+
+class TelegramTestRequest(BaseModel):
+    bot_token: Optional[str] = None
+    chat_id: Optional[str] = None
+    message: Optional[str] = None
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1959,6 +2235,8 @@ def get_global_config_endpoint() -> GlobalConfigResponse:
             SubstitutionRule(**rule)
             for rule in sanitize_substitution_rules(config.get("substitution_rules"))
         ],
+        telegram_bot_token=sanitize_telegram_bot_token(config.get("telegram_bot_token")),
+        telegram_chat_id=sanitize_telegram_chat_id(config.get("telegram_chat_id")),
     )
 
 
@@ -2053,6 +2331,24 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 applied_fields.append("substitution_rules")
         else:
             stored_config["substitution_rules"] = sanitize_substitution_rules(stored_config.get("substitution_rules"))
+        if "telegram_bot_token" in fields_set:
+            sanitized_token = sanitize_telegram_bot_token(payload.telegram_bot_token)
+            if sanitized_token != stored_config.get("telegram_bot_token", ""):
+                stored_config["telegram_bot_token"] = sanitized_token
+                applied_fields.append("telegram_bot_token")
+            else:
+                stored_config["telegram_bot_token"] = sanitized_token
+        else:
+            stored_config["telegram_bot_token"] = sanitize_telegram_bot_token(stored_config.get("telegram_bot_token"))
+        if "telegram_chat_id" in fields_set:
+            sanitized_chat_id = sanitize_telegram_chat_id(payload.telegram_chat_id)
+            if sanitized_chat_id != stored_config.get("telegram_chat_id", ""):
+                stored_config["telegram_chat_id"] = sanitized_chat_id
+                applied_fields.append("telegram_chat_id")
+            else:
+                stored_config["telegram_chat_id"] = sanitized_chat_id
+        else:
+            stored_config["telegram_chat_id"] = sanitize_telegram_chat_id(stored_config.get("telegram_chat_id"))
         device_count, update_count = apply_global_config_to_devices(conn, apply_values)
         domain_update_count = 0
         if active_domain_changed:
@@ -2085,6 +2381,31 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         "config_updates": update_count,
         "applied_fields": unique_fields,
         "schedule_state": schedule_state,
+    }
+
+
+@app.post("/api/global/telegram/test")
+def send_global_telegram_test(payload: TelegramTestRequest) -> Dict[str, Any]:
+    with db_lock, get_conn() as conn:
+        config = load_global_config(conn=conn)
+    candidate_token = payload.bot_token if payload.bot_token is not None else config.get("telegram_bot_token")
+    candidate_chat_id = payload.chat_id if payload.chat_id is not None else config.get("telegram_chat_id")
+    bot_token = sanitize_telegram_bot_token(candidate_token)
+    chat_id = sanitize_telegram_chat_id(candidate_chat_id)
+    if not bot_token or not chat_id:
+        raise HTTPException(status_code=400, detail="텔레그램 봇 토큰과 챗 ID를 모두 입력하세요.")
+    message_text = payload.message or f"[MailSender] 텔레그램 테스트 ({format_local_timestamp()})"
+    try:
+        response = send_telegram_message(bot_token, chat_id, message_text)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=f"텔레그램 발송 실패: {exc}")
+    print("[TELEGRAM] 테스트 메시지를 발송했습니다.")
+    return {
+        "ok": True,
+        "message": "텔레그램 메시지를 발송했습니다.",
+        "response": response,
     }
 
 
@@ -2219,6 +2540,13 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
         failure_action_value = sanitize_imap_failure_action(
             payload.failure_action if payload.failure_action is not None else config.get("imap_failure_action")
         )
+        notify_before_stop_value = sanitize_imap_notify_before_stop_all(
+            payload.notify_before_stop_all
+            if payload.notify_before_stop_all is not None
+            else config.get("imap_notify_before_stop_all")
+        )
+        if failure_action_value == "none":
+            notify_before_stop_value = False
         if desired_enabled and (not username or not password):
             raise HTTPException(status_code=400, detail="IMAP을 활성화하려면 계정 ID와 비밀번호가 필요합니다.")
         now = now_ts()
@@ -2245,6 +2573,7 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 imap_batch_delay_seconds=?,
                 imap_allowed_latency_seconds=?,
                 imap_failure_action=?,
+                imap_notify_before_stop_all=?,
                 imap_last_status=?,
                 imap_last_checked_at=?,
                 imap_last_error=?,
@@ -2264,6 +2593,7 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 batch_delay_value,
                 allowed_latency_value,
                 failure_action_value,
+                1 if notify_before_stop_value else 0,
                 status_value,
                 checked_at,
                 error_text,
@@ -3085,11 +3415,20 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
         if schedule_triggers:
             reason_parts = [f"{DOMAIN_LABELS.get(domain, domain)} 예약된 자동 정지 실행" for domain in schedule_triggers]
             schedule_reason = " / ".join(reason_parts) if reason_parts else "예약된 자동 정지 실행"
-            schedule_auto_stop_result = cancel_active_sends(
+            schedule_metadata = {
+                "device_id": device_id,
+                "domains": schedule_triggers,
+            }
+            schedule_auto_stop_payload = handle_auto_stop(
                 conn,
                 schedule_reason,
+                origin="schedule",
+                metadata=schedule_metadata,
                 device_id=device_id,
                 job_types=("batch_send",),
+            )
+            schedule_auto_stop_result = (
+                schedule_auto_stop_payload.get("result", {}) if schedule_auto_stop_payload else {}
             )
             if schedule_auto_stop_result.get("cancelled") or schedule_auto_stop_result.get("cancel_requested"):
                 print(f"[SCHEDULE] 디바이스 {device_id} 자동 중지: {schedule_reason}")
@@ -3168,6 +3507,9 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 ),
             )
             failure_action = sanitize_imap_failure_action(config_snapshot.get("imap_failure_action"))
+            notify_before_stop = sanitize_imap_notify_before_stop_all(
+                config_snapshot.get("imap_notify_before_stop_all")
+            )
             should_stop = (
                 bool(report.trigger_stop)
                 and status_value in {"failure", "error"}
@@ -3198,6 +3540,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     "detail": detail_text,
                     "anchor": anchor_flag,
                     "failure_action": failure_action,
+                    "notify_before_stop": notify_before_stop,
                 }
                 if detail_text:
                     stop_reason = f"{stop_reason}: {detail_text}"
@@ -3205,14 +3548,22 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     device_stop_context = {
                         "reason": stop_reason,
                         "metadata": meta,
+                        "notify_before": notify_before_stop,
                     }
                 elif failure_action == "stop_all" and auto_stop_context is None:
                     auto_stop_context = {
                         "reason": stop_reason,
                         "metadata": meta,
+                        "notify_before": notify_before_stop,
                     }
         device_stop_result: Optional[Dict[str, Any]] = None
         if device_stop_context is not None:
+            if device_stop_context.get("notify_before"):
+                device_stop_context["pre_notification"] = maybe_dispatch_telegram_pre_stop(
+                    conn,
+                    reason=device_stop_context["reason"],
+                    metadata=device_stop_context.get("metadata"),
+                )
             device_stop_result = cancel_active_sends(
                 conn,
                 device_stop_context["reason"],
@@ -3220,6 +3571,16 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             )
             print(f"[IMAP] 디바이스 중지: {device_stop_context['reason']}")
         auto_stop_result: Optional[Dict[str, Any]] = None
+        if (
+            auto_stop_context is not None
+            and auto_stop_context.get("notify_before")
+        ):
+            pre_notification = maybe_dispatch_telegram_pre_stop(
+                conn,
+                reason=auto_stop_context["reason"],
+                metadata=auto_stop_context.get("metadata"),
+            )
+            auto_stop_context["pre_notification"] = pre_notification
         if auto_stop_context is not None:
             auto_stop_result = handle_auto_stop(
                 conn,

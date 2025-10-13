@@ -26,7 +26,7 @@ from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 from lib.naver_imap import probe_imap_connection, verify_delivery, fetch_latest_message_summary
 
 
-APP_VERSION = "0.0.37"
+APP_VERSION = "0.0.40"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -292,6 +292,16 @@ def sanitize_imap_failure_action(value: Optional[object]) -> str:
     return "none"
 
 
+def sanitize_bool_flag(value: Optional[object]) -> bool:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "on", "yes"}:
+            return True
+        if lowered in {"0", "false", "off", "no"}:
+            return False
+    return bool(value)
+
+
 def normalize_imap_string(value: Optional[object]) -> str:
     if value is None:
         return ""
@@ -409,6 +419,7 @@ class MailClient:
                 "batch_delay_seconds": batch_delay,
                 "allowed_latency_seconds": allowed_latency,
                 "failure_action": sanitize_imap_failure_action(entry.get("failure_action")),
+                "notify_before_stop_all": sanitize_bool_flag(entry.get("notify_before_stop_all")),
                 "delay_seconds": legacy_delay,
             }
         self._schedule_events: Dict[str, Dict[str, object]] = {}
@@ -635,6 +646,7 @@ class MailClient:
                     default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
                 ),
                 "failure_action": sanitize_imap_failure_action(settings.get("failure_action")),
+                "notify_before_stop_all": sanitize_bool_flag(settings.get("notify_before_stop_all")),
                 "delay_seconds": sanitize_imap_delay(settings.get("delay_seconds")),
             }
         return serialized
@@ -667,6 +679,7 @@ class MailClient:
                 "batch_delay_seconds": IMAP_DEFAULT_BATCH_DELAY_SECONDS,
                 "allowed_latency_seconds": IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
                 "failure_action": "none",
+                "notify_before_stop_all": False,
                 "delay_seconds": IMAP_DEFAULT_BATCH_DELAY_SECONDS,
             }
             self.imap_settings[normalized] = settings
@@ -705,6 +718,9 @@ class MailClient:
             default=payload.get("imap_delay_seconds"),
         )
         settings["failure_action"] = sanitize_imap_failure_action(payload.get("imap_failure_action"))
+        settings["notify_before_stop_all"] = sanitize_bool_flag(
+            payload.get("imap_notify_before_stop_all")
+        )
         settings["last_status"] = payload.get("imap_last_status")
         settings["last_checked_at"] = payload.get("imap_last_checked_at")
         settings["last_latency"] = payload.get("imap_last_latency")
