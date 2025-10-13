@@ -752,6 +752,17 @@ button.card-delete-btn:disabled {
   min-height: 100px;
   resize: vertical;
 }
+.input-with-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.input-with-toggle input {
+  flex: 1 1 auto;
+}
+.password-toggle-btn {
+  min-width: 64px;
+}
 .input-compact {
   max-width: 88px;
 }
@@ -1432,7 +1443,10 @@ button:not(:disabled):hover {
         </label>
         <label class="field">
           <span>비밀번호 <small>(변경 시에만 입력)</small></span>
-          <input type="password" id="imapPassword" autocomplete="new-password" placeholder="">
+          <div class="input-with-toggle">
+            <input type="password" id="imapPassword" autocomplete="new-password" placeholder="">
+            <button type="button" class="ghost small password-toggle-btn" data-action="imap-password-toggle" aria-pressed="false">보기</button>
+          </div>
         </label>
         <label class="field">
           <span>허용 지연 시간 (초)</span>
@@ -4058,10 +4072,16 @@ function openImapModal(card, device, domain, options = {}) {
   const usernameInput = document.getElementById("imapUsername");
   const passwordInput = document.getElementById("imapPassword");
   const delayInput = document.getElementById("imapDelaySeconds");
+  const passwordToggle = document.querySelector('[data-action="imap-password-toggle"]');
 
   usernameInput.value = config.imap_username || "";
   passwordInput.value = "";
+  passwordInput.type = "password";
   passwordInput.placeholder = config.imap_password_saved ? "변경 시에만 입력" : "비밀번호를 입력하세요";
+  if (passwordToggle) {
+    passwordToggle.textContent = "보기";
+    passwordToggle.setAttribute("aria-pressed", "false");
+  }
   const blockDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapDelay;
   const delayValue = clampNumber(blockDelay ?? config.imap_delay_seconds ?? IMAP_DEFAULT_DELAY, IMAP_MIN_DELAY, IMAP_MAX_DELAY, IMAP_DEFAULT_DELAY);
   delayInput.value = delayValue;
@@ -4216,6 +4236,17 @@ async function submitImapTest() {
   }
 }
 
+function toggleImapPasswordVisibility() {
+  const input = document.getElementById("imapPassword");
+  const toggleBtn = document.querySelector('[data-action="imap-password-toggle"]');
+  if (!input || !toggleBtn) return;
+  const showing = input.getAttribute("type") === "text";
+  const nextType = showing ? "password" : "text";
+  input.setAttribute("type", nextType);
+  toggleBtn.textContent = showing ? "보기" : "숨기기";
+  toggleBtn.setAttribute("aria-pressed", showing ? "false" : "true");
+  input.focus({ preventScroll: true });
+}
 async function handleFileAction(target) {
   const action = target.dataset.fileAction;
   if (!action) return;
@@ -4548,6 +4579,7 @@ document.querySelector('[data-action="imap-cancel"]').addEventListener("click", 
 document.querySelector('[data-action="close-imap"]').addEventListener("click", () => {
   closeImapModal();
 });
+document.querySelector('[data-action="imap-password-toggle"]').addEventListener("click", toggleImapPasswordVisibility);
 document.getElementById("imapModal").addEventListener("click", (event) => {
   if (event.target === document.getElementById("imapModal")) {
     closeImapModal();

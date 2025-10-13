@@ -13,21 +13,30 @@ def probe_imap_connection(email_id: str, password: str, *, folder: str = "Junk",
     mail = None
     started = time.monotonic()
     try:
+        print(f"[IMAP 테스트][디버그] 로그인 시도 · 계정 {email_id} · 폴더 {folder}")
         mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=timeout)
         mail.login(email_id, password)
         status, _ = mail.select(folder, readonly=True)
         if status != "OK":
+            print(f"[IMAP 테스트][디버그] 폴더 선택 실패 · 상태 {status}")
             return {"success": False, "reason": f"{folder} 메일함을 열 수 없습니다."}
         latency = time.monotonic() - started
+        print(f"[IMAP 테스트][디버그] 로그인 및 폴더 선택 성공 · 지연 {latency:.2f}s")
         return {
             "success": True,
             "latency": latency,
             "checked_at": datetime.utcnow().isoformat() + "Z",
         }
     except imaplib.IMAP4.error as exc:
-        return {"success": False, "reason": f"IMAP 인증 실패: {exc}"}
+        latency = time.monotonic() - started
+        message = f"IMAP 인증 실패: {exc}"
+        print(f"[IMAP 테스트][디버그] {message} · 소요 {latency:.2f}s")
+        return {"success": False, "reason": message}
     except Exception as exc:  # pylint: disable=broad-except
-        return {"success": False, "reason": f"IMAP 연결 오류: {exc}"}
+        latency = time.monotonic() - started
+        message = f"IMAP 연결 오류: {exc}"
+        print(f"[IMAP 테스트][디버그] {message} · 소요 {latency:.2f}s")
+        return {"success": False, "reason": message}
     finally:
         if mail is not None:
             try:
