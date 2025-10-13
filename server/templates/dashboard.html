@@ -5071,6 +5071,17 @@ function buildDeviceCard(device) {
         </div>
       </div>
     </div>
+    <div class="log-box">
+      <div class="log-box-header">
+        <div class="log-box-heading">
+          <h4>로그</h4>
+          <div class="log-stats" data-role="successCounter">누적 성공: 0건</div>
+          <div class="log-stats secondary" data-role="elapsedCounter">경과: -</div>
+        </div>
+        <button class="ghost log-clear-btn" data-action="clear-logs">로그 초기화</button>
+      </div>
+      <div class="log-list" data-role="logList"></div>
+    </div>
     <div class="imap-block hidden" data-role="imapBlock">
       <div class="imap-header">
         <label class="imap-toggle">
@@ -5104,17 +5115,6 @@ function buildDeviceCard(device) {
         </div>
         <div class="device-schedule-hint" data-role="scheduleHint">예약을 켜면 지정 시간에 자동 중지됩니다.</div>
       </div>
-    </div>
-    <div class="log-box">
-      <div class="log-box-header">
-        <div class="log-box-heading">
-          <h4>로그</h4>
-          <div class="log-stats" data-role="successCounter">누적 성공: 0건</div>
-          <div class="log-stats secondary" data-role="elapsedCounter">경과: -</div>
-        </div>
-        <button class="ghost log-clear-btn" data-action="clear-logs">로그 초기화</button>
-      </div>
-      <div class="log-list" data-role="logList"></div>
     </div>
   `;
   return card;

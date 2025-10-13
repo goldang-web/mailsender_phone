@@ -1993,10 +1993,10 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 should_apply = bool(value_to_apply)
             elif field == "bcc_count":
                 value_to_apply = clamp_bcc_count(raw_value)
-                should_apply = value_to_apply != stored_config[field]
+                should_apply = raw_value is not None
             elif field == "session_count":
                 value_to_apply = sanitize_session_count(raw_value)
-                should_apply = value_to_apply != stored_config[field]
+                should_apply = raw_value is not None
             else:
                 continue
             if should_apply:
