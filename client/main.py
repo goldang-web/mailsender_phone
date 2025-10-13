@@ -2080,27 +2080,27 @@ class MailClient:
                     injected_emails = [email for email in (group.injected or []) if email]
                     if injected_emails:
                         bcc_emails.extend(injected_emails)
-                success, response_text = send_via_telnet(
-                    smtp_host=config.get("smtp_host", ""),
-                    smtp_port=int(config.get("smtp_port") or 25),
-                    helo=config.get("helo", ""),
-                    mail_from=config.get("mail_from", ""),
-                    rcpt_to=rcpt_to,
-                    header_text=config.get("header", ""),
-                    bcc_emails=bcc_emails,
-                )
-                response_text = response_text or ""
-                sent_at = utc_now()
-                delivery_status = self._classify_delivery(success, response_text)
-                status_line, detail_line = self._smtp_status_and_detail(response_text)
-                return DispatchOutcome(
-                    success=success,
-                    response_text=response_text,
-                    delivery_status=delivery_status,
-                    status_line=status_line,
-                    detail_line=detail_line,
-                    sent_at=sent_at,
-                )
+                    success, response_text = send_via_telnet(
+                        smtp_host=config.get("smtp_host", ""),
+                        smtp_port=int(config.get("smtp_port") or 25),
+                        helo=config.get("helo", ""),
+                        mail_from=config.get("mail_from", ""),
+                        rcpt_to=rcpt_to,
+                        header_text=config.get("header", ""),
+                        bcc_emails=bcc_emails,
+                    )
+                    response_text = response_text or ""
+                    sent_at = utc_now()
+                    delivery_status = self._classify_delivery(success, response_text)
+                    status_line, detail_line = self._smtp_status_and_detail(response_text)
+                    return DispatchOutcome(
+                        success=success,
+                        response_text=response_text,
+                        delivery_status=delivery_status,
+                        status_line=status_line,
+                        detail_line=detail_line,
+                        sent_at=sent_at,
+                    )
 
                 def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
                     nonlocal dispatched_db_total, anchor_retry_pending
