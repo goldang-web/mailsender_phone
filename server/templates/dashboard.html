@@ -2788,7 +2788,17 @@ async function pollJobUntilDone(jobId, options = {}) {
   if (!jobId) return null;
   const started = Date.now();
   while (Date.now() - started < timeout) {
-    if (!state.imapModal.open || state.imapModal.testJobId !== jobId) {
+    if (!state.imapModal.open) {
+      return null;
+    }
+    const trackedJobIds = [];
+    if (state.imapModal.testJobId) {
+      trackedJobIds.push(state.imapModal.testJobId);
+    }
+    if (state.imapModal.latestJobId) {
+      trackedJobIds.push(state.imapModal.latestJobId);
+    }
+    if (trackedJobIds.length > 0 && !trackedJobIds.includes(jobId)) {
       return null;
     }
     try {

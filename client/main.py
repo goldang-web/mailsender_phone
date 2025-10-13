@@ -25,7 +25,7 @@ from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 from lib.naver_imap import probe_imap_connection, verify_delivery, fetch_latest_message_summary
 
 
-APP_VERSION = "0.0.29"
+APP_VERSION = "0.0.30"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -795,11 +795,37 @@ class MailClient:
                     mail_from=mail_from,
                     sent_at=sent_at_value,
                     allowed_delay=allowed_delay_value,
+                    max_messages=25,
+                    check_delay=delay_seconds,
                 )
                 status = result.get("status", "error")
                 latency = result.get("latency")
                 received_at = result.get("received_at")
                 reason_text = result.get("reason")
+                latency_label = (
+                    f"{latency:.1f}s" if isinstance(latency, (int, float)) else "-"
+                )
+                matched_header = result.get("matched_header")
+                self._log_imap_console(
+                    "자동 확인 결과 · "
+                    f"상태 {status} · "
+                    f"허용 {allowed_delay_value}s · "
+                    f"지연 {latency_label} · "
+                    f"MAIL FROM {mail_from}"
+                )
+                if received_at:
+                    self._log_imap_console(f"  ↳ 도착 시각 {received_at}")
+                if matched_header:
+                    self._log_imap_console(f"  ↳ 매칭 헤더 {matched_header}")
+                else:
+                    self._log_imap_console("  ↳ 매칭 헤더 정보 없음")
+                if status != "success":
+                    if reason_text:
+                        self._log_imap_console(f"  ↳ 사유: {reason_text}")
+                    candidate_addresses = result.get("candidate_addresses") or []
+                    if candidate_addresses:
+                        preview = ", ".join(candidate_addresses[:5])
+                        self._log_imap_console(f"  ↳ 확인된 발신 후보: {preview}")
             except Exception as exc:  # pylint: disable=broad-except
                 status = "error"
                 latency = None
@@ -824,7 +850,7 @@ class MailClient:
                 "anchor": has_anchor,
                 "trigger_stop": trigger_stop,
                 "checked_at": checked_at_iso,
-                "delay_seconds": allowed_delay_value,
+                "delay_seconds": int(delay_seconds),
                 "allowed_latency_seconds": allowed_delay_value,
                 "failure_action": failure_action_value,
             }

@@ -372,7 +372,16 @@ def check_latest_emails(email_id, password, check_time, num_emails=5, sender_nam
         return False
 
 
-def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_messages=15):
+def verify_delivery(
+    email_id,
+    password,
+    mail_from,
+    sent_at,
+    allowed_delay,
+    *,
+    max_messages=15,
+    check_delay=None,
+):
     """네이버 스팸메일함에서 발신자 메일 도착 여부를 확인합니다."""
 
     if not email_id or not password:
@@ -400,15 +409,25 @@ def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_m
     except (TypeError, ValueError):
         allowed = 20
     allowed = max(0, min(600, allowed))
-    max_messages = max(5, min(50, int(max_messages or 15)))
+    try:
+        search_limit = int(max_messages or 15)
+    except (TypeError, ValueError):
+        search_limit = 15
+    search_limit = max(5, min(50, search_limit))
+    try:
+        delay_before_check = float(check_delay) if check_delay is not None else 0.0
+    except (TypeError, ValueError):
+        delay_before_check = 0.0
+    delay_before_check = max(0.0, min(600.0, delay_before_check))
     normalized_from = mail_from.strip().lower()
     mail = None
+    observed_senders = []
     try:
-        mail = imaplib.IMAP4_SSL('imap.naver.com', 993, timeout=30)
+        mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=30)
         mail.login(email_id, password)
         mail.select("Junk", readonly=True)
-        status, messages = mail.search(None, 'ALL')
-        if status != 'OK':
+        status, messages = mail.search(None, "ALL")
+        if status != "OK":
             return {
                 "status": "error",
                 "latency": None,
@@ -425,17 +444,28 @@ def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_m
                 "reason": "스팸메일함이 비어 있습니다.",
                 "allowed_latency": allowed,
             }
-        candidates = list(reversed(mail_ids[-max_messages:]))
+        candidates = list(reversed(mail_ids[-search_limit:]))
         for num in candidates:
-            status, data = mail.fetch(num, '(RFC822.HEADER)')
-            if status != 'OK' or not data or data[0] is None:
+            status, data = mail.fetch(num, "(RFC822.HEADER)")
+            if status != "OK" or not data or data[0] is None:
                 continue
             header_bytes = data[0][1]
             if not header_bytes:
                 continue
             msg = email.message_from_bytes(header_bytes)
-            _, sender_email = parseaddr(msg.get("From", ""))
-            if not sender_email or sender_email.strip().lower() != normalized_from:
+            header_addresses = {}
+            for header_name in ("Return-Path", "From", "Sender", "Reply-To", "X-Original-From"):
+                for header_value in msg.get_all(header_name, []):
+                    _, addr = parseaddr(header_value)
+                    if not addr:
+                        continue
+                    candidate = addr.strip().lower()
+                    if not candidate:
+                        continue
+                    header_addresses.setdefault(candidate, header_name)
+                    if len(observed_senders) < 10:
+                        observed_senders.append(candidate)
+            if normalized_from not in header_addresses:
                 continue
             date_header = msg.get("Date")
             if not date_header:
@@ -448,23 +478,34 @@ def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_m
                 received_at = received_at.replace(tzinfo=timezone.utc)
             else:
                 received_at = received_at.astimezone(timezone.utc)
-            if received_at < sent_dt:
-                continue
-            latency = max(0.0, (received_at - sent_dt).total_seconds())
+            latency_seconds = (received_at - sent_dt).total_seconds()
+            if latency_seconds < 0:
+                if abs(latency_seconds) <= 300:
+                    latency_seconds = 0.0
+                else:
+                    continue
+            latency = max(0.0, latency_seconds)
+            matched_header = header_addresses.get(normalized_from)
+            message_id = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
+            payload_common = {
+                "latency": latency,
+                "received_at": received_at.isoformat(),
+                "allowed_latency": allowed,
+                "matched_header": matched_header,
+                "message_id": message_id or None,
+                "candidate_addresses": sorted(set(observed_senders or [normalized_from])),
+                "delay_before_check": delay_before_check,
+            }
             if latency <= allowed:
                 return {
                     "status": "success",
-                    "latency": latency,
-                    "received_at": received_at.isoformat(),
                     "reason": None,
-                    "allowed_latency": allowed,
+                    **payload_common,
                 }
             return {
                 "status": "failure",
-                "latency": latency,
-                "received_at": received_at.isoformat(),
                 "reason": f"허용 지연 {allowed}s 초과",
-                "allowed_latency": allowed,
+                **payload_common,
             }
         return {
             "status": "failure",
@@ -472,6 +513,8 @@ def verify_delivery(email_id, password, mail_from, sent_at, allowed_delay, max_m
             "received_at": None,
             "reason": "발신자 메일을 찾지 못했습니다.",
             "allowed_latency": allowed,
+            "candidate_addresses": sorted(set(observed_senders)),
+            "delay_before_check": delay_before_check,
         }
     finally:
         try:
