@@ -1483,6 +1483,7 @@ button:not(:disabled):hover {
     </div>
     <div class="modal-footer">
       <button type="button" class="ghost" data-action="imap-cancel">취소</button>
+      <button type="button" class="secondary" id="imapFetchLatestBtn" data-action="imap-fetch-latest">최신 메일 확인</button>
       <button type="button" class="secondary" id="imapTestBtn" data-action="imap-test">연결 테스트</button>
       <button type="button" id="imapSaveBtn" data-action="imap-save">저장</button>
     </div>
@@ -1547,6 +1548,7 @@ const state = {
     forceEnable: false,
     card: null,
     testJobId: null,
+    latestJobId: null,
   },
   pollingHandle: null,
   successCounters: {},
@@ -4232,6 +4234,7 @@ function openImapModal(card, device, domain, options = {}) {
   state.imapModal.forceEnable = Boolean(options?.forceEnable);
   state.imapModal.card = card || null;
   state.imapModal.testJobId = null;
+  state.imapModal.latestJobId = null;
 
   document.getElementById("imapModalTitle").textContent = `${device.name} · 네이버 IMAP 설정`;
   document.getElementById("imapModalSubtitle").textContent = `ID: ${device.id}`;
@@ -4292,6 +4295,11 @@ function openImapModal(card, device, domain, options = {}) {
     testBtn.disabled = false;
     testBtn.textContent = "연결 테스트";
   }
+  const latestBtn = document.getElementById("imapFetchLatestBtn");
+  if (latestBtn) {
+    latestBtn.disabled = false;
+    latestBtn.textContent = "최신 메일 확인";
+  }
 }
 
 function closeImapModal() {
@@ -4304,6 +4312,7 @@ function closeImapModal() {
   state.imapModal.forceEnable = false;
   state.imapModal.card = null;
   state.imapModal.testJobId = null;
+  state.imapModal.latestJobId = null;
   setImapModalMessage("");
 }
 
@@ -4385,6 +4394,89 @@ async function submitImapModal() {
     saveBtn.disabled = false;
     saveBtn.textContent = "저장";
     setImapModalMessage(err.message || "IMAP 설정 저장에 실패했습니다.");
+  }
+}
+
+async function submitImapFetchLatest() {
+  const { deviceId, domain, passwordSaved } = state.imapModal;
+  if (!deviceId || !domain) return;
+  const username = document.getElementById("imapUsername").value.trim();
+  const passwordInput = document.getElementById("imapPassword");
+  const rawPassword = passwordInput.value;
+  if (!username) {
+    setImapModalMessage("네이버 계정 ID를 입력하세요.");
+    return;
+  }
+  const useSavedPassword = !rawPassword && passwordSaved;
+  if (!rawPassword && !useSavedPassword) {
+    setImapModalMessage("비밀번호를 입력하거나 기존 비밀번호를 먼저 저장하세요.");
+    return;
+  }
+  const payload = { username };
+  if (rawPassword) {
+    payload.password = rawPassword;
+  } else if (useSavedPassword) {
+    payload.use_saved_password = true;
+  }
+  const latestBtn = document.getElementById("imapFetchLatestBtn");
+  if (latestBtn) {
+    latestBtn.disabled = true;
+    latestBtn.textContent = "가져오는 중...";
+  }
+  state.imapModal.latestJobId = null;
+  setImapModalMessage("");
+
+  const shorten = (value, max = 80) => {
+    if (!value) return "";
+    const text = String(value).replace(/\s+/g, " ").trim();
+    if (!text) return "";
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  };
+
+  try {
+    const response = await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/imap/latest`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const jobId = response?.job?.id;
+    if (!jobId) {
+      throw new Error("최신 메일 확인 작업 ID를 받지 못했습니다.");
+    }
+    state.imapModal.latestJobId = jobId;
+    const job = await pollJobUntilDone(jobId, { timeout: 45000, interval: 1500 });
+    if (!job) {
+      setImapModalMessage("최신 메일 확인 결과를 아직 받지 못했습니다. 잠시 후 다시 확인하세요.");
+      return;
+    }
+    const status = (job.status || "").toLowerCase();
+    const result = job.result || {};
+    const mail = result.mail || {};
+    const parts = [];
+    const fromLabel = shorten(mail.from || mail.from_name || mail.from_address);
+    if (fromLabel) parts.push(`발신자 ${fromLabel}`);
+    const subjectLabel = shorten(mail.subject);
+    if (subjectLabel) parts.push(`제목 ${subjectLabel}`);
+    const receivedLabel = shorten(mail.received_at_local || mail.received_at_iso || mail.date_header || "");
+    if (receivedLabel) parts.push(`수신 ${receivedLabel}`);
+    let message = job.message || (status === "success" ? "최신 메일을 가져왔습니다." : "최신 메일을 가져오지 못했습니다.");
+    if (status === "success" && parts.length) {
+      message = `${message} (${parts.join(" · ")})`;
+    } else if (status !== "success" && result.reason) {
+      message = `${message} · ${result.reason}`;
+    }
+    setImapModalMessage(message, status === "success" ? "success" : "error");
+    if (state.imapModal.card) {
+      setNotice(state.imapModal.card, message, status === "success" ? "success" : "error");
+    }
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setImapModalMessage(err.message || "최신 메일 확인 요청에 실패했습니다.");
+  } finally {
+    state.imapModal.latestJobId = null;
+    if (latestBtn) {
+      latestBtn.disabled = false;
+      latestBtn.textContent = "최신 메일 확인";
+    }
   }
 }
 
@@ -4798,6 +4890,10 @@ document.getElementById("fileModal").addEventListener("click", (event) => {
 });
 
 document.querySelector('[data-action="imap-save"]').addEventListener("click", submitImapModal);
+const imapFetchBtn = document.querySelector('[data-action="imap-fetch-latest"]');
+if (imapFetchBtn) {
+  imapFetchBtn.addEventListener("click", submitImapFetchLatest);
+}
 document.querySelector('[data-action="imap-test"]').addEventListener("click", submitImapTest);
 document.querySelector('[data-action="imap-cancel"]').addEventListener("click", () => {
   closeImapModal();

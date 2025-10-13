@@ -22,7 +22,7 @@ from urllib3.util.retry import Retry
 from smtp_utils import send_via_telnet
 from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
-from lib.naver_imap import probe_imap_connection, verify_delivery
+from lib.naver_imap import probe_imap_connection, verify_delivery, fetch_latest_message_summary
 
 
 APP_VERSION = "0.0.29"
@@ -1467,6 +1467,8 @@ class MailClient:
             return self.handle_batch_send(domain, payload, job_id)
         if job_type == "imap_test":
             return self.handle_imap_test(domain, payload, job_id)
+        if job_type == "imap_fetch_latest":
+            return self.handle_imap_fetch_latest(domain, payload, job_id)
         if job_type == "change_ip":
             return self.handle_change_ip(job_id)
         if job_type == "reset_sent_sequence":
@@ -2544,6 +2546,110 @@ class MailClient:
             self._log_imap_console(f"성공 - {message}")
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
         error_message = reason or "IMAP 연결 실패"
+        self._log_imap_console(f"실패 - {error_message}")
+        return JobResult(
+            job_id=job_id,
+            status="failed",
+            message=error_message,
+            result=result_payload,
+            error=error_message,
+        )
+
+    def handle_imap_fetch_latest(
+        self,
+        domain: Optional[str],
+        payload: Dict[str, object],
+        job_id: str,
+    ) -> JobResult:
+        normalized = (domain or "naver").lower()
+        if normalized != "naver":
+            message = "네이버 도메인에서만 최신 메일 확인을 지원합니다."
+            self._log_imap_console(message)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        payload = payload or {}
+        settings = self._imap_settings_for_domain(normalized)
+        username = normalize_imap_string(payload.get("username")) or normalize_imap_string(
+            settings.get("username")
+        )
+        if not username:
+            message = "IMAP 계정 ID가 설정되지 않았습니다."
+            self._log_imap_console(message)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        use_saved_password = bool(payload.get("use_saved_password"))
+        password = str(payload.get("password") or "")
+        used_saved_password = False
+        if not password and use_saved_password:
+            password = settings.get("password") or ""
+            used_saved_password = bool(password)
+        if not password:
+            message = "IMAP 비밀번호를 확인할 수 없습니다."
+            self._log_imap_console(message)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        folder = str(payload.get("folder") or "Junk").strip() or "Junk"
+        try:
+            limit_candidate = payload.get("limit")
+            limit_value = int(limit_candidate) if limit_candidate is not None else 1
+        except (TypeError, ValueError):
+            limit_value = 1
+        limit_value = max(1, min(10, limit_value))
+        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 최신 메일 확인")
+        summary = fetch_latest_message_summary(username, password, folder=folder, limit=limit_value)
+        success = bool(summary.get("success"))
+        mail_info = summary.get("mail") or {}
+        reason = summary.get("reason")
+
+        def _shorten(value: Optional[str], *, length: int = 60) -> str:
+            if not value:
+                return ""
+            text = str(value).strip()
+            return text if len(text) <= length else text[: length - 1] + "…"
+
+        received_label = ""
+        raw_received = mail_info.get("received_at_local") or mail_info.get("received_at_iso")
+        if raw_received:
+            try:
+                received_dt = datetime.fromisoformat(str(raw_received).replace("Z", "+00:00"))
+                received_label = received_dt.strftime("%Y-%m-%d %H:%M:%S%z")
+            except ValueError:
+                received_label = str(raw_received)
+        elif mail_info.get("date_header"):
+            received_label = str(mail_info.get("date_header"))
+
+        from_label = _shorten(
+            mail_info.get("from")
+            or mail_info.get("from_name")
+            or mail_info.get("from_address"),
+            length=80,
+        )
+        subject_label = _shorten(mail_info.get("subject"), length=80)
+
+        detail_parts = []
+        if from_label:
+            detail_parts.append(f"발신자 {from_label}")
+        if subject_label:
+            detail_parts.append(f"제목 {subject_label}")
+        if received_label:
+            detail_parts.append(f"수신 {received_label}")
+
+        result_payload: Dict[str, object] = {
+            "username": username,
+            "folder": folder,
+            "success": success,
+            "used_saved_password": used_saved_password,
+            "mail": mail_info or None,
+            "limit": summary.get("limit", limit_value),
+            "total": summary.get("total"),
+            "reason": reason,
+        }
+
+        if success:
+            message = "최신 메일 확인 성공"
+            if detail_parts:
+                message = f"{message} · {' · '.join(detail_parts)}"
+            self._log_imap_console(f"성공 - {message}")
+            return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
+
+        error_message = reason or "최신 메일을 가져오지 못했습니다."
         self._log_imap_console(f"실패 - {error_message}")
         return JobResult(
             job_id=job_id,

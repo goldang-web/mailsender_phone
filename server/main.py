@@ -1336,7 +1336,7 @@ def sanitize_job_payload_for_output(job_type: str, payload: Optional[Dict[str, A
     if not isinstance(payload, dict):
         return None
     sanitized = dict(payload)
-    if job_type == "imap_test":
+    if job_type in {"imap_test", "imap_fetch_latest"}:
         sanitized.pop("password", None)
         if not sanitized.get("use_saved_password"):
             sanitized.pop("use_saved_password", None)
@@ -1501,7 +1501,7 @@ def handle_job_completion(
                 ),
             )
             prune_device_logs(conn, job_row["device_id"])
-    elif job_row["job_type"] == "imap_test":
+    elif job_row["job_type"] in {"imap_test", "imap_fetch_latest"}:
         sanitized_payload = sanitize_job_payload_for_output(job_row["job_type"], payload)
         conn.execute(
             "UPDATE jobs SET payload=? WHERE id=?",
@@ -1648,6 +1648,15 @@ class ImapTestRequest(BaseModel):
     folder: Optional[str] = Field(
         default="Junk",
         description="연결 테스트 시 선택할 메일함 (기본값 Junk)",
+    )
+
+
+class ImapFetchLatestRequest(ImapTestRequest):
+    limit: Optional[int] = Field(
+        default=1,
+        ge=1,
+        le=10,
+        description="가져올 최신 메일 개수 (현재 1개만 사용)",
     )
 
 
@@ -2195,6 +2204,57 @@ def enqueue_imap_test(device_id: str, domain: str, payload: ImapTestRequest) -> 
         else:
             job_payload["use_saved_password"] = True
         job = create_job(conn, device_id, normalized, "imap_test", job_payload)
+        conn.commit()
+    public_job = dict(job)
+    public_job["payload"] = sanitize_job_payload_for_output(job["job_type"], job.get("payload"))
+    return {"job": public_job}
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/imap/latest")
+def enqueue_imap_fetch_latest(device_id: str, domain: str, payload: ImapFetchLatestRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="네이버 도메인에서만 IMAP 확인을 지원합니다.")
+    username = normalize_imap_username(payload.username)
+    if not username:
+        raise HTTPException(status_code=400, detail="IMAP 계정 ID를 입력하세요.")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        config_data = to_dict(config_row)
+        saved_password = config_data.get("imap_password") or ""
+        use_saved = bool(payload.use_saved_password)
+        password_value = (
+            normalize_imap_password(payload.password)
+            if payload.password is not None
+            else ""
+        )
+        if not password_value and not use_saved:
+            raise HTTPException(status_code=400, detail="비밀번호를 입력하거나 저장된 비밀번호 사용을 선택하세요.")
+        if use_saved and not saved_password and not password_value:
+            raise HTTPException(status_code=400, detail="저장된 비밀번호가 없어 사용할 수 없습니다.")
+        try:
+            limit_candidate = int(payload.limit or 1)
+        except (TypeError, ValueError):
+            limit_candidate = 1
+        limit_value = max(1, min(10, limit_candidate))
+        job_payload: Dict[str, Any] = {
+            "username": username,
+            "folder": (payload.folder or "Junk").strip() or "Junk",
+            "limit": limit_value,
+        }
+        if password_value:
+            job_payload["password"] = password_value
+        else:
+            job_payload["use_saved_password"] = True
+        job = create_job(conn, device_id, normalized, "imap_fetch_latest", job_payload)
         conn.commit()
     public_job = dict(job)
     public_job["payload"] = sanitize_job_payload_for_output(job["job_type"], job.get("payload"))
