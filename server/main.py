@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
 import hashlib
-import shutil
 import json
+import re
+import shutil
 import sqlite3
 import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -88,9 +89,12 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "active_domain": "naver",
     "stop_schedule_enabled": False,
     "stop_schedule_time": "",
+    "substitution_rules": [],
 }
 GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count")
 MAX_DEVICE_LOG_HISTORY = 10
+SUBSTITUTION_PATTERN = re.compile(r"\$\{([^{}]+)\}")
+SUBSTITUTION_TARGET_FIELDS = ("helo", "mail_from", "header", "rcpt_to", "anchor_email")
 
 
 def ensure_storage_root() -> None:
@@ -296,6 +300,49 @@ def to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
+def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[Dict[str, str]]:
+    if raw is None:
+        return []
+    if not isinstance(raw, (list, tuple)):
+        if strict:
+            raise ValueError("치환 변수 목록 형식이 올바르지 않습니다.")
+        return []
+    sanitized: List[Dict[str, str]] = []
+    seen_keys: Set[str] = set()
+    for item in raw:
+        if hasattr(item, "dict") and callable(getattr(item, "dict")):
+            data = item.dict()
+        elif isinstance(item, dict):
+            data = item
+        else:
+            if strict:
+                raise ValueError("치환 변수 항목 형식이 올바르지 않습니다.")
+            continue
+        key = str(data.get("key") or "").strip()
+        value = str(data.get("value") or "").strip()
+        if not key:
+            if strict:
+                raise ValueError("변수명은 비워둘 수 없습니다.")
+            continue
+        if strict and not value:
+            raise ValueError(f"'{key}' 치환값을 입력하세요.")
+        key_token = key.lower()
+        if key_token in seen_keys:
+            if strict:
+                raise ValueError(f"'{key}' 변수명이 중복되었습니다.")
+            continue
+        seen_keys.add(key_token)
+        sanitized.append({"key": key, "value": value})
+    return sanitized
+
+
+def sanitize_substitution_rules(raw: Any) -> List[Dict[str, str]]:
+    try:
+        return canonicalize_substitution_rules(raw, strict=False)
+    except ValueError:
+        return []
+
+
 def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized: Dict[str, Any] = {}
     sanitized["helo"] = str(raw.get("helo") or "").strip()
@@ -308,6 +355,7 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized["stop_schedule_time"] = schedule_time
     schedule_enabled = sanitize_stop_schedule_enabled(raw.get("stop_schedule_enabled"))
     sanitized["stop_schedule_enabled"] = schedule_enabled if schedule_time else False
+    sanitized["substitution_rules"] = sanitize_substitution_rules(raw.get("substitution_rules"))
     return sanitized
 
 
@@ -1313,6 +1361,62 @@ def create_job(
     }
 
 
+def substitute_tokens(value: Any, rules: List[Dict[str, str]]) -> Tuple[Any, Set[str]]:
+    if not isinstance(value, str) or not value or "${" not in value:
+        return value, set()
+    if not rules:
+        return value, set()
+    defined_keys = [rule["key"] for rule in rules]
+    replacements = {rule["key"]: rule["value"] for rule in rules}
+    result = value
+    # 반복 치환: 최대 규칙 수만큼 순회해 신규로 노출된 토큰도 처리한다.
+    for _ in range(len(rules)):
+        changed = False
+        for key in defined_keys:
+            token = f"${{{key}}}"
+            if token not in result:
+                continue
+            new_value = result.replace(token, replacements.get(key, ""))
+            if new_value != result:
+                result = new_value
+                changed = True
+        if not changed:
+            break
+    unresolved: Set[str] = set()
+    defined_set = set(defined_keys)
+    for match in SUBSTITUTION_PATTERN.findall(result):
+        if match not in defined_set:
+            unresolved.add(match)
+    return result, unresolved
+
+
+def apply_substitutions_to_config(config: Dict[str, Any], rules: List[Dict[str, str]]) -> Set[str]:
+    if not config or not rules:
+        return set()
+    missing: Set[str] = set()
+    for field in SUBSTITUTION_TARGET_FIELDS:
+        raw_value = config.get(field)
+        substituted, unresolved = substitute_tokens(raw_value, rules)
+        if isinstance(substituted, str):
+            config[field] = substituted
+        missing.update(unresolved)
+    return missing
+
+
+def log_missing_substitutions(job: Dict[str, Any], missing: Iterable[str]) -> None:
+    deduped = sorted({token for token in missing if token})
+    if not deduped:
+        return
+    job_id = job.get("id")
+    job_type = job.get("job_type")
+    domain = job.get("domain")
+    device_id = job.get("device_id")
+    missing_str = ", ".join(deduped)
+    print(
+        f"[SUBSTITUTION] 미정의 변수({missing_str}) · job={job_id} type={job_type} device={device_id} domain={domain}"
+    )
+
+
 def load_job_payload(row: sqlite3.Row) -> Dict[str, Any]:
     if not row["payload"]:
         return {}
@@ -1770,15 +1874,21 @@ class FileListResponse(BaseModel):
     files: List[FileInfo]
 
 
+class SubstitutionRule(BaseModel):
+    key: str
+    value: str
+
+
 class GlobalConfigPayload(BaseModel):
-    helo: Optional[str] = ""
-    mail_from: Optional[str] = ""
-    header: Optional[str] = ""
-    bcc_count: Optional[int] = 0
-    session_count: Optional[int] = 1
+    helo: Optional[str] = None
+    mail_from: Optional[str] = None
+    header: Optional[str] = None
+    bcc_count: Optional[int] = None
+    session_count: Optional[int] = None
     active_domain: Optional[str] = None
     stop_schedule_enabled: Optional[bool] = None
     stop_schedule_time: Optional[str] = None
+    substitution_rules: Optional[List[SubstitutionRule]] = None
 
 
 class GlobalConfigResponse(BaseModel):
@@ -1793,6 +1903,7 @@ class GlobalConfigResponse(BaseModel):
     updated_at: Optional[str] = None
     stop_schedule_last_run: Optional[str] = None
     stop_schedule_next_run: Optional[str] = None
+    substitution_rules: List[SubstitutionRule] = Field(default_factory=list)
 
 
 class GlobalBatchRequest(BaseModel):
@@ -1844,19 +1955,17 @@ def get_global_config_endpoint() -> GlobalConfigResponse:
         updated_at=config.get("updated_at"),
         stop_schedule_last_run=config.get("stop_schedule_last_run"),
         stop_schedule_next_run=config.get("stop_schedule_next_run"),
+        substitution_rules=[
+            SubstitutionRule(**rule)
+            for rule in sanitize_substitution_rules(config.get("substitution_rules"))
+        ],
     )
 
 
 @app.post("/api/global/config/apply")
 def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]:
-    raw_inputs = {
-        "helo": (payload.helo or "").strip(),
-        "mail_from": (payload.mail_from or "").strip(),
-        "header": payload.header or "",
-        "bcc_count": clamp_bcc_count(payload.bcc_count),
-        "session_count": sanitize_session_count(payload.session_count),
-    }
-    domain_update_requested = payload.active_domain is not None
+    fields_set = getattr(payload, "__fields_set__", set())
+    domain_update_requested = "active_domain" in fields_set
     schedule_reset_last_run = False
     with db_lock, get_conn() as conn:
         current_config = load_global_config(conn=conn)
@@ -1873,10 +1982,12 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         apply_values: Dict[str, Any] = {}
         applied_fields: List[str] = []
         for field in GLOBAL_CONFIG_DEVICE_FIELDS:
-            raw_value = raw_inputs.get(field)
+            if field not in fields_set:
+                continue
+            raw_value = getattr(payload, field)
             if field == "header":
-                should_apply = isinstance(raw_value, str) and bool(raw_value.strip())
-                value_to_apply = raw_value
+                value_to_apply = raw_value or ""
+                should_apply = isinstance(value_to_apply, str) and bool(value_to_apply.strip())
             elif field in ("helo", "mail_from"):
                 value_to_apply = (raw_value or "").strip()
                 should_apply = bool(value_to_apply)
@@ -1932,6 +2043,16 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         else:
             stored_config["stop_schedule_enabled"] = current_schedule_enabled
             stored_config["stop_schedule_time"] = current_schedule_time or ""
+        if "substitution_rules" in fields_set:
+            try:
+                normalized_rules = canonicalize_substitution_rules(payload.substitution_rules or [], strict=True)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+            if normalized_rules != stored_config.get("substitution_rules", []):
+                stored_config["substitution_rules"] = normalized_rules
+                applied_fields.append("substitution_rules")
+        else:
+            stored_config["substitution_rules"] = sanitize_substitution_rules(stored_config.get("substitution_rules"))
         device_count, update_count = apply_global_config_to_devices(conn, apply_values)
         domain_update_count = 0
         if active_domain_changed:
@@ -2371,12 +2492,15 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
         device_rows = conn.execute(
             "SELECT id, active_domain FROM devices ORDER BY name COLLATE NOCASE",
         ).fetchall()
+        global_config = load_global_config(conn=conn)
+        substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         for device_row in device_rows:
             device_id = device_row["id"]
             active = device_row["active_domain"] or "naver"
             domain = forced_domain or normalize_domain(active)
             configs = load_device_configs(device_id, conn=conn)
             config_snapshot = build_config_snapshot(configs, domain)
+            missing_tokens = apply_substitutions_to_config(config_snapshot, substitution_rules)
             job = create_job(
                 conn,
                 device_id,
@@ -2384,6 +2508,7 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                 "batch_send",
                 {"config": config_snapshot},
             )
+            log_missing_substitutions(job, missing_tokens)
             created_jobs.append(job)
         conn.commit()
     return {
@@ -2400,6 +2525,8 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         device = get_device(device_id, conn=conn)
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        global_config = load_global_config(conn=conn)
+        substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
         config_snapshot["bcc_count"] = 0
@@ -2409,17 +2536,21 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             raise HTTPException(status_code=400, detail="RCPT TO 주소가 필요합니다.")
         if payload.header_override:
             config_snapshot["header"] = payload.header_override
+        missing_tokens = apply_substitutions_to_config(config_snapshot, substitution_rules)
+        substituted_rcpt, rcpt_missing = substitute_tokens(rcpt_to, substitution_rules)
+        missing_tokens.update(rcpt_missing)
         job = create_job(
             conn,
             device_id,
             domain,
             "single_send",
             {
-                "rcpt_to": rcpt_to,
+                "rcpt_to": substituted_rcpt,
                 "config": config_snapshot,
             },
         )
         conn.commit()
+    log_missing_substitutions(job, missing_tokens)
     return {"job": job}
 
 
@@ -2430,8 +2561,11 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
         device = get_device(device_id, conn=conn)
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        global_config = load_global_config(conn=conn)
+        substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
+        missing_tokens = apply_substitutions_to_config(config_snapshot, substitution_rules)
         job = create_job(
             conn,
             device_id,
@@ -2440,6 +2574,7 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             {"config": config_snapshot},
         )
         conn.commit()
+    log_missing_substitutions(job, missing_tokens)
     return {"job": job}
 
 

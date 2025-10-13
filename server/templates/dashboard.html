@@ -30,6 +30,8 @@
   --color-accent-strong: #1d4ed8;
   --color-accent-soft: #dbeafe;
   --color-accent-text-contrast: #ffffff;
+  --color-accent-ghost: rgba(37, 99, 235, 0.12);
+  --color-accent-ghost-strong: rgba(37, 99, 235, 0.22);
   --color-success: #047857;
   --color-success-bg: #dcfce7;
   --color-success-soft: #ecfdf5;
@@ -79,6 +81,8 @@
   --color-accent-strong: #93c5fd;
   --color-accent-soft: rgba(96, 165, 250, 0.18);
   --color-accent-text-contrast: #041019;
+  --color-accent-ghost: rgba(96, 165, 250, 0.16);
+  --color-accent-ghost-strong: rgba(147, 197, 253, 0.32);
   --color-success: #34d399;
   --color-success-bg: rgba(34, 197, 94, 0.22);
   --color-success-soft: rgba(22, 101, 52, 0.4);
@@ -125,6 +129,8 @@
     --color-accent-strong: #93c5fd;
     --color-accent-soft: rgba(96, 165, 250, 0.18);
     --color-accent-text-contrast: #041019;
+    --color-accent-ghost: rgba(96, 165, 250, 0.16);
+    --color-accent-ghost-strong: rgba(147, 197, 253, 0.32);
     --color-success: #34d399;
     --color-success-bg: rgba(34, 197, 94, 0.22);
     --color-success-soft: rgba(22, 101, 52, 0.4);
@@ -196,6 +202,7 @@ header {
 }
 .summary-actions {
   display: flex;
+  align-items: center;
   gap: 10px;
   margin-left: auto;
 }
@@ -211,10 +218,76 @@ header {
   height: 16px;
   margin: 0;
 }
-.summary-actions button.device-edit-active {
+.summary-nav {
+  display: inline-flex;
+  align-items: stretch;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface-subtle);
+  overflow: visible;
+}
+.summary-nav-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  background: transparent;
+  color: var(--color-muted-strong);
+  border: none;
+  min-width: 0;
+  cursor: pointer;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+.summary-nav-btn + .summary-nav-btn {
+  border-left: 1px solid var(--color-border);
+}
+.summary-nav-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.summary-nav-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.summary-nav-btn:hover:not(:disabled),
+.summary-nav-btn:focus-visible {
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+}
+.summary-nav-btn.substitution-manage-btn {
+  position: relative;
+  padding: 8px 18px;
+  background: linear-gradient(135deg, var(--color-accent-ghost), transparent);
+  color: var(--color-accent);
+  box-shadow: inset 0 0 0 1px var(--color-accent-ghost-strong);
+  border-radius: 999px;
+  transition: background 0.28s ease, color 0.28s ease, box-shadow 0.28s ease, transform 0.2s ease;
+}
+.summary-nav-btn.substitution-manage-btn:hover:not(:disabled),
+.summary-nav-btn.substitution-manage-btn:focus-visible {
+  background: linear-gradient(135deg, var(--color-accent-ghost-strong), var(--color-accent-ghost));
+  color: var(--color-accent-strong);
+  box-shadow: inset 0 0 0 1px var(--color-accent-strong), 0 10px 18px var(--shadow-hover);
+}
+.summary-nav-btn.substitution-manage-btn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.summary-nav-btn.device-edit-active {
   background: var(--color-danger-bg);
-  border-color: var(--color-danger-border);
   color: var(--color-danger);
+}
+.summary-nav-btn[data-state="dirty"]::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  display: inline-block;
+  margin-left: 6px;
 }
 .global-panel {
   background: var(--color-surface);
@@ -303,6 +376,151 @@ header {
 }
 .header-field textarea {
   min-height: 220px;
+}
+.substitution-modal-card {
+  width: min(640px, 95vw);
+}
+.substitution-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.substitution-token-warning {
+  color: var(--color-danger);
+  font-weight: 700;
+}
+.substitution-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.substitution-toolbar .substitution-hint {
+  flex: 1 1 auto;
+  font-size: 12px;
+  color: var(--color-muted);
+  margin: 0;
+}
+.substitution-toolbar button {
+  flex: 0 0 auto;
+}
+.substitution-table {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.substitution-row {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) minmax(120px, 1fr) auto;
+  gap: 8px;
+  align-items: stretch;
+}
+.substitution-row.dragging {
+  opacity: 0.65;
+}
+.substitution-placeholder {
+  border: 2px dashed var(--color-primary);
+  border-radius: 10px;
+  background: rgba(148, 163, 184, 0.16);
+  min-height: 44px;
+}
+.substitution-row.drag-over-before::before,
+.substitution-row.drag-over-after::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  right: 4px;
+  height: 0;
+  border-top: 2px dashed var(--color-primary);
+}
+.substitution-row.drag-over-before::before {
+  top: -5px;
+}
+.substitution-row.drag-over-after::after {
+  bottom: -5px;
+}
+.substitution-row {
+  position: relative;
+}
+.substitution-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 32px;
+  padding: 0;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface);
+  color: var(--color-muted-strong);
+  border-radius: 6px;
+  cursor: grab;
+  font-size: 16px;
+  line-height: 1;
+  touch-action: none;
+  user-select: none;
+}
+.substitution-handle:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+.substitution-handle:active {
+  cursor: grabbing;
+}
+.substitution-row.dragging .substitution-handle {
+  cursor: grabbing;
+}
+.substitution-row .field {
+  margin: 0;
+}
+.substitution-row .field span {
+  font-size: 12px;
+}
+.substitution-row .field input {
+  min-height: 34px;
+  font-size: 13px;
+  padding: 6px 10px;
+}
+.substitution-row.invalid .field input {
+  border-color: var(--color-danger-border);
+  background: var(--color-danger-bg);
+}
+.substitution-row.invalid .field input:focus {
+  border-color: var(--color-danger);
+  box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.2);
+}
+.substitution-row button.substitution-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 16px;
+  border-radius: 10px;
+  justify-self: end;
+  align-self: end;
+  transition: background-color 0.24s ease, color 0.24s ease, box-shadow 0.24s ease, transform 0.18s ease;
+}
+.substitution-row button.substitution-delete:focus-visible {
+  outline: 2px solid var(--color-danger);
+  outline-offset: 2px;
+}
+.substitution-empty {
+  padding: 10px;
+  border: 1px dashed var(--color-border);
+  border-radius: 10px;
+  font-size: 12px;
+  color: var(--color-muted);
+  text-align: center;
+}
+.substitution-feedback {
+  min-height: 16px;
+  font-size: 11px;
+  color: var(--color-muted);
+}
+.substitution-feedback.error {
+  color: var(--color-danger);
+}
+.substitution-feedback.success {
+  color: var(--color-success);
 }
 .domain-radio-group {
   display: inline-flex;
@@ -1258,6 +1476,9 @@ button:not(:disabled):hover {
 .modal-message.success {
   color: var(--color-success);
 }
+.modal-message.info {
+  color: var(--color-muted);
+}
 
 .refresh-group {
   display: flex;
@@ -1396,11 +1617,14 @@ button:not(:disabled):hover {
     </div>
   </div>
   <div class="summary-actions">
+    <div class="summary-nav" role="group" aria-label="요약 액션">
+      <button type="button" class="summary-nav-btn substitution-manage-btn" id="substitutionManageBtn" title="치환 변수 목록을 관리합니다.">치환 변수</button>
+      <button type="button" class="summary-nav-btn" id="editDevicesBtn" title="디바이스 카드 삭제 모드를 켭니다." disabled>편집</button>
+    </div>
     <label class="summary-toggle">
       <input type="checkbox" id="onlineOnlyToggle">
       온라인만 보기
     </label>
-    <button type="button" class="ghost small" id="editDevicesBtn" title="디바이스 카드 삭제 모드를 켭니다." disabled>편집</button>
   </div>
 </section>
 
@@ -1431,6 +1655,31 @@ button:not(:disabled):hover {
         <h4 style="margin:16px 0 8px 0;font-size:13px;font-weight:600;">미리보기</h4>
         <div id="previewBox" class="preview-box">파일을 선택하면 미리보기가 표시됩니다.</div>
       </div>
+    </div>
+  </div>
+</div>
+
+<div id="substitutionModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="substitutionModalTitle">
+  <div class="modal-card substitution-modal-card">
+    <div class="modal-header">
+      <div>
+        <h2 id="substitutionModalTitle">치환 변수 관리</h2>
+        <div class="meta" id="substitutionModalSubtitle">발송 시 반드시 <span class="substitution-token-warning">${변수명}</span> 형식을 사용하세요. 예: ${도메인}</div>
+      </div>
+      <button type="button" class="ghost" data-action="close-substitution">닫기</button>
+    </div>
+    <div class="modal-body substitution-modal-body">
+      <div class="modal-message" id="substitutionModalMessage"></div>
+      <div class="substitution-toolbar">
+        <p class="substitution-hint">변수명은 공백 없이 작성하고, 동일한 이름을 중복 등록할 수 없습니다.</p>
+        <button type="button" class="secondary" id="substitutionAddRowBtn">행 추가</button>
+      </div>
+      <div class="substitution-table" id="substitutionTable"></div>
+      <div class="substitution-feedback" id="substitutionFeedback"></div>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="ghost" id="substitutionCancelBtn">취소</button>
+      <button type="button" id="substitutionSaveBtn" disabled>저장</button>
     </div>
   </div>
 </div>
@@ -1510,6 +1759,7 @@ const GLOBAL_DEFAULTS = {
   bcc_count: "0",
   stop_schedule_enabled: false,
   stop_schedule_time: "",
+  substitution_rules: [],
 };
 const GLOBAL_INPUT_IDS = {
   active_domain: "globalActiveDomainGroup",
@@ -1566,6 +1816,27 @@ const state = {
   },
   globalStatusTimer: null,
   globalScheduleError: "",
+  substitutionRules: [],
+  substitutionDraft: [],
+  substitutionDirty: false,
+  substitutionInvalidRows: new Set(),
+  substitutionFeedbackTimer: null,
+  substitutionModal: {
+    open: false,
+  },
+  substitutionDrag: {
+    active: false,
+    sourceIndex: null,
+    overIndex: null,
+    pointerId: null,
+    handle: null,
+    sourceRow: null,
+    placeholder: null,
+    container: null,
+    originLeft: 0,
+    offsetY: 0,
+    restoreUserSelect: "",
+  },
   deviceEditMode: false,
   filterOnlineOnly: false,
   deletingDevices: new Set(),
@@ -2207,6 +2478,7 @@ function normalizeGlobalConfig(config) {
   normalized.updated_at = config?.updated_at || null;
   normalized.stop_schedule_last_run = config?.stop_schedule_last_run || null;
   normalized.stop_schedule_next_run = config?.stop_schedule_next_run || null;
+  normalized.substitution_rules = normalizeSubstitutionRules(config?.substitution_rules || []);
   return normalized;
 }
 
@@ -2262,6 +2534,718 @@ function applyValuesToGlobalDraft(values, options = {}) {
     syncGlobalInputsFromDraft({ force: true });
   }
   updateGlobalScheduleUI();
+}
+
+function normalizeSubstitutionRules(rules) {
+  if (!Array.isArray(rules)) {
+    return [];
+  }
+  return rules
+    .map((rule) => ({
+      key: typeof rule?.key === "string" ? rule.key.trim() : "",
+      value: typeof rule?.value === "string" ? rule.value.trim() : "",
+    }))
+    .filter((rule) => rule.key);
+}
+
+function cloneSubstitutionRules(rules) {
+  return normalizeSubstitutionRules(rules).map((rule) => ({ key: rule.key, value: rule.value }));
+}
+
+function renderSubstitutionDraft() {
+  const container = document.getElementById("substitutionTable");
+  if (!container) return;
+  let activeDescriptor = null;
+  const activeElement = document.activeElement;
+  if (activeElement && container.contains(activeElement) && activeElement.dataset?.subField) {
+    const activeRow = activeElement.closest(".substitution-row");
+    if (activeRow) {
+      const idx = Number(activeRow.dataset.index);
+      if (!Number.isNaN(idx)) {
+        activeDescriptor = {
+          index: idx,
+          field: activeElement.dataset.subField,
+          selectionStart: activeElement.selectionStart,
+          selectionEnd: activeElement.selectionEnd,
+        };
+      }
+    }
+  }
+  container.innerHTML = "";
+  if (!state.substitutionDraft.length) {
+    const empty = document.createElement("div");
+    empty.className = "substitution-empty";
+    empty.textContent = "치환 변수가 없습니다. '행 추가' 버튼으로 새 변수를 등록하세요.";
+    container.appendChild(empty);
+    return;
+  }
+  state.substitutionDraft.forEach((rule, index) => {
+    const row = document.createElement("div");
+    row.className = "substitution-row";
+    row.dataset.index = String(index);
+    if (state.substitutionInvalidRows.has(index)) {
+      row.classList.add("invalid");
+    }
+
+    const dragHandle = document.createElement("button");
+    dragHandle.type = "button";
+    dragHandle.className = "substitution-handle";
+    dragHandle.dataset.subAction = "drag-handle";
+    dragHandle.setAttribute("aria-label", "드래그하여 순서를 변경");
+    dragHandle.title = "드래그하여 순서를 변경";
+    dragHandle.draggable = false;
+    dragHandle.innerHTML = '<span aria-hidden="true">≡</span>';
+    row.appendChild(dragHandle);
+
+    const keyCell = document.createElement("div");
+    keyCell.className = "substitution-cell";
+    const keyLabel = document.createElement("label");
+    keyLabel.className = "field";
+    const keySpan = document.createElement("span");
+    keySpan.textContent = "변수명";
+    const keyInput = document.createElement("input");
+    keyInput.type = "text";
+    keyInput.placeholder = "예: 도메인";
+    keyInput.autocomplete = "off";
+    keyInput.dataset.subField = "key";
+    keyInput.value = typeof rule?.key === "string" ? rule.key : "";
+    keyLabel.appendChild(keySpan);
+    keyLabel.appendChild(keyInput);
+    keyCell.appendChild(keyLabel);
+    row.appendChild(keyCell);
+
+    const valueCell = document.createElement("div");
+    valueCell.className = "substitution-cell";
+    const valueLabel = document.createElement("label");
+    valueLabel.className = "field";
+    const valueSpan = document.createElement("span");
+    valueSpan.textContent = "치환값";
+    const valueInput = document.createElement("input");
+    valueInput.type = "text";
+    valueInput.placeholder = "예: naver.com";
+    valueInput.autocomplete = "off";
+    valueInput.dataset.subField = "value";
+    valueInput.value = typeof rule?.value === "string" ? rule.value : "";
+    valueLabel.appendChild(valueSpan);
+    valueLabel.appendChild(valueInput);
+    valueCell.appendChild(valueLabel);
+    row.appendChild(valueCell);
+
+    const deleteBtn = document.createElement("button");
+    deleteBtn.type = "button";
+    deleteBtn.className = "danger small substitution-delete";
+    deleteBtn.dataset.subAction = "delete";
+    deleteBtn.textContent = "삭제";
+    row.appendChild(deleteBtn);
+
+    container.appendChild(row);
+  });
+  updateSubstitutionModalButtons();
+  if (activeDescriptor) {
+    const restored = container.querySelector(
+      `.substitution-row[data-index="${activeDescriptor.index}"] input[data-sub-field="${activeDescriptor.field}"]`
+    );
+    if (restored) {
+      try {
+        restored.focus({ preventScroll: true });
+      } catch (err) {
+        restored.focus();
+      }
+      const { selectionStart, selectionEnd } = activeDescriptor;
+      if (
+        typeof selectionStart === "number" &&
+        typeof selectionEnd === "number" &&
+        selectionStart >= 0 &&
+        selectionEnd >= selectionStart
+      ) {
+        try {
+          restored.setSelectionRange(selectionStart, selectionEnd);
+        } catch (err) {
+          restored.setSelectionRange(restored.value.length, restored.value.length);
+        }
+      } else {
+        restored.setSelectionRange(restored.value.length, restored.value.length);
+      }
+    }
+  }
+}
+
+function updateSubstitutionRowValidity() {
+  const container = document.getElementById("substitutionTable");
+  if (!container) return;
+  container.querySelectorAll(".substitution-row").forEach((row) => {
+    const idx = Number(row.dataset.index);
+    if (Number.isNaN(idx)) {
+      row.classList.remove("invalid");
+      return;
+    }
+    if (state.substitutionInvalidRows.has(idx)) {
+      row.classList.add("invalid");
+    } else {
+      row.classList.remove("invalid");
+    }
+  });
+}
+
+function setSubstitutionFeedback(message, type = "info", options = {}) {
+  const box = document.getElementById("substitutionFeedback");
+  if (!box) return;
+  if (state.substitutionFeedbackTimer) {
+    clearTimeout(state.substitutionFeedbackTimer);
+    state.substitutionFeedbackTimer = null;
+  }
+  box.textContent = message || "";
+  box.className = "substitution-feedback";
+  if (type === "error") {
+    box.classList.add("error");
+  } else if (type === "success") {
+    box.classList.add("success");
+  }
+  const { persist = false, duration = 4000 } = options;
+  if (message && !persist) {
+    state.substitutionFeedbackTimer = setTimeout(() => {
+      box.textContent = "";
+      box.className = "substitution-feedback";
+      state.substitutionFeedbackTimer = null;
+    }, duration);
+  }
+}
+
+function handleSubstitutionAddRow(event) {
+  if (event) {
+    event.preventDefault();
+  }
+  state.substitutionDraft.push({ key: "", value: "" });
+  const newIndex = state.substitutionDraft.length - 1;
+  renderSubstitutionDraft();
+  state.substitutionInvalidRows = new Set([newIndex]);
+  updateSubstitutionRowValidity();
+  state.substitutionDirty = true;
+  updateSubstitutionModalButtons();
+  setSubstitutionFeedback("", "info", { persist: false });
+  const container = document.getElementById("substitutionTable");
+  const focusInput = container?.querySelector(`.substitution-row[data-index="${newIndex}"] input[data-sub-field="key"]`);
+  if (focusInput) {
+    focusInput.focus();
+  }
+  validateSubstitutionDraft({ showMessage: false });
+}
+
+function handleSubstitutionInput(event) {
+  const input = event.target;
+  if (!input || !input.dataset || !input.dataset.subField) {
+    return;
+  }
+  const row = input.closest(".substitution-row");
+  if (!row) {
+    return;
+  }
+  const index = Number(row.dataset.index);
+  if (Number.isNaN(index)) {
+    return;
+  }
+  const field = input.dataset.subField;
+  const value = input.value;
+  if (!state.substitutionDraft[index]) {
+    state.substitutionDraft[index] = { key: "", value: "" };
+  }
+  state.substitutionDraft[index][field] = value;
+  state.substitutionDirty = true;
+  if (state.substitutionInvalidRows.has(index)) {
+    state.substitutionInvalidRows.delete(index);
+    row.classList.remove("invalid");
+  }
+  setSubstitutionFeedback("", "info", { persist: false });
+  validateSubstitutionDraft({ showMessage: false });
+}
+
+function handleSubstitutionDelete(event) {
+  const button = event.target.closest("[data-sub-action=\"delete\"]");
+  if (!button) return;
+  event.preventDefault();
+  const row = button.closest(".substitution-row");
+  if (!row) return;
+  const index = Number(row.dataset.index);
+  if (Number.isNaN(index)) return;
+  state.substitutionDraft.splice(index, 1);
+  state.substitutionDirty = true;
+  state.substitutionInvalidRows = new Set();
+  renderSubstitutionDraft();
+  updateSubstitutionRowValidity();
+  setSubstitutionFeedback("", "info", { persist: false });
+  validateSubstitutionDraft({ showMessage: false });
+}
+
+function cleanupSubstitutionDragVisuals() {
+  const drag = state.substitutionDrag;
+  window.removeEventListener("pointermove", handleSubstitutionPointerMove);
+  window.removeEventListener("pointerup", handleSubstitutionPointerUp);
+  window.removeEventListener("pointercancel", handleSubstitutionPointerCancel);
+  if (drag.handle && drag.pointerId !== null) {
+    try {
+      drag.handle.releasePointerCapture(drag.pointerId);
+    } catch (err) {
+      // pointer capture를 해제하지 못해도 큰 문제는 아니다.
+    }
+  }
+  if (typeof drag.restoreUserSelect === "string") {
+    document.body.style.userSelect = drag.restoreUserSelect;
+  }
+  if (drag.placeholder && drag.placeholder.parentNode) {
+    drag.placeholder.parentNode.removeChild(drag.placeholder);
+  }
+  if (drag.sourceRow) {
+    drag.sourceRow.classList.remove("dragging");
+    drag.sourceRow.style.position = "";
+    drag.sourceRow.style.top = "";
+    drag.sourceRow.style.left = "";
+    drag.sourceRow.style.width = "";
+    drag.sourceRow.style.height = "";
+    drag.sourceRow.style.zIndex = "";
+    drag.sourceRow.style.pointerEvents = "";
+    drag.sourceRow.style.margin = "";
+    drag.sourceRow.remove();
+  }
+}
+
+function resetSubstitutionDragState() {
+  state.substitutionDrag.active = false;
+  state.substitutionDrag.sourceIndex = null;
+  state.substitutionDrag.overIndex = null;
+  state.substitutionDrag.pointerId = null;
+  state.substitutionDrag.handle = null;
+  state.substitutionDrag.sourceRow = null;
+  state.substitutionDrag.placeholder = null;
+  state.substitutionDrag.container = null;
+  state.substitutionDrag.originLeft = 0;
+  state.substitutionDrag.offsetY = 0;
+  state.substitutionDrag.restoreUserSelect = "";
+}
+
+function updateSubstitutionPlaceholderPosition(pointerY) {
+  const { container, placeholder } = state.substitutionDrag;
+  if (!container || !placeholder) {
+    return;
+  }
+  const rows = Array.from(container.querySelectorAll(".substitution-row"));
+  let inserted = false;
+  for (const sibling of rows) {
+    const rect = sibling.getBoundingClientRect();
+    if (pointerY < rect.top + rect.height / 2) {
+      if (placeholder.nextSibling !== sibling) {
+        container.insertBefore(placeholder, sibling);
+      }
+      inserted = true;
+      break;
+    }
+  }
+  if (!inserted) {
+    container.appendChild(placeholder);
+  }
+  const ordered = Array.from(container.children).filter((node) => node.classList?.contains?.("substitution-row") || node.classList?.contains?.("substitution-placeholder"));
+  const placeholderIndex = ordered.indexOf(placeholder);
+  if (placeholderIndex >= 0) {
+    state.substitutionDrag.overIndex = placeholderIndex;
+  } else {
+    state.substitutionDrag.overIndex = ordered.length ? ordered.length - 1 : 0;
+  }
+}
+
+function handleSubstitutionPointerDown(event) {
+  const handle = event.target.closest(".substitution-handle");
+  if (!handle) {
+    return;
+  }
+  if (event.pointerType === "mouse" && event.button !== 0) {
+    return;
+  }
+  const row = handle.closest(".substitution-row");
+  if (!row) {
+    return;
+  }
+  const container = document.getElementById("substitutionTable");
+  if (!container) {
+    return;
+  }
+  const index = Number(row.dataset.index);
+  if (Number.isNaN(index)) {
+    return;
+  }
+  event.preventDefault();
+  if (state.substitutionDrag.active) {
+    cleanupSubstitutionDragVisuals();
+    resetSubstitutionDragState();
+  }
+  const rect = row.getBoundingClientRect();
+  const placeholder = document.createElement("div");
+  placeholder.className = "substitution-placeholder";
+  placeholder.style.height = `${rect.height}px`;
+  placeholder.style.width = `${rect.width}px`;
+  container.insertBefore(placeholder, row);
+  const previousUserSelect = document.body.style.userSelect || "";
+  state.substitutionDrag.active = true;
+  state.substitutionDrag.sourceIndex = index;
+  state.substitutionDrag.overIndex = index;
+  state.substitutionDrag.pointerId = event.pointerId;
+  state.substitutionDrag.handle = handle;
+  state.substitutionDrag.sourceRow = row;
+  state.substitutionDrag.placeholder = placeholder;
+  state.substitutionDrag.container = container;
+  state.substitutionDrag.originLeft = rect.left;
+  state.substitutionDrag.offsetY = event.clientY - rect.top;
+  state.substitutionDrag.restoreUserSelect = previousUserSelect;
+  row.classList.add("dragging");
+  row.style.position = "fixed";
+  row.style.top = `${rect.top}px`;
+  row.style.left = `${rect.left}px`;
+  row.style.width = `${rect.width}px`;
+  row.style.height = `${rect.height}px`;
+  row.style.zIndex = "1000";
+  row.style.pointerEvents = "none";
+  row.style.margin = "0";
+  container.removeChild(row);
+  document.body.appendChild(row);
+  document.body.style.userSelect = "none";
+  try {
+    handle.setPointerCapture(event.pointerId);
+  } catch (err) {
+    // pointer capture가 지원되지 않는 환경이 있을 수 있다.
+  }
+  window.addEventListener("pointermove", handleSubstitutionPointerMove, { passive: false });
+  window.addEventListener("pointerup", handleSubstitutionPointerUp, { passive: false });
+  window.addEventListener("pointercancel", handleSubstitutionPointerCancel, { passive: false });
+  updateSubstitutionPlaceholderPosition(event.clientY);
+}
+
+function handleSubstitutionPointerMove(event) {
+  if (!state.substitutionDrag.active || event.pointerId !== state.substitutionDrag.pointerId) {
+    return;
+  }
+  event.preventDefault();
+  const row = state.substitutionDrag.sourceRow;
+  if (!row) {
+    return;
+  }
+  const top = event.clientY - state.substitutionDrag.offsetY;
+  row.style.top = `${top}px`;
+  row.style.left = `${state.substitutionDrag.originLeft}px`;
+  updateSubstitutionPlaceholderPosition(event.clientY);
+}
+
+function finishSubstitutionPointerDrag(options = {}) {
+  if (!state.substitutionDrag.active) {
+    return;
+  }
+  const { cancel = false } = options;
+  const dropIndex = state.substitutionDrag.overIndex;
+  const sourceIndex = state.substitutionDrag.sourceIndex;
+  cleanupSubstitutionDragVisuals();
+  resetSubstitutionDragState();
+  if (cancel) {
+    renderSubstitutionDraft();
+    validateSubstitutionDraft({ showMessage: false });
+    return;
+  }
+  const draft = state.substitutionDraft;
+  if (!Array.isArray(draft) || draft.length === 0) {
+    renderSubstitutionDraft();
+    validateSubstitutionDraft({ showMessage: false });
+    return;
+  }
+  if (sourceIndex === null || Number.isNaN(sourceIndex) || sourceIndex < 0 || sourceIndex >= draft.length) {
+    renderSubstitutionDraft();
+    validateSubstitutionDraft({ showMessage: false });
+    return;
+  }
+  let insertIndex = typeof dropIndex === "number" ? dropIndex : draft.length - 1;
+  if (insertIndex > draft.length - 1) {
+    insertIndex = draft.length - 1;
+  }
+  const [moved] = draft.splice(sourceIndex, 1);
+  if (!moved) {
+    renderSubstitutionDraft();
+    validateSubstitutionDraft({ showMessage: false });
+    return;
+  }
+  if (sourceIndex < insertIndex) {
+    insertIndex -= 1;
+  }
+  if (insertIndex < 0) {
+    insertIndex = 0;
+  }
+  draft.splice(insertIndex, 0, moved);
+  state.substitutionDirty = true;
+  renderSubstitutionDraft();
+  validateSubstitutionDraft({ showMessage: false });
+  setSubstitutionFeedback("", "info", { persist: false });
+}
+
+function handleSubstitutionPointerUp(event) {
+  if (event.pointerId !== state.substitutionDrag.pointerId) {
+    return;
+  }
+  finishSubstitutionPointerDrag({ cancel: false });
+}
+
+function handleSubstitutionPointerCancel(event) {
+  if (event.pointerId !== state.substitutionDrag.pointerId) {
+    return;
+  }
+  finishSubstitutionPointerDrag({ cancel: true });
+}
+
+function prepareSubstitutionPayload(source = state.substitutionDraft) {
+  const invalidRows = new Set();
+  const sanitized = [];
+  const seen = new Map();
+  let message = "";
+  (Array.isArray(source) ? source : []).forEach((rule, index) => {
+    const key = typeof rule?.key === "string" ? rule.key.trim() : "";
+    const value = typeof rule?.value === "string" ? rule.value.trim() : "";
+    if (!key && !value) {
+      invalidRows.add(index);
+      if (!message) {
+        message = "빈 행이 있습니다. 값 입력 후 저장하거나 삭제하세요.";
+      }
+      return;
+    }
+    if (!key) {
+      invalidRows.add(index);
+      if (!message) {
+        message = "변수명을 입력하세요.";
+      }
+      return;
+    }
+    if (!value) {
+      invalidRows.add(index);
+      if (!message) {
+        message = `${key} 치환값을 입력하세요.`;
+      }
+      return;
+    }
+    const token = key.toLowerCase();
+    if (seen.has(token)) {
+      invalidRows.add(index);
+      invalidRows.add(seen.get(token));
+      if (!message) {
+        message = `${key} 변수명이 중복되었습니다.`;
+      }
+      return;
+    }
+    seen.set(token, index);
+    sanitized.push({ key, value });
+  });
+  return {
+    ok: invalidRows.size === 0,
+    rules: sanitized,
+    invalidRows,
+    message,
+  };
+}
+
+function validateSubstitutionDraft(options = {}) {
+  const { showMessage = false } = options;
+  const prepared = prepareSubstitutionPayload();
+  state.substitutionInvalidRows = prepared.invalidRows;
+  updateSubstitutionRowValidity();
+  if (!prepared.ok) {
+    state.substitutionDirty = true;
+    if (prepared.message) {
+      setSubstitutionFeedback(prepared.message, "error", { persist: true });
+    } else if (!showMessage) {
+      setSubstitutionFeedback("");
+    }
+    updateSubstitutionModalButtons();
+    return prepared;
+  }
+  const currentSnapshot = JSON.stringify(state.substitutionRules);
+  const nextSnapshot = JSON.stringify(prepared.rules);
+  state.substitutionDirty = currentSnapshot !== nextSnapshot;
+  if (showMessage) {
+    if (state.substitutionDirty) {
+      setSubstitutionFeedback("저장되지 않은 변경 사항이 있습니다.", "info");
+    } else {
+      setSubstitutionFeedback("변경 사항이 없습니다.", "info");
+    }
+  } else {
+    setSubstitutionFeedback("");
+  }
+  updateSubstitutionModalButtons();
+  return prepared;
+}
+
+function updateSubstitutionModalButtons() {
+  const saveBtn = document.getElementById("substitutionSaveBtn");
+  if (saveBtn) {
+    const hasInvalid = state.substitutionInvalidRows.size > 0;
+    saveBtn.disabled = hasInvalid || !state.substitutionDirty;
+  }
+  const openBtn = document.getElementById("substitutionManageBtn");
+  if (openBtn) {
+    if (state.substitutionDirty) {
+      openBtn.setAttribute("data-state", "dirty");
+    } else {
+      openBtn.removeAttribute("data-state");
+    }
+  }
+}
+
+function setSubstitutionModalMessage(message = "", type = "info") {
+  const box = document.getElementById("substitutionModalMessage");
+  if (!box) return;
+  box.textContent = message || "";
+  box.className = "modal-message";
+  if (!message) {
+    return;
+  }
+  if (type === "error") {
+    box.classList.add("error");
+  } else if (type === "success") {
+    box.classList.add("success");
+  } else {
+    box.classList.add("info");
+  }
+}
+
+function resetSubstitutionDraft() {
+  if (state.substitutionDrag.active) {
+    cleanupSubstitutionDragVisuals();
+    resetSubstitutionDragState();
+  } else {
+    resetSubstitutionDragState();
+  }
+  state.substitutionDraft = cloneSubstitutionRules(state.substitutionRules);
+  state.substitutionInvalidRows = new Set();
+  renderSubstitutionDraft();
+  validateSubstitutionDraft({ showMessage: false });
+}
+
+function openSubstitutionModal() {
+  const modal = document.getElementById("substitutionModal");
+  if (!modal) return;
+  state.substitutionModal.open = true;
+  modal.classList.remove("hidden");
+  setSubstitutionModalMessage("");
+  setSubstitutionFeedback("");
+  resetSubstitutionDraft();
+  const firstInput = modal.querySelector('.substitution-row input[data-sub-field="key"]');
+  if (firstInput) {
+    setTimeout(() => firstInput.focus(), 0);
+  }
+}
+
+function closeSubstitutionModal(options = {}) {
+  const { discard = true } = options;
+  const modal = document.getElementById("substitutionModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  state.substitutionModal.open = false;
+  setSubstitutionModalMessage("");
+  setSubstitutionFeedback("");
+  if (discard) {
+    resetSubstitutionDraft();
+  } else {
+    validateSubstitutionDraft({ showMessage: false });
+  }
+}
+
+async function submitSubstitutionModal() {
+  const saveBtn = document.getElementById("substitutionSaveBtn");
+  if (!saveBtn) return;
+  const prepared = validateSubstitutionDraft({ showMessage: true });
+  if (!prepared.ok) {
+    return;
+  }
+  if (!state.substitutionDirty) {
+    setSubstitutionModalMessage("변경 사항이 없습니다.", "info");
+    return;
+  }
+  const originalText = saveBtn.textContent;
+  saveBtn.disabled = true;
+  saveBtn.textContent = "저장 중...";
+  try {
+    const result = await fetchJSON("/api/global/config/apply", {
+      method: "POST",
+      body: JSON.stringify({ substitution_rules: prepared.rules }),
+    });
+    const serverConfig = { ...(result.config || {}), updated_at: result.updated_at || null };
+    const serverRules = normalizeSubstitutionRules(serverConfig.substitution_rules || prepared.rules);
+    state.substitutionRules = cloneSubstitutionRules(serverRules);
+    state.substitutionDraft = cloneSubstitutionRules(serverRules);
+    state.substitutionDirty = false;
+    state.substitutionInvalidRows = new Set();
+    state.globalConfig.substitution_rules = cloneSubstitutionRules(serverRules);
+    if (serverConfig.updated_at) {
+      state.globalConfig.updated_at = serverConfig.updated_at;
+      const updatedAtEl = document.getElementById("globalUpdatedAt");
+      if (updatedAtEl) {
+        updatedAtEl.textContent = `마지막 적용: ${formatDate(serverConfig.updated_at)}`;
+      }
+    }
+    renderSubstitutionDraft();
+    updateSubstitutionRowValidity();
+    updateSubstitutionModalButtons();
+    closeSubstitutionModal();
+    setGlobalStatus(`총 ${prepared.rules.length}개의 치환 변수를 저장했습니다.`, "success");
+    const manageBtn = document.getElementById("substitutionManageBtn");
+    if (manageBtn) {
+      manageBtn.focus();
+    }
+  } catch (err) {
+    console.error("치환 변수 저장 실패", err);
+    setSubstitutionModalMessage(err?.message || "치환 변수를 저장하지 못했습니다.", "error");
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = originalText;
+  }
+}
+
+function initSubstitutionSection() {
+  const container = document.getElementById("substitutionTable");
+  if (!container) return;
+  container.addEventListener("input", handleSubstitutionInput);
+  container.addEventListener("click", handleSubstitutionDelete);
+  container.addEventListener("pointerdown", handleSubstitutionPointerDown);
+  const addBtn = document.getElementById("substitutionAddRowBtn");
+  if (addBtn) {
+    addBtn.addEventListener("click", handleSubstitutionAddRow);
+  }
+  const openBtn = document.getElementById("substitutionManageBtn");
+  if (openBtn) {
+    openBtn.addEventListener("click", () => {
+      openSubstitutionModal();
+    });
+  }
+  const cancelBtn = document.getElementById("substitutionCancelBtn");
+  if (cancelBtn) {
+    cancelBtn.addEventListener("click", () => {
+      closeSubstitutionModal({ discard: true });
+    });
+  }
+  const closeBtn = document.querySelector('[data-action="close-substitution"]');
+  if (closeBtn) {
+    closeBtn.addEventListener("click", () => {
+      closeSubstitutionModal({ discard: true });
+    });
+  }
+  const modal = document.getElementById("substitutionModal");
+  if (modal) {
+    modal.addEventListener("click", (event) => {
+      if (event.target === modal) {
+        closeSubstitutionModal({ discard: true });
+      }
+    });
+  }
+  const saveBtn = document.getElementById("substitutionSaveBtn");
+  if (saveBtn) {
+    saveBtn.addEventListener("click", submitSubstitutionModal);
+  }
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && state.substitutionModal.open) {
+      closeSubstitutionModal({ discard: true });
+    }
+  });
+  resetSubstitutionDraft();
 }
 
 function initGlobalForm() {
@@ -2366,7 +3350,19 @@ function renderGlobalConfig(config) {
   const normalized = normalizeGlobalConfig(config || {});
   const updatedAtEl = document.getElementById("globalUpdatedAt");
   state.globalConfig = { ...normalized };
+  state.globalConfig.substitution_rules = cloneSubstitutionRules(normalized.substitution_rules);
   state.globalScheduleError = "";
+  const normalizedSubs = cloneSubstitutionRules(normalized.substitution_rules);
+  state.substitutionRules = normalizedSubs;
+  if (!state.substitutionDirty) {
+    state.substitutionDraft = cloneSubstitutionRules(normalizedSubs);
+    state.substitutionInvalidRows = new Set();
+    renderSubstitutionDraft();
+    validateSubstitutionDraft({ showMessage: false });
+  } else {
+    updateSubstitutionRowValidity();
+    updateSubstitutionModalButtons();
+  }
   GLOBAL_FIELD_LIST.forEach((field) => {
     if (!state.globalDirty[field]) {
       state.globalDraft[field] = normalized[field];
@@ -4844,6 +5840,7 @@ if (purgeBtn) {
 }
 
 initGlobalForm();
+initSubstitutionSection();
 
 document.getElementById("globalApplyBtn").addEventListener("click", () => {
   handleGlobalApply();
@@ -4919,6 +5916,10 @@ async function handleGlobalApply() {
   state.globalDirty.stop_schedule_enabled = true;
   updateGlobalScheduleUI({ error: null });
 
+  const previousRulesSnapshot = JSON.stringify(state.substitutionRules);
+  const substitutionPayload = cloneSubstitutionRules(state.substitutionRules);
+  const upcomingRulesSnapshot = JSON.stringify(substitutionPayload);
+
   const payload = {
     active_domain: activeDomainValue,
     helo: heloValue,
@@ -4929,6 +5930,7 @@ async function handleGlobalApply() {
     stop_schedule_enabled: toggleChecked && Boolean(sanitizedSchedule),
     stop_schedule_time: sanitizedSchedule || "",
   };
+  payload.substitution_rules = substitutionPayload;
 
   const originalText = applyBtn.textContent;
   applyBtn.disabled = true;
@@ -4944,6 +5946,8 @@ async function handleGlobalApply() {
     const scheduleState = result.schedule_state || {};
     const scheduleEnabled = Boolean(scheduleState.enabled);
     const scheduleTime = sanitizeScheduleTime(scheduleState.time) || "";
+    const substitutionChanged = previousRulesSnapshot !== upcomingRulesSnapshot;
+    const substitutionWasDirty = state.substitutionDirty;
 
     if (!appliedFields.length || affected <= 0) {
       const summary = scheduleEnabled
@@ -4959,6 +5963,7 @@ async function handleGlobalApply() {
         if (field === "session_count") return "세션 수";
         if (field === "bcc_count") return "BCC 수";
         if (field === "stop_schedule") return "자동 중지";
+        if (field === "substitution_rules") return "치환 변수";
         return field.toUpperCase();
       });
       let message = fieldLabels.length
@@ -4975,7 +5980,13 @@ async function handleGlobalApply() {
       state.globalDirty[field] = false;
     });
 
+    state.substitutionDirty = false;
+    state.substitutionInvalidRows = new Set();
     renderGlobalConfig(serverConfig);
+    if (substitutionChanged || substitutionWasDirty) {
+      setSubstitutionModalMessage("치환 변수가 최신 상태로 반영되었습니다.", "success");
+    }
+
     updateGlobalScheduleUI({ error: null });
     await loadDevices({ silent: true });
   } catch (err) {
