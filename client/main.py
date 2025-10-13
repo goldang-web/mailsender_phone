@@ -25,7 +25,7 @@ from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 from lib.naver_imap import probe_imap_connection, verify_delivery
 
 
-APP_VERSION = "0.0.28"
+APP_VERSION = "0.0.29"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -2374,10 +2374,15 @@ class MailClient:
             error=error_message,
         )
 
+    def _log_imap_console(self, message: str) -> None:
+        print(f"[IMAP 테스트] {message}", flush=True)
+
     def handle_imap_test(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
         normalized = (domain or "naver").lower()
         if normalized != "naver":
-            return JobResult(job_id=job_id, status="failed", message="네이버 도메인에서만 IMAP 테스트를 지원합니다.")
+            message = "네이버 도메인에서만 IMAP 테스트를 지원합니다."
+            self._log_imap_console(message)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
         payload = payload or {}
         username = normalize_imap_string(payload.get("username"))
         settings = self._imap_settings_for_domain(normalized)
@@ -2385,20 +2390,20 @@ class MailClient:
             username = normalize_imap_string(settings.get("username"))
         if not username:
             message = "IMAP 계정 ID가 설정되지 않았습니다."
-        print(f"[IMAP 테스트] {message}", flush=True)
-        return JobResult(job_id=job_id, status="failed", message=message, error=message)
+            self._log_imap_console(message)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
         use_saved_password = bool(payload.get("use_saved_password"))
-        password = payload.get("password") or ""
+        password = str(payload.get("password") or "")
         used_saved_password = False
         if not password and use_saved_password:
             password = settings.get("password") or ""
-            used_saved_password = True
+            used_saved_password = bool(password)
         if not password:
             message = "IMAP 비밀번호를 확인할 수 없습니다."
-        print(f"[IMAP 테스트] {message}", flush=True)
-        return JobResult(job_id=job_id, status="failed", message=message, error=message)
+            self._log_imap_console(message)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
         folder = str(payload.get("folder") or "Junk").strip() or "Junk"
-        print(f"[IMAP 테스트] 계정 {username} · 폴더 {folder}", flush=True)
+        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 연결 시도")
         diagnostics = probe_imap_connection(username, password, folder=folder)
         success = bool(diagnostics.get("success"))
         latency = diagnostics.get("latency")
@@ -2417,10 +2422,10 @@ class MailClient:
         if success:
             latency_text = f"{latency:.1f}s" if isinstance(latency, (int, float)) else "-"
             message = f"IMAP 연결 성공 · {folder} 접근 · 지연 {latency_text}"
-            print(f"[IMAP 테스트] 성공 - {message}", flush=True)
+            self._log_imap_console(f"성공 - {message}")
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
         error_message = reason or "IMAP 연결 실패"
-        print(f"[IMAP 테스트] 실패 - {error_message}", flush=True)
+        self._log_imap_console(f"실패 - {error_message}")
         return JobResult(
             job_id=job_id,
             status="failed",
