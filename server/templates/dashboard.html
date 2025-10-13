@@ -1314,7 +1314,7 @@ button:not(:disabled):hover {
         <div class="global-section-header">
           <h3 class="global-section-title">발송 제어</h3>
           <div class="global-actions global-section-actions">
-            <button id="globalApplyBtn">설정 적용</button>
+            <button id="globalApplyBtn">전체 적용</button>
             <button class="secondary" id="globalSendAllBtn">전체 발송</button>
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
           </div>
@@ -3714,18 +3714,42 @@ function attachCardEvents(card) {
 
   const copyGlobalBtn = card.querySelector('button[data-action="copy-global"]');
   if (copyGlobalBtn) {
-    copyGlobalBtn.addEventListener("click", () => {
+    copyGlobalBtn.addEventListener("click", async () => {
+      if (copyGlobalBtn.disabled) return;
+      if (!copyGlobalBtn.dataset.defaultLabel) {
+        copyGlobalBtn.dataset.defaultLabel = copyGlobalBtn.textContent;
+      }
       const currentDevice = getDevice();
-      const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
+      const domain =
+        card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value ||
+        currentDevice.active_domain ||
+        "naver";
+      const sanitizedDomain = sanitizeGlobalDomain(domain);
       const { payload } = collectConfigPayload(card, currentDevice, domain);
       applyValuesToGlobalDraft({
+        active_domain: sanitizedDomain,
         helo: payload.helo,
         mail_from: payload.mail_from,
         header: payload.header,
         session_count: payload.session_count,
         bcc_count: payload.bcc_count,
       });
-      setGlobalStatus("선택한 카드의 설정을 전체 설정 폼에 채웠습니다. 적용 버튼을 눌러 반영하세요.", "info");
+      state.globalDraft.active_domain = sanitizedDomain;
+      state.globalDirty.active_domain = true;
+      document
+        .querySelectorAll('input[name="globalActiveDomain"]')
+        .forEach((radio) => {
+          radio.checked = radio.value === sanitizedDomain;
+        });
+      setGlobalStatus("선택한 카드 설정을 전체 기기에 적용합니다...", "info");
+      copyGlobalBtn.disabled = true;
+      copyGlobalBtn.textContent = "전체 적용 중...";
+      try {
+        await handleGlobalApply();
+      } finally {
+        copyGlobalBtn.disabled = false;
+        copyGlobalBtn.textContent = copyGlobalBtn.dataset.defaultLabel || "전체 적용";
+      }
     });
   }
 
@@ -4908,7 +4932,7 @@ async function handleGlobalApply() {
 
   const originalText = applyBtn.textContent;
   applyBtn.disabled = true;
-  applyBtn.textContent = "적용 중...";
+  applyBtn.textContent = "전체 적용 중...";
   try {
     const result = await fetchJSON("/api/global/config/apply", {
       method: "POST",
@@ -4955,7 +4979,7 @@ async function handleGlobalApply() {
     updateGlobalScheduleUI({ error: null });
     await loadDevices({ silent: true });
   } catch (err) {
-    setGlobalStatus(err.message || "설정 적용에 실패했습니다.", "error");
+    setGlobalStatus(err.message || "전체 적용에 실패했습니다.", "error");
     GLOBAL_FIELD_LIST.forEach((field) => {
       state.globalDirty[field] = false;
     });
