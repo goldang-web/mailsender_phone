@@ -2706,6 +2706,16 @@ class ImapReportPayload(BaseModel):
     failure_action: Optional[str] = None
     sent_window_count: Optional[int] = None
     sent_threshold: Optional[int] = None
+    ip_change_attempted: Optional[bool] = None
+    ip_change_success: Optional[bool] = None
+    ip_change_message: Optional[str] = None
+    ip_change_marker: Optional[str] = None
+    ip_change_reason: Optional[str] = None
+    ip_after_change: Optional[str] = None
+    probe_mail_sent: Optional[bool] = None
+    probe_mail_error: Optional[str] = None
+    probe_status_line: Optional[str] = None
+    probe_detail_line: Optional[str] = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -4459,6 +4469,16 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             checked_at_value = sanitize_imap_timestamp(checked_at_raw) or checked_at_raw
             latency_value = sanitize_imap_latency(report.latency)
             reason_text = (report.reason or "").strip()
+            ip_change_attempted = bool(getattr(report, "ip_change_attempted", False))
+            ip_change_success = bool(getattr(report, "ip_change_success", False))
+            ip_change_message = (getattr(report, "ip_change_message", "") or "").strip()
+            ip_change_marker = (getattr(report, "ip_change_marker", "") or "").strip()
+            ip_change_reason = (getattr(report, "ip_change_reason", "") or "").strip()
+            ip_after_change = (getattr(report, "ip_after_change", "") or "").strip()
+            probe_mail_sent = bool(getattr(report, "probe_mail_sent", False))
+            probe_mail_error = (getattr(report, "probe_mail_error", "") or "").strip()
+            probe_status_line = (getattr(report, "probe_status_line", "") or "").strip()
+            probe_detail_line = (getattr(report, "probe_detail_line", "") or "").strip()
             sent_at_value = (
                 sanitize_imap_timestamp(report.sent_at)
                 or sanitize_imap_timestamp(config_snapshot.get("imap_last_sent_at"))
@@ -4491,6 +4511,35 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             mail_from_value = (report.mail_from or config_snapshot.get("imap_last_mail_from")
                                or config_snapshot.get("mail_from") or "")
             error_value = "" if status_value == "success" else reason_text
+            if ip_change_attempted:
+                change_label = "성공" if ip_change_success else "시도"
+                step_message = (
+                    f"[IMAP] Sent 임계치 보호 · 디바이스 {device_id} · 도메인 {normalized_domain} · IP 변경 {change_label}"
+                )
+                if ip_after_change:
+                    step_message = f"{step_message} · 새 IP {ip_after_change}"
+                if ip_change_message:
+                    step_message = f"{step_message} · {ip_change_message}"
+                print(step_message, flush=True)
+            reason_parts: List[str] = []
+            if ip_change_attempted:
+                base_part = "IP 변경 후 IMAP 재확인"
+                base_part += " 성공" if ip_change_success else " 시도"
+                reason_parts.append(base_part)
+                if ip_change_message:
+                    reason_parts.append(ip_change_message)
+                elif ip_change_reason:
+                    reason_parts.append(ip_change_reason)
+                if ip_after_change:
+                    reason_parts.append(f"새 IP {ip_after_change}")
+            if probe_mail_sent:
+                if probe_status_line:
+                    reason_parts.append(f"테스트 메일 응답: {probe_status_line}")
+            elif probe_mail_error:
+                reason_parts.append(f"테스트 메일 실패: {probe_mail_error}")
+            if reason_text:
+                reason_parts.append(reason_text)
+            reason_text = " · ".join(part for part in reason_parts if part)
             if status_value == "network_error":
                 print(
                     "[IMAP] 네트워크 오류 보고 · 디바이스 {} · 도메인 {} · 사유 {}".format(
@@ -4628,6 +4677,13 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     "notify_before_stop": notify_before_stop,
                     "sent_window_count": sent_window_count,
                     "sent_threshold": new_threshold_value,
+                    "ip_change_attempted": ip_change_attempted,
+                    "ip_change_success": ip_change_success,
+                    "ip_after_change": ip_after_change,
+                    "probe_mail_sent": probe_mail_sent,
+                    "ip_change_message": ip_change_message,
+                    "probe_mail_error": probe_mail_error,
+                    "probe_status_line": probe_status_line,
                 }
                 if detail_text:
                     stop_reason = f"{stop_reason}: {detail_text}"
