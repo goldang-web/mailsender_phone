@@ -42,6 +42,7 @@ LOG_DIR = BASE_DIR / "logs"
 
 DOMAINS = ("naver", "daum")
 EMAIL_STATUSES = ("pending", "reserved", "sent", "block", "failed", "removed")
+SMTP_RECIPIENT_LIMIT = 25
 
 THROTTLE_MARKER_MESSAGES = {
     "550 5.7.2": "네이버 '550 5.7.2' 응답 감지",
@@ -384,6 +385,7 @@ class DispatchGroup:
     primary: DispatchEmail
     bcc: List[DispatchEmail]
     injected: List[str] = field(default_factory=list)
+    deferred_bcc: int = 0
 
 
 @dataclass
@@ -1738,6 +1740,26 @@ class MailClient:
         return candidate.lower()
 
     @staticmethod
+    def _sanitize_email_list(entries: Iterable[str], limit: int = 30) -> List[str]:
+        sanitized: List[str] = []
+        seen: Set[str] = set()
+        if not entries:
+            return sanitized
+        for entry in entries:
+            candidate = str(entry or "").strip().lower()
+            if not candidate:
+                continue
+            if not EMAIL_PATTERN.fullmatch(candidate):
+                continue
+            if candidate in seen:
+                continue
+            sanitized.append(candidate)
+            seen.add(candidate)
+            if len(sanitized) >= max(0, limit):
+                break
+        return sanitized
+
+    @staticmethod
     def _sanitize_schedule_enabled(value: object) -> bool:
         if isinstance(value, str):
             lowered = value.strip().lower()
@@ -1943,6 +1965,61 @@ class MailClient:
             if not success_flag:
                 summary["failed"].append(label)
         return summary
+
+    def _analyze_anchor_delivery(
+        self,
+        expected: Iterable[str],
+        rcpt_details: Optional[List[Dict[str, object]]],
+    ) -> Tuple[int, int, List[str]]:
+        expected_counts: Dict[str, int] = {}
+        total_expected = 0
+        for address in expected:
+            normalized = (address or "").strip().lower()
+            if not normalized:
+                continue
+            expected_counts[normalized] = expected_counts.get(normalized, 0) + 1
+            total_expected += 1
+        if total_expected == 0:
+            return 0, 0, []
+        failure_descriptions: List[str] = []
+        failure_count = 0
+        anchor_entries_seen = False
+        if not rcpt_details:
+            return total_expected, 0, failure_descriptions
+        if rcpt_details:
+            for entry in rcpt_details:
+                if not entry.get("is_anchor"):
+                    continue
+                anchor_entries_seen = True
+                address_text = str(entry.get("address") or "").strip()
+                lowered = address_text.lower()
+                success_flag = bool(entry.get("success"))
+                code_text = str(entry.get("code") or "").strip()
+                message_text = str(entry.get("message") or "").strip()
+                if success_flag:
+                    if lowered in expected_counts and expected_counts[lowered] > 0:
+                        expected_counts[lowered] -= 1
+                    continue
+                failure_count += 1
+                description = f"{address_text or '-'}→{code_text or '-'}"
+                if message_text and message_text != code_text:
+                    trimmed = message_text if len(message_text) <= 60 else f"{message_text[:57]}..."
+                    description = f"{description} ({trimmed})"
+                failure_descriptions.append(description)
+                if lowered in expected_counts and expected_counts[lowered] > 0:
+                    expected_counts[lowered] -= 1
+        missing_count = sum(expected_counts.values())
+        if missing_count > 0:
+            failure_count += missing_count
+            if anchor_entries_seen:
+                failure_descriptions.append(f"응답 누락 {missing_count}건")
+        success_count = max(0, total_expected - failure_count)
+        if failure_count == 0 and not anchor_entries_seen and rcpt_details:
+            # RCPT 응답은 있었지만 알박기 주소가 확인되지 않은 경우
+            failure_count = total_expected
+            success_count = 0
+            failure_descriptions.append("알박기 RCPT 응답 누락")
+        return success_count, failure_count, failure_descriptions
 
     def _select_bcc_candidates(
         self,
@@ -2478,8 +2555,17 @@ class MailClient:
         if not rcpt_to:
             return JobResult(job_id=job_id, status="failed", message="RCPT TO 정보가 없습니다.")
         normalized_domain = (domain or "").lower()
+        raw_bcc_entries = payload.get("bcc")
+        if isinstance(raw_bcc_entries, str):
+            candidate_bcc_entries: Iterable[str] = [raw_bcc_entries]
+        elif isinstance(raw_bcc_entries, dict):
+            candidate_bcc_entries = raw_bcc_entries.values()
+        elif isinstance(raw_bcc_entries, Iterable):
+            candidate_bcc_entries = raw_bcc_entries
+        else:
+            candidate_bcc_entries = []
+        bcc_emails = self._sanitize_email_list(candidate_bcc_entries, limit=30)
         bcc_rows: List[sqlite3.Row] = []
-        bcc_emails: List[str] = []
         success, response_text, completed_at, rcpt_details = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
             smtp_port=int(config.get("smtp_port") or 25),
@@ -2595,52 +2681,57 @@ class MailClient:
                 print(entry.get("display") or entry["log"])
         if bcc_emails:
             print(f"  ↳ BCC 대상 {len(bcc_emails)}건 포함")
-        if not success and detail_line and detail_line != status_line:
-            print(f"  ↳ {detail_line}")
         if delivery_status == "sent" and normalized_domain:
-            mail_from_value = config.get("mail_from", "")
-            settings = self._imap_settings_for_domain(normalized_domain)
-            allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
-            single_delay = sanitize_imap_delay(
-                settings.get("single_delay_seconds"),
-                default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
-                minimum=0,
-            )
-            smtp_context_payload = {
-                "smtp_host": config.get("smtp_host"),
-                "smtp_port": config.get("smtp_port"),
-                "helo": config.get("helo"),
-                "header": config.get("header"),
-            }
-            if force_imap_check:
-                self._execute_imap_guard_flow(
-                    domain=normalized_domain,
-                    job_id=job_id,
-                    send_type="single",
-                    mail_from=mail_from_value,
-                    has_anchor=False,
-                    context_reason=detail_line or status_line,
-                    delay_before_check=single_delay,
-                    allowed_delay=allowed_latency,
-                    smtp_context=smtp_context_payload,
-                    force=True,
-                    report_probe_failure=True,
-                )
+            imap_enabled_for_domain = self._imap_enabled(normalized_domain)
+            if not imap_enabled_for_domain:
+                if force_imap_check:
+                    self._log_imap_console(
+                        f"IMAP 확인 비활성화 상태 · 가드 플로우 생략 ({normalized_domain or '-'})"
+                    )
             else:
-                self._submit_imap_check(
-                    domain=normalized_domain,
-                    job_id=job_id,
-                    send_type="single",
-                    mail_from=mail_from_value,
-                    sent_at=sent_at,
-                    has_anchor=False,
-                    delay_before_check=single_delay,
-                    allowed_delay=allowed_latency,
-                    context_reason=detail_line or status_line,
-                    force=False,
-                    smtp_context=smtp_context_payload,
-                    probe_result=None,
+                mail_from_value = config.get("mail_from", "")
+                settings = self._imap_settings_for_domain(normalized_domain)
+                allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
+                single_delay = sanitize_imap_delay(
+                    settings.get("single_delay_seconds"),
+                    default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                    minimum=0,
                 )
+                smtp_context_payload = {
+                    "smtp_host": config.get("smtp_host"),
+                    "smtp_port": config.get("smtp_port"),
+                    "helo": config.get("helo"),
+                    "header": config.get("header"),
+                }
+                if force_imap_check:
+                    self._execute_imap_guard_flow(
+                        domain=normalized_domain,
+                        job_id=job_id,
+                        send_type="single",
+                        mail_from=mail_from_value,
+                        has_anchor=False,
+                        context_reason=detail_line or status_line,
+                        delay_before_check=single_delay,
+                        allowed_delay=allowed_latency,
+                        smtp_context=smtp_context_payload,
+                        force=True,
+                        report_probe_failure=True,
+                    )
+                else:
+                    self._submit_imap_check(
+                        domain=normalized_domain,
+                        job_id=job_id,
+                        send_type="single",
+                        mail_from=mail_from_value,
+                        sent_at=sent_at,
+                        has_anchor=False,
+                        delay_before_check=single_delay,
+                        allowed_delay=allowed_latency,
+                        context_reason=detail_line or status_line,
+                        force=False,
+                        smtp_context=smtp_context_payload,
+                        probe_result=None,
+                    )
         result_payload = {
             "rcpt_to": rcpt_to,
             "domain": domain,
@@ -3050,10 +3141,12 @@ class MailClient:
 
                 def deliver_group(group: DispatchGroup) -> DispatchOutcome:
                     rcpt_to = group.primary.email
-                    bcc_emails = [item.email for item in group.bcc if item.email]
                     injected_emails = [email for email in (group.injected or []) if email]
+                    bcc_recipients = [item.email for item in group.bcc if item.email]
+                    payload_bcc: List[str] = []
                     if injected_emails:
-                        bcc_emails.extend(injected_emails)
+                        payload_bcc.extend(injected_emails)
+                    payload_bcc.extend(bcc_recipients)
                     success, response_text, completed_at, rcpt_details = send_via_telnet(
                         smtp_host=config.get("smtp_host", ""),
                         smtp_port=int(config.get("smtp_port") or 25),
@@ -3061,7 +3154,7 @@ class MailClient:
                         mail_from=config.get("mail_from", ""),
                         rcpt_to=rcpt_to,
                         header_text=config.get("header", ""),
-                        bcc_emails=bcc_emails,
+                        bcc_emails=payload_bcc,
                         anchor_emails=injected_emails,
                     )
                     response_text = response_text or ""
@@ -3079,25 +3172,56 @@ class MailClient:
                     )
 
                 def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
-                    nonlocal dispatched_db_total, anchor_retry_pending
+                    nonlocal dispatched_db_total, anchor_retry_pending, pending_queue
                     if not group:
                         return group
                     group.injected = []
-                    group_db_size = 1 + len(group.bcc)
+                    max_total = max(0, int(SMTP_RECIPIENT_LIMIT))
+                    if max_total > 0:
+                        max_bcc_allowed = max(0, max_total - 1)
+                        if len(group.bcc) > max_bcc_allowed:
+                            overflow = len(group.bcc) - max_bcc_allowed
+                            overflow_items: List[DispatchEmail] = []
+                            for _ in range(overflow):
+                                overflow_items.append(group.bcc.pop())
+                            for item in overflow_items:
+                                pending_queue.appendleft(item)
+                            group.deferred_bcc += overflow
                     start_total = dispatched_db_total
+                    group_db_size = 1 + len(group.bcc)
                     end_total = start_total + group_db_size
-                    if not anchor_enabled:
+                    if not anchor_enabled or anchor_interval <= 0 or not anchor_email:
                         anchor_retry_pending = 0
                         dispatched_db_total = end_total
                         return group
-                    anchors_needed = 0
-                    if anchor_interval > 0:
-                        anchors_needed = (end_total // anchor_interval) - (start_total // anchor_interval)
-                    if anchor_retry_pending > 0:
-                        anchors_needed = max(anchors_needed, anchor_retry_pending)
-                    if anchors_needed > 0 and anchor_email:
-                        group.injected = [anchor_email] * anchors_needed
-                        anchor_retry_pending = max(0, anchor_retry_pending - len(group.injected))
+                    anchors_from_interval = max(
+                        0,
+                        (end_total // anchor_interval) - (start_total // anchor_interval),
+                    )
+                    anchor_required = max(anchor_retry_pending, anchors_from_interval)
+                    max_anchor_slots = anchor_required
+                    if max_total > 0:
+                        max_anchor_slots = max(0, max_total - group_db_size)
+                    if max_total > 0 and anchor_required > 0 and max_anchor_slots == 0 and group.bcc:
+                        slots_to_free = min(anchor_required, len(group.bcc), max_total - 1)
+                        overflow_items: List[DispatchEmail] = []
+                        for _ in range(slots_to_free):
+                            overflow_items.append(group.bcc.pop())
+                        for item in overflow_items:
+                            pending_queue.appendleft(item)
+                        group.deferred_bcc += len(overflow_items)
+                        group_db_size = 1 + len(group.bcc)
+                        end_total = start_total + group_db_size
+                        anchors_from_interval = max(
+                            0,
+                            (end_total // anchor_interval) - (start_total // anchor_interval),
+                        )
+                        anchor_required = max(anchor_retry_pending, anchors_from_interval)
+                        max_anchor_slots = max(0, max_total - group_db_size)
+                    anchor_to_send = min(anchor_required, max_anchor_slots)
+                    if anchor_to_send > 0:
+                        group.injected = [anchor_email] * anchor_to_send
+                    anchor_retry_pending = max(0, anchor_required - anchor_to_send)
                     dispatched_db_total = end_total
                     return group
 
@@ -3109,6 +3233,8 @@ class MailClient:
                     settings_local = self._imap_settings_for_domain(normalized)
                     threshold_value = self._current_sent_threshold(normalized)
                     self._set_sent_counter(normalized, current_sent_counter)
+                    if not self._imap_enabled(normalized):
+                        return
                     if current_sent_counter >= threshold_value and threshold_check_request is None:
                         self._log_imap_console(
                             f"Sent 확인 기준 도달 · 누적 {current_sent_counter}건"
@@ -3144,6 +3270,9 @@ class MailClient:
                     if not threshold_check_request:
                         return
                     if inflight:
+                        return
+                    if not self._imap_enabled(normalized):
+                        threshold_check_request = None
                         return
                     request = threshold_check_request
                     threshold_check_request = None
@@ -3307,6 +3436,17 @@ class MailClient:
                     recipient_emails = [record.email for record in recipients]
                     bcc_count = len(group.bcc)
                     anchor_count = len(group.injected)
+                    anchor_success_count = 0
+                    anchor_retry_count = 0
+                    anchor_failure_notes: List[str] = []
+                    if anchor_count > 0:
+                        if outcome.delivery_status == "sent":
+                            anchor_success_count, anchor_retry_count, anchor_failure_notes = self._analyze_anchor_delivery(
+                                group.injected,
+                                outcome.rcpt_details,
+                            )
+                        else:
+                            anchor_retry_count = anchor_count
                     if outcome.delivery_status == "sent":
                         sent_count += group_size_actual
                         primary_email = recipient_emails[0] if recipient_emails else "-"
@@ -3339,13 +3479,18 @@ class MailClient:
                                 "is_primary": True,
                                 "bcc_recipients": [record.email for record in group.bcc],
                                 "anchor": list(group.injected),
+                                "anchor_success": anchor_success_count,
+                                "anchor_retry": anchor_retry_count,
+                                "deferred_bcc": group.deferred_bcc,
                                 "rcpt_details": outcome.rcpt_details,
                             }
                         )
                         print(display_line)
                         if normalized == "naver":
-                            total_increment = group_size_actual + anchor_count
+                            total_increment = group_size_actual + anchor_success_count
                             register_sent_success(outcome.sent_at, detail_for_log, total_increment)
+                        if anchor_retry_count > 0:
+                            anchor_retry_pending += anchor_retry_count
                     else:
                         is_block = outcome.delivery_status == "block"
                         label = "Block" if is_block else "Fail"
@@ -3379,13 +3524,14 @@ class MailClient:
                                 "is_primary": True,
                                 "bcc_recipients": [record.email for record in group.bcc],
                                 "anchor": list(group.injected),
+                                "anchor_success": anchor_success_count,
+                                "anchor_retry": anchor_retry_count,
+                                "deferred_bcc": group.deferred_bcc,
                                 "failed_recipients": recipient_emails,
                                 "rcpt_details": outcome.rcpt_details,
                             }
                         )
                         print(display_line)
-                        if detail_for_log and detail_for_log != outcome.status_line:
-                            print(f"  ↳ {detail_for_log}")
                         if is_block:
                             block_count += group_size_actual
                             last_error = detail_for_log
@@ -3402,13 +3548,19 @@ class MailClient:
                                 )
                     if group.bcc:
                         print(f"  ↳ BCC 대상 {len(group.bcc)}건 포함")
+                        if group.deferred_bcc > 0:
+                            print(f"    · BCC {group.deferred_bcc}건은 다음 순번으로 이월")
                     if group.injected:
                         if outcome.delivery_status == "sent":
-                            anchor_processed += len(group.injected)
-                        else:
-                            anchor_retry_pending += len(group.injected)
+                            anchor_processed += anchor_success_count
+                        elif anchor_retry_count > 0:
+                            anchor_retry_pending += anchor_retry_count
                         anchor_display = f"  ↳ 알박기 대상 {len(group.injected)}건 포함"
                         print(anchor_display)
+                        if anchor_retry_count > 0:
+                            print(f"    · 알박기 {anchor_retry_count}건 재시도 예약")
+                            for note in anchor_failure_notes[:3]:
+                                print(f"      · {note}")
                         anchor_log_line = self._format_dispatch_log_line(
                             "Anchor",
                             processed,
@@ -3427,6 +3579,8 @@ class MailClient:
                                 "anchor_total": len(group.injected),
                                 "is_primary": False,
                                 "anchor": list(group.injected),
+                                "anchor_success": anchor_success_count,
+                                "anchor_retry": anchor_retry_count,
                                 "rcpt_details": outcome.rcpt_details,
                             }
                         )
@@ -4035,6 +4189,20 @@ class MailClient:
         safe_label = (label or "").strip() or "Sent"
         target = (email or "").strip() or "-"
         label_display = safe_label
+        device_label = (device_name or "").strip()
+        is_failure = safe_label.lower() in {"fail", "block"}
+        if is_failure:
+            display = safe_label
+            extra_markers: List[str] = []
+            if is_primary and bcc_total > 0:
+                extra_markers.append(f"외 {bcc_total}건")
+            if is_primary and anchor_total > 0:
+                extra_markers.append(f"알박기 {anchor_total}건")
+            if extra_markers:
+                display += f" ({' + '.join(extra_markers)})"
+            if device_label:
+                display += f" | {device_label}"
+            return display
         if sequence is not None and sequence > 0 and safe_label.lower() == "sent":
             label_display = f"{safe_label}({sequence})"
         display = f"{label_display} - {target}"
@@ -4043,7 +4211,6 @@ class MailClient:
                 display += f" 외 {bcc_total}"
             if anchor_total > 0:
                 display += f" + 알박기 {anchor_total}"
-        device_label = (device_name or "").strip()
         if device_label:
             display += f" | {device_label}"
         return display
