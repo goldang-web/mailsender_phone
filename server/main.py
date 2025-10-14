@@ -1,9 +1,11 @@
 # -*- coding: utf-8 -*-
 import hashlib
 import json
+import random
 import re
 import shutil
 import sqlite3
+import string
 import threading
 import uuid
 import urllib.error
@@ -11,7 +13,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
@@ -103,6 +105,18 @@ GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "sess
 MAX_DEVICE_LOG_HISTORY = 10
 SUBSTITUTION_PATTERN = re.compile(r"\$\{([^{}]+)\}")
 SUBSTITUTION_TARGET_FIELDS = ("helo", "mail_from", "header", "rcpt_to", "anchor_email")
+RANDOM_TOKEN_PATTERN = re.compile(r"^랜덤:([^:]+):(\d+(?:-\d+)?)$")
+LIST_TOKEN_PATTERN = re.compile(r"^목록:(.+)$")
+RANDOM_TOKEN_CHARSETS = {
+    "영소": string.ascii_lowercase,
+    "영대": string.ascii_uppercase,
+    "숫자": string.digits,
+    "영문": string.ascii_letters,
+    "영소숫자": string.ascii_lowercase + string.digits,
+    "영대숫자": string.ascii_uppercase + string.digits,
+    "영숫자": string.ascii_letters + string.digits,
+}
+RANDOM_TOKEN_MAX_LENGTH = 128
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 5.0
 
@@ -347,14 +361,66 @@ def to_dict(row: sqlite3.Row) -> Dict[str, Any]:
     return {key: row[key] for key in row.keys()}
 
 
-def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[Dict[str, str]]:
+def normalize_substitution_mode(value: Any) -> str:
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"list", "목록"}:
+            return "list"
+        if text in {"static", "정적"}:
+            return "static"
+    return "static"
+
+
+def _sanitize_description(value: Any, *, limit: int = 300) -> str:
+    if not value:
+        return ""
+    text = str(value).strip()
+    if not text:
+        return ""
+    if len(text) > limit:
+        return text[:limit]
+    return text
+
+
+def _extract_list_values(data: Dict[str, Any]) -> List[str]:
+    candidates: List[str] = []
+    raw_values = data.get("values")
+    if isinstance(raw_values, (list, tuple, set)):
+        candidates.extend(raw_values)
+    elif isinstance(raw_values, str):
+        candidates.extend(raw_values.splitlines())
+    raw_items = data.get("items")
+    if isinstance(raw_items, str):
+        candidates.extend(raw_items.splitlines())
+    raw_source = data.get("source")
+    if isinstance(raw_source, str):
+        candidates.extend(raw_source.splitlines())
+    raw_value_field = data.get("value")
+    if isinstance(raw_value_field, str):
+        candidates.extend(raw_value_field.splitlines())
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text:
+            continue
+        if text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
+
+
+def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[Dict[str, Any]]:
     if raw is None:
         return []
     if not isinstance(raw, (list, tuple)):
         if strict:
             raise ValueError("치환 변수 목록 형식이 올바르지 않습니다.")
         return []
-    sanitized: List[Dict[str, str]] = []
+    sanitized: List[Dict[str, Any]] = []
     seen_keys: Set[str] = set()
     for item in raw:
         if hasattr(item, "dict") and callable(getattr(item, "dict")):
@@ -366,16 +432,41 @@ def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[D
                 raise ValueError("치환 변수 항목 형식이 올바르지 않습니다.")
             continue
         key = str(data.get("key") or "").strip()
-        source = str(data.get("source") or "")
-        encoding = normalize_encoding_name(data.get("encoding"))
-        raw_value = data.get("value")
-        value = str(raw_value) if raw_value is not None else ""
-        if not source and value:
-            source = value
         if not key:
             if strict:
                 raise ValueError("변수명은 비워둘 수 없습니다.")
             continue
+        key_token = key.lower()
+        if key_token in seen_keys:
+            if strict:
+                raise ValueError(f"'{key}' 변수명이 중복되었습니다.")
+            continue
+        mode = normalize_substitution_mode(data.get("mode"))
+        description = _sanitize_description(data.get("description"))
+        if mode == "list":
+            values = _extract_list_values(data)
+            if not values:
+                if strict:
+                    raise ValueError(f"'{key}' 목록 항목을 한 개 이상 입력하세요.")
+                continue
+            sanitized.append(
+                {
+                    "key": key,
+                    "mode": "list",
+                    "values": values,
+                    "description": description,
+                    "source": "",
+                    "encoding": "none",
+                    "value": "",
+                }
+            )
+            seen_keys.add(key_token)
+            continue
+        source = str(data.get("source") or "")
+        raw_value = data.get("value")
+        if not source and raw_value is not None:
+            source = str(raw_value)
+        encoding = normalize_encoding_name(data.get("encoding"))
         try:
             computed_value = encode_substitution_value(source, encoding)
         except UnicodeEncodeError as exc:
@@ -386,24 +477,22 @@ def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[D
             if strict:
                 raise ValueError(f"'{key}' 치환 값을 입력하세요.")
             continue
-        key_token = key.lower()
-        if key_token in seen_keys:
-            if strict:
-                raise ValueError(f"'{key}' 변수명이 중복되었습니다.")
-            continue
-        seen_keys.add(key_token)
         sanitized.append(
             {
                 "key": key,
                 "source": source,
                 "encoding": encoding,
                 "value": computed_value,
+                "mode": "static",
+                "values": [],
+                "description": description,
             }
         )
+        seen_keys.add(key_token)
     return sanitized
 
 
-def sanitize_substitution_rules(raw: Any) -> List[Dict[str, str]]:
+def sanitize_substitution_rules(raw: Any) -> List[Dict[str, Any]]:
     try:
         return canonicalize_substitution_rules(raw, strict=False)
     except ValueError:
@@ -1510,42 +1599,207 @@ def create_job(
     }
 
 
-def substitute_tokens(value: Any, rules: List[Dict[str, str]]) -> Tuple[Any, Set[str]]:
+def build_substitution_context(rules: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    static_map: Dict[str, str] = {}
+    list_map: Dict[str, List[str]] = {}
+    for rule in rules or []:
+        if not isinstance(rule, dict):
+            continue
+        key = str(rule.get("key") or "").strip()
+        if not key:
+            continue
+        mode = normalize_substitution_mode(rule.get("mode"))
+        if mode == "list":
+            values_field = rule.get("values")
+            values: List[str] = []
+            if isinstance(values_field, list):
+                seen_values: Set[str] = set()
+                for item in values_field:
+                    if item is None:
+                        continue
+                    text = str(item).strip()
+                    if not text or text in seen_values:
+                        continue
+                    values.append(text)
+                    seen_values.add(text)
+            else:
+                values = _extract_list_values(rule)
+            if values:
+                list_map[key] = tuple(values)
+            continue
+        value_field = rule.get("value")
+        if isinstance(value_field, str) and value_field:
+            static_map[key] = value_field
+    return {"static": static_map, "lists": list_map}
+
+
+def log_substitution_error(message: str) -> None:
+    print(f"[SUBSTITUTION] {message}")
+
+
+def _parse_random_length(spec: str) -> Tuple[int, int]:
+    cleaned = (spec or "").strip()
+    if not cleaned:
+        raise ValueError("길이 정보가 비어 있습니다.")
+    if "-" in cleaned:
+        start_str, end_str = cleaned.split("-", 1)
+    else:
+        start_str = cleaned
+        end_str = cleaned
+    try:
+        min_len = int(start_str)
+        max_len = int(end_str)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("길이는 정수로 입력해야 합니다.") from exc
+    if min_len <= 0 or max_len <= 0:
+        raise ValueError("길이는 1 이상이어야 합니다.")
+    if min_len > max_len:
+        raise ValueError("최소 길이가 최대 길이보다 큽니다.")
+    if max_len > RANDOM_TOKEN_MAX_LENGTH:
+        raise ValueError(f"최대 길이는 {RANDOM_TOKEN_MAX_LENGTH} 이하로 입력하세요.")
+    return min_len, max_len
+
+
+def _resolve_random_token(kind: str, length_spec: str, rng: random.Random) -> str:
+    normalized_kind = (kind or "").strip()
+    charset = RANDOM_TOKEN_CHARSETS.get(normalized_kind)
+    if charset is None:
+        charset = RANDOM_TOKEN_CHARSETS.get(normalized_kind.lower())
+    if charset is None:
+        raise ValueError(f"지원하지 않는 랜덤 조합입니다: {normalized_kind or '?'}")
+    min_len, max_len = _parse_random_length(length_spec)
+    length = rng.randint(min_len, max_len)
+    if length <= 0:
+        return ""
+    return "".join(rng.choice(charset) for _ in range(length))
+
+
+def _choose_list_value(values: Sequence[str], rng: random.Random) -> str:
+    if isinstance(values, (list, tuple)):
+        sequence: Sequence[str] = values
+    else:
+        sequence = tuple(values)
+    if not sequence:
+        raise ValueError("목록 패턴 값이 비어 있습니다.")
+    if hasattr(rng, "randrange"):
+        index = rng.randrange(len(sequence))
+    else:
+        random_func = getattr(rng, "random", None)
+        if callable(random_func):
+            raw = float(random_func())
+            index = int(raw * len(sequence))
+        else:
+            index = 0
+    if index >= len(sequence):
+        index = len(sequence) - 1
+    if index < 0:
+        index = 0
+    return sequence[index]
+
+
+def substitute_tokens(
+    value: Any,
+    rules: List[Dict[str, Any]],
+    *,
+    random_generator: Optional[random.Random] = None,
+    context: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[Any, Set[str]]:
     if not isinstance(value, str) or not value or "${" not in value:
         return value, set()
-    if not rules:
-        return value, set()
-    defined_keys = [rule["key"] for rule in rules]
-    replacements = {rule["key"]: rule["value"] for rule in rules}
+    ctx = context or build_substitution_context(rules or [])
+    static_map = ctx.get("static") or {}
+    list_map = ctx.get("lists") or {}
+    rng = random_generator or random.SystemRandom()
     result = value
-    # 반복 치환: 최대 규칙 수만큼 순회해 신규로 노출된 토큰도 처리한다.
-    for _ in range(len(rules)):
+    missing: Set[str] = set()
+    max_iterations = max(1, len(static_map) + len(list_map) + 5)
+
+    for _ in range(max_iterations):
         changed = False
-        for key in defined_keys:
-            token = f"${{{key}}}"
-            if token not in result:
-                continue
-            new_value = result.replace(token, replacements.get(key, ""))
-            if new_value != result:
-                result = new_value
+
+        def replace(match: re.Match) -> str:
+            nonlocal changed
+            token_raw = match.group(1)
+            if token_raw in static_map:
                 changed = True
-        if not changed:
+                return static_map[token_raw]
+            stripped = token_raw.strip()
+            random_match = RANDOM_TOKEN_PATTERN.match(stripped)
+            if random_match:
+                kind_raw = random_match.group(1)
+                length_spec = random_match.group(2)
+                try:
+                    replacement = _resolve_random_token(kind_raw, length_spec, rng)
+                except ValueError as exc:
+                    log_substitution_error(f"랜덤 패턴 처리 실패({stripped}): {exc}")
+                    missing.add(stripped)
+                    return ""
+                changed = True
+                return replacement
+            list_match = LIST_TOKEN_PATTERN.match(stripped)
+            if list_match:
+                list_name = list_match.group(1).strip()
+                if not list_name:
+                    log_substitution_error("목록 패턴 이름이 비어 있습니다.")
+                    missing.add(stripped)
+                    return ""
+                values = list_map.get(list_name)
+                if values:
+                    try:
+                        replacement = _choose_list_value(values, rng)
+                    except ValueError:
+                        log_substitution_error(f"'{list_name}' 목록이 정의되지 않았습니다.")
+                        missing.add(f"목록:{list_name}")
+                        return ""
+                    changed = True
+                    return replacement
+                missing.add(f"목록:{list_name}")
+                log_substitution_error(f"'{list_name}' 목록이 비어 있거나 정의되지 않았습니다.")
+                return ""
+            if token_raw in static_map:
+                changed = True
+                return static_map[token_raw]
+            return match.group(0)
+
+        new_result = SUBSTITUTION_PATTERN.sub(replace, result)
+        if new_result == result:
             break
-    unresolved: Set[str] = set()
-    defined_set = set(defined_keys)
-    for match in SUBSTITUTION_PATTERN.findall(result):
-        if match not in defined_set:
-            unresolved.add(match)
-    return result, unresolved
+        result = new_result
+
+    leftovers = SUBSTITUTION_PATTERN.findall(result)
+    static_keys = set(static_map.keys())
+    for token in leftovers:
+        if token in static_keys:
+            missing.add(token)
+            continue
+        stripped = token.strip()
+        if RANDOM_TOKEN_PATTERN.match(stripped) or LIST_TOKEN_PATTERN.match(stripped):
+            missing.add(stripped)
+            continue
+        missing.add(token)
+    return result, missing
 
 
-def apply_substitutions_to_config(config: Dict[str, Any], rules: List[Dict[str, str]]) -> Set[str]:
+def apply_substitutions_to_config(
+    config: Dict[str, Any],
+    rules: List[Dict[str, Any]],
+    *,
+    context: Optional[Dict[str, Dict[str, Any]]] = None,
+    random_generator: Optional[random.Random] = None,
+) -> Set[str]:
     if not config or not rules:
         return set()
+    ctx = context or build_substitution_context(rules)
+    rng = random_generator or random.SystemRandom()
     missing: Set[str] = set()
     for field in SUBSTITUTION_TARGET_FIELDS:
         raw_value = config.get(field)
-        substituted, unresolved = substitute_tokens(raw_value, rules)
+        substituted, unresolved = substitute_tokens(
+            raw_value,
+            rules,
+            random_generator=rng,
+            context=ctx,
+        )
         if isinstance(substituted, str):
             config[field] = substituted
         missing.update(unresolved)
@@ -2170,6 +2424,64 @@ class BatchSendRequest(BaseModel):
     domain: str
 
 
+class HeaderPreviewRequest(BaseModel):
+    rcpt_to: Optional[str] = None
+    config_override: Dict[str, Any] = Field(default_factory=dict)
+
+
+class HeaderPreviewResponse(BaseModel):
+    helo: str
+    mail_from: str
+    header: str
+    rcpt_to: str
+    anchor_email: str
+    missing_tokens: List[str] = Field(default_factory=list)
+    generated_at: str
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/preview-header", response_model=HeaderPreviewResponse)
+def preview_single_header(device_id: str, domain: str, payload: HeaderPreviewRequest) -> HeaderPreviewResponse:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        configs = load_device_configs(device_id, conn=conn)
+        global_config = load_global_config(conn=conn)
+    substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
+    context = build_substitution_context(substitution_rules)
+    config_snapshot = build_config_snapshot(configs, normalized)
+    overrides = sanitize_preview_override(payload.config_override)
+    if overrides:
+        config_snapshot.update(overrides)
+    if payload.rcpt_to is not None:
+        config_snapshot["rcpt_to"] = str(payload.rcpt_to or "").strip()
+    rng = random.SystemRandom()
+    missing_tokens = apply_substitutions_to_config(
+        config_snapshot,
+        substitution_rules,
+        context=context,
+        random_generator=rng,
+    )
+    rcpt_source = config_snapshot.get("rcpt_to") or ""
+    substituted_rcpt, rcpt_missing = substitute_tokens(
+        rcpt_source,
+        substitution_rules,
+        random_generator=rng,
+        context=context,
+    )
+    missing_tokens.update(rcpt_missing)
+    return HeaderPreviewResponse(
+        helo=config_snapshot.get("helo", ""),
+        mail_from=config_snapshot.get("mail_from", ""),
+        header=config_snapshot.get("header", ""),
+        rcpt_to=substituted_rcpt,
+        anchor_email=config_snapshot.get("anchor_email", ""),
+        missing_tokens=sorted(missing_tokens),
+        generated_at=now_ts(),
+    )
+
+
 class FileInfo(BaseModel):
     id: int
     filename: str
@@ -2189,9 +2501,12 @@ class FileListResponse(BaseModel):
 
 class SubstitutionRule(BaseModel):
     key: str
-    value: str
+    value: str = ""
     source: str = ""
     encoding: str = "none"
+    mode: str = "static"
+    values: List[str] = Field(default_factory=list)
+    description: str = ""
 
 
 class SubstitutionPreviewItem(BaseModel):
@@ -2896,6 +3211,24 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
     }
 
 
+PREVIEW_OVERRIDE_FIELDS = ("helo", "mail_from", "header", "anchor_email")
+
+
+def sanitize_preview_override(raw: Any) -> Dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    sanitized: Dict[str, str] = {}
+    for field in PREVIEW_OVERRIDE_FIELDS:
+        if field not in raw:
+            continue
+        value = raw.get(field)
+        if field == "anchor_email":
+            sanitized[field] = normalize_anchor_email(value)
+        else:
+            sanitized[field] = str(value or "")
+    return sanitized
+
+
 @app.post("/api/global/actions/send-batch")
 def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
     mode = (payload.domain or "active").strip().lower() or "active"
@@ -2909,13 +3242,18 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
         ).fetchall()
         global_config = load_global_config(conn=conn)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
+        context = build_substitution_context(substitution_rules)
         for device_row in device_rows:
             device_id = device_row["id"]
             active = device_row["active_domain"] or "naver"
             domain = forced_domain or normalize_domain(active)
             configs = load_device_configs(device_id, conn=conn)
             config_snapshot = build_config_snapshot(configs, domain)
-            missing_tokens = apply_substitutions_to_config(config_snapshot, substitution_rules)
+            missing_tokens = apply_substitutions_to_config(
+                config_snapshot,
+                substitution_rules,
+                context=context,
+            )
             job = create_job(
                 conn,
                 device_id,
@@ -2942,6 +3280,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         global_config = load_global_config(conn=conn)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
+        context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
         config_snapshot["bcc_count"] = 0
@@ -2951,8 +3290,19 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             raise HTTPException(status_code=400, detail="RCPT TO 주소가 필요합니다.")
         if payload.header_override:
             config_snapshot["header"] = payload.header_override
-        missing_tokens = apply_substitutions_to_config(config_snapshot, substitution_rules)
-        substituted_rcpt, rcpt_missing = substitute_tokens(rcpt_to, substitution_rules)
+        rng = random.SystemRandom()
+        missing_tokens = apply_substitutions_to_config(
+            config_snapshot,
+            substitution_rules,
+            context=context,
+            random_generator=rng,
+        )
+        substituted_rcpt, rcpt_missing = substitute_tokens(
+            rcpt_to,
+            substitution_rules,
+            random_generator=rng,
+            context=context,
+        )
         missing_tokens.update(rcpt_missing)
         force_imap_check = bool(payload.force_imap_check)
         job = create_job(
@@ -2980,9 +3330,14 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         global_config = load_global_config(conn=conn)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
+        context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
-        missing_tokens = apply_substitutions_to_config(config_snapshot, substitution_rules)
+        missing_tokens = apply_substitutions_to_config(
+            config_snapshot,
+            substitution_rules,
+            context=context,
+        )
         job = create_job(
             conn,
             device_id,
