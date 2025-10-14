@@ -2413,6 +2413,7 @@ const JOB_STATUS_LABELS = {
   cancelled: "중지됨",
 };
 const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
+const SINGLE_JOB_TYPES = new Set(["single_send", "imap_manual_check"]);
 
 const SUBSTITUTION_ENCODING_OPTIONS = [
   { value: "none", label: "없음" },
@@ -5520,7 +5521,8 @@ function latestSingleJob(device, domain) {
   }
   const targetDomain = normalizeDeviceDomain(domain || device.active_domain || "naver");
   const candidates = device.jobs.filter((job) => {
-    if (job.job_type !== "single_send") {
+    const jobType = (job?.job_type || "").toLowerCase();
+    if (!SINGLE_JOB_TYPES.has(jobType)) {
       return false;
     }
     const jobDomain = normalizeDeviceDomain(job.domain || device.active_domain || targetDomain);
@@ -5581,6 +5583,11 @@ function latestJobSummary(job) {
 function applyScheduledSingleSendJob(card, currentDevice, scheduledJob) {
   const baseDevice = card.__deviceData || currentDevice || {};
   if (!scheduledJob) {
+    updateSingleSendControls(card, baseDevice);
+    return baseDevice;
+  }
+  const jobType = (scheduledJob?.job_type || "").toLowerCase();
+  if (!SINGLE_JOB_TYPES.has(jobType)) {
     updateSingleSendControls(card, baseDevice);
     return baseDevice;
   }
@@ -7266,16 +7273,16 @@ function attachCardEvents(card) {
           return;
         }
 
-        const payload = { domain, rcpt_to: rcptTo, force_imap_check: true };
+        const payload = { reason: "대시보드 수동 도착 확인" };
         try {
-          const result = await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-single`, {
+          const result = await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/imap/manual-check`, {
             method: "POST",
             body: JSON.stringify(payload),
           });
           markImapStatusChecking(card, { delaySeconds: singleDelaySeconds, kind: "single" });
           jobScheduled = true;
           applyScheduledSingleSendJob(card, currentDevice, result?.job);
-          setNotice(card, `IMAP 계정(${rcptTo})으로 도착 확인 메일을 보냈습니다.`);
+          setNotice(card, `IMAP 계정(${rcptTo})으로 수동 도착 확인 흐름을 시작했습니다.`);
           try {
             await loadDevices({ silent: true });
           } catch (refreshErr) {

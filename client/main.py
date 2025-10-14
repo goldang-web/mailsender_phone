@@ -33,7 +33,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.56"
+APP_VERSION = "0.0.57"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -399,6 +399,16 @@ class SentProbeResult:
     attempts: int = 0
 
 
+@dataclass
+class ImapGuardOutcome:
+    probe: Optional[SentProbeResult]
+    future: Optional[Future]
+    sent_window_count: Optional[int]
+    sent_threshold: Optional[int]
+    scheduled: bool
+    failure_report_enqueued: bool = False
+
+
 class MailClient:
     def __init__(self, config: Dict[str, object]) -> None:
         self.config = config
@@ -749,6 +759,192 @@ class MailClient:
             while len(self._imap_reports) >= 100:
                 self._imap_reports.popleft()
             self._imap_reports.append(report)
+
+    def _report_imap_probe_failure(
+        self,
+        *,
+        domain: str,
+        job_id: Optional[str],
+        send_type: str,
+        mail_from: str,
+        has_anchor: bool,
+        context_reason: Optional[str],
+        delay_seconds: float,
+        allowed_latency_seconds: int,
+        failure_action: str,
+        sent_window_count: Optional[int],
+        sent_threshold: Optional[int],
+        probe_result: SentProbeResult,
+    ) -> Dict[str, object]:
+        checked_at_iso = utc_now_iso()
+        sent_iso = to_utc_iso(probe_result.sent_at) if probe_result.sent_at else checked_at_iso
+        reason_components: List[str] = []
+        status_line = probe_result.status_line or ""
+        detail_line = probe_result.detail_line or ""
+        throttle_detail = probe_result.throttle_detail or ""
+        if status_line:
+            reason_components.append(status_line)
+        if detail_line and detail_line != status_line:
+            reason_components.append(detail_line)
+        if throttle_detail:
+            reason_components.append(throttle_detail)
+        if context_reason:
+            reason_components.append(context_reason)
+        reason_text = " · ".join(component for component in reason_components if component)
+        delay_seconds_value = int(max(0, round(delay_seconds)))
+        report = {
+            "domain": (domain or "").lower(),
+            "status": "error",
+            "latency": None,
+            "received_at": None,
+            "sent_at": sent_iso,
+            "reason": reason_text,
+            "job_id": job_id,
+            "send_type": send_type,
+            "mail_from": mail_from,
+            "anchor": has_anchor,
+            "trigger_stop": False,
+            "checked_at": checked_at_iso,
+            "delay_seconds": delay_seconds_value,
+            "allowed_latency_seconds": int(max(0, allowed_latency_seconds)),
+            "failure_action": failure_action,
+            "sent_window_count": sent_window_count,
+            "sent_threshold": sent_threshold,
+            "ip_change_attempted": probe_result.ip_change_attempted,
+            "ip_change_success": probe_result.ip_change_success,
+            "ip_change_message": probe_result.ip_change_message,
+            "ip_change_marker": probe_result.throttle_marker,
+            "ip_change_reason": probe_result.throttle_detail,
+            "ip_after_change": probe_result.ip_after_change,
+            "probe_mail_sent": bool(probe_result.success),
+            "probe_mail_error": probe_result.detail_line or probe_result.status_line,
+            "probe_status_line": probe_result.status_line,
+            "probe_detail_line": probe_result.detail_line,
+            "probe_attempts": probe_result.attempts,
+        }
+        self._queue_imap_report(report)
+        return report
+
+    def _execute_imap_guard_flow(
+        self,
+        *,
+        domain: str,
+        job_id: Optional[str],
+        send_type: str,
+        mail_from: str,
+        has_anchor: bool,
+        context_reason: Optional[str],
+        delay_before_check: Optional[float],
+        allowed_delay: Optional[int],
+        smtp_context: Optional[Dict[str, object]],
+        force: bool,
+        counter_mode: Optional[str] = None,
+        counter_current: Optional[int] = None,
+        counter_threshold: Optional[int] = None,
+        report_probe_failure: bool = False,
+    ) -> ImapGuardOutcome:
+        normalized = (domain or "").lower()
+        settings = self._imap_settings_for_domain(normalized)
+        allowed_setting = sanitize_imap_allowed_latency(
+            settings.get("allowed_latency_seconds"),
+            default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
+        )
+        allowed_delay_value = sanitize_imap_allowed_latency(
+            allowed_delay if allowed_delay is not None else allowed_setting,
+            default=allowed_setting,
+        )
+        single_delay_setting = sanitize_imap_delay(
+            settings.get("single_delay_seconds"),
+            default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+            minimum=0,
+        )
+        if delay_before_check is None:
+            delay_seconds = float(single_delay_setting)
+        else:
+            try:
+                delay_seconds = float(delay_before_check)
+            except (TypeError, ValueError):
+                delay_seconds = float(single_delay_setting)
+            delay_seconds = max(0.0, delay_seconds)
+        threshold_value = sanitize_imap_sent_threshold(
+            counter_threshold if counter_threshold is not None else settings.get("sent_threshold"),
+            default=IMAP_DEFAULT_SENT_THRESHOLD,
+        )
+        failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
+        username_value = normalize_imap_string(settings.get("username"))
+        with self._sent_guard_lock:
+            probe_result = self._run_sent_probe_mail(
+                domain=normalized,
+                mail_from=mail_from,
+                smtp_context=smtp_context,
+                rcpt_to=username_value,
+            )
+            probe_success = probe_result.success
+            updated_counter: Optional[int] = counter_current
+            if counter_mode == "threshold":
+                base_counter = counter_current if counter_current is not None else self._get_sent_counter(normalized)
+                if probe_success:
+                    updated_counter = max(0, base_counter + 1)
+                else:
+                    updated_counter = max(0, threshold_value - 1)
+                self._set_sent_counter(normalized, updated_counter)
+            elif counter_mode == "manual":
+                base_counter = self._get_sent_counter(normalized)
+                if probe_success:
+                    updated_counter = max(0, base_counter + 1)
+                    self._set_sent_counter(normalized, updated_counter)
+                else:
+                    updated_counter = base_counter
+        if not probe_result.success:
+            failure_enqueued = False
+            if report_probe_failure:
+                self._report_imap_probe_failure(
+                    domain=normalized,
+                    job_id=job_id,
+                    send_type=send_type,
+                    mail_from=mail_from,
+                    has_anchor=has_anchor,
+                    context_reason=context_reason,
+                    delay_seconds=delay_seconds,
+                    allowed_latency_seconds=allowed_delay_value,
+                    failure_action=failure_action_value,
+                    sent_window_count=updated_counter,
+                    sent_threshold=threshold_value,
+                    probe_result=probe_result,
+                )
+                failure_enqueued = True
+            return ImapGuardOutcome(
+                probe=probe_result,
+                future=None,
+                sent_window_count=updated_counter,
+                sent_threshold=threshold_value,
+                scheduled=False,
+                failure_report_enqueued=failure_enqueued,
+            )
+        sent_at_value = probe_result.sent_at or utc_now()
+        future = self._submit_imap_check(
+            domain=normalized,
+            job_id=job_id,
+            send_type=send_type,
+            mail_from=mail_from,
+            sent_at=sent_at_value,
+            has_anchor=has_anchor,
+            delay_before_check=delay_seconds,
+            allowed_delay=allowed_delay_value,
+            context_reason=context_reason,
+            force=force,
+            sent_window_count=updated_counter,
+            sent_threshold=threshold_value,
+            smtp_context=smtp_context,
+            probe_result=probe_result,
+        )
+        return ImapGuardOutcome(
+            probe=probe_result,
+            future=future,
+            sent_window_count=updated_counter,
+            sent_threshold=threshold_value,
+            scheduled=bool(future),
+        )
 
     def _record_imap_throttle(self, domain: str, marker: Optional[str], detail: Optional[str]) -> None:
         normalized = (domain or "").lower()
@@ -2067,6 +2263,8 @@ class MailClient:
             return self.handle_imap_test(domain, payload, job_id)
         if job_type == "imap_fetch_latest":
             return self.handle_imap_fetch_latest(domain, payload, job_id)
+        if job_type == "imap_manual_check":
+            return self.handle_imap_manual_check(domain, payload, job_id)
         if job_type == "change_ip":
             return self.handle_change_ip(job_id)
         if job_type == "reset_sent_sequence":
@@ -2339,42 +2537,34 @@ class MailClient:
                 "helo": config.get("helo"),
                 "header": config.get("header"),
             }
-            probe_result_for_force: Optional[SentProbeResult] = None
-            sent_at_for_check = sent_at
-            should_submit_imap = True
             if force_imap_check:
-                username_value = normalize_imap_string(settings.get("username"))
-                if username_value:
-                    with self._sent_guard_lock:
-                        probe_result_for_force = self._run_sent_probe_mail(
-                            domain=normalized_domain,
-                            mail_from=mail_from_value,
-                            smtp_context=smtp_context_payload,
-                            rcpt_to=username_value,
-                        )
-                    if not probe_result_for_force.success:
-                        self._log_imap_console("Sent 확인용 단일 발송 실패 · 단일 발송 강제 확인을 중단합니다.")
-                        should_submit_imap = False
-                    else:
-                        sent_at_for_check = probe_result_for_force.sent_at or sent_at_for_check
-                else:
-                    self._log_imap_console("Sent 확인용 단일 발송 불가 · IMAP 계정 ID가 설정되지 않았습니다.")
-                    should_submit_imap = False
-            if should_submit_imap:
-                # 단일 발송 확인은 설정한 대기 시간(single_delay) 뒤에 시작하고, 허용 지연은 최대 판정 시간을 의미합니다.
+                self._execute_imap_guard_flow(
+                    domain=normalized_domain,
+                    job_id=job_id,
+                    send_type="single",
+                    mail_from=mail_from_value,
+                    has_anchor=False,
+                    context_reason=detail_line or status_line,
+                    delay_before_check=single_delay,
+                    allowed_delay=allowed_latency,
+                    smtp_context=smtp_context_payload,
+                    force=True,
+                    report_probe_failure=True,
+                )
+            else:
                 self._submit_imap_check(
                     domain=normalized_domain,
                     job_id=job_id,
                     send_type="single",
                     mail_from=mail_from_value,
-                    sent_at=sent_at_for_check,
+                    sent_at=sent_at,
                     has_anchor=False,
                     delay_before_check=single_delay,
                     allowed_delay=allowed_latency,
                     context_reason=detail_line or status_line,
-                    force=force_imap_check and bool(probe_result_for_force),
+                    force=False,
                     smtp_context=smtp_context_payload,
-                    probe_result=probe_result_for_force,
+                    probe_result=None,
                 )
         result_payload = {
             "rcpt_to": rcpt_to,
@@ -2881,56 +3071,37 @@ class MailClient:
                     request = threshold_check_request
                     threshold_check_request = None
                     threshold_value = int(request.get("threshold") or self._current_sent_threshold(normalized))
-                    future: Optional[Future] = None
-                    probe_result: Optional[SentProbeResult] = None
                     mail_from_candidate = str(request.get("mail_from") or mail_from_value)
                     smtp_context = request.get("smtp")
-                    with self._sent_guard_lock:
-                        username_value = normalize_imap_string(request.get("username"))
-                        if not username_value:
-                            self._log_imap_console("Sent 확인용 단일 발송 불가 · IMAP 계정 ID가 설정되지 않았습니다.")
-                            fallback_counter = max(0, threshold_value - 1)
-                            current_sent_counter = fallback_counter
-                            self._set_sent_counter(normalized, fallback_counter)
-                            return
-                        probe_result = self._run_sent_probe_mail(
-                            domain=normalized,
-                            mail_from=mail_from_candidate,
-                            smtp_context=smtp_context,
-                            rcpt_to=username_value,
-                        )
-                        if not probe_result.success:
-                            self._log_imap_console("Sent 확인용 단일 발송 실패 · Sent 기준 확인을 건너뜁니다.")
-                            fallback_counter = max(0, threshold_value - 1)
-                            current_sent_counter = fallback_counter
-                            self._set_sent_counter(normalized, fallback_counter)
-                            return
-                        current_sent_counter = max(0, current_sent_counter + 1)
-                        self._set_sent_counter(normalized, current_sent_counter)
-                        sent_at_param = probe_result.sent_at or request.get("sent_at") or utc_now()
-                        future = self._submit_imap_check(
-                            domain=normalized,
-                            job_id=job_id,
-                            send_type="sent-threshold",
-                            mail_from=mail_from_candidate,
-                            sent_at=sent_at_param,
-                            has_anchor=False,
-                            delay_before_check=float(request.get("single_delay") or 0),
-                            allowed_delay=int(request.get("allowed_latency") or 0),
-                            context_reason=str(request.get("detail") or "Sent 기준 확인"),
-                            sent_window_count=current_sent_counter,
-                            sent_threshold=threshold_value,
-                            smtp_context=smtp_context,
-                            probe_result=probe_result,
-                        )
-                    if future is None:
+                    outcome = self._execute_imap_guard_flow(
+                        domain=normalized,
+                        job_id=job_id,
+                        send_type="sent-threshold",
+                        mail_from=mail_from_candidate,
+                        has_anchor=False,
+                        context_reason=str(request.get("detail") or "Sent 기준 확인"),
+                        delay_before_check=float(request.get("single_delay") or 0),
+                        allowed_delay=int(request.get("allowed_latency") or 0),
+                        smtp_context=smtp_context,
+                        force=False,
+                        counter_mode="threshold",
+                        counter_current=current_sent_counter,
+                        counter_threshold=threshold_value,
+                        report_probe_failure=True,
+                    )
+                    if not outcome.scheduled:
+                        fallback_counter = outcome.sent_window_count if outcome.sent_window_count is not None else max(0, threshold_value - 1)
+                        current_sent_counter = fallback_counter
+                        return
+                    current_sent_counter = outcome.sent_window_count if outcome.sent_window_count is not None else current_sent_counter
+                    threshold_check_future = outcome.future
+                    if threshold_check_future is None:
                         current_sent_counter = 0
                         self._set_sent_counter(normalized, 0, reset_timestamp=utc_now_iso())
                         return
-                    threshold_check_future = future
                     report_payload: Optional[Dict[str, object]] = None
                     try:
-                        report_payload = future.result()
+                        report_payload = threshold_check_future.result()
                     except Exception as exc:  # pylint: disable=broad-except
                         self._log_imap_console(f"Sent 기준 확인 중 예외 발생: {exc}")
                     finally:
@@ -3515,6 +3686,51 @@ class MailClient:
             result=result_payload,
             error=error_message,
         )
+
+    def handle_imap_manual_check(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
+        if not domain:
+            message = "도메인 정보가 없어 수동 도착 확인을 실행할 수 없습니다."
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        normalized = domain.lower()
+        config_payload = payload.get("config") or {}
+        if not isinstance(config_payload, dict):
+            message = "SMTP 설정이 비어 있어 수동 도착 확인을 실행할 수 없습니다."
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        mail_from_value = str(config_payload.get("mail_from") or "").strip()
+        smtp_context = {
+            "smtp_host": config_payload.get("smtp_host"),
+            "smtp_port": config_payload.get("smtp_port"),
+            "helo": config_payload.get("helo"),
+            "header": config_payload.get("header"),
+        }
+        context_reason = str(payload.get("context_reason") or "사용자 수동 도착 확인")
+        outcome = self._execute_imap_guard_flow(
+            domain=normalized,
+            job_id=job_id,
+            send_type="manual",
+            mail_from=mail_from_value,
+            has_anchor=False,
+            context_reason=context_reason,
+            delay_before_check=None,
+            allowed_delay=None,
+            smtp_context=smtp_context,
+            force=True,
+            counter_mode="manual",
+            report_probe_failure=True,
+        )
+        result_payload = {
+            "domain": normalized,
+            "scheduled": outcome.scheduled,
+            "sent_counter": outcome.sent_window_count,
+            "sent_threshold": outcome.sent_threshold,
+        }
+        if outcome.scheduled:
+            message = "수동 도착 확인 플로우를 실행했습니다."
+            return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
+        reason = "Sent 확인용 발송을 시작하지 못했습니다."
+        if outcome.probe:
+            reason = outcome.probe.detail_line or outcome.probe.status_line or reason
+        return JobResult(job_id=job_id, status="failed", message=reason, error=reason, result=result_payload)
 
     def _perform_ip_change(self) -> Tuple[bool, str, Optional[str]]:
         previous_ip = self.public_ip

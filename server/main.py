@@ -1649,7 +1649,7 @@ def load_device_summary() -> Dict[str, Any]:
             )
             if updated_row:
                 job_overrides[job_row["id"]] = updated_row
-                if updated_row["job_type"] in {"single_send", "batch_send"}:
+                if updated_row["job_type"] in {"single_send", "imap_manual_check", "batch_send"}:
                     failure_report = JobReportPayload(
                         job_id=updated_row["id"],
                         status="failed",
@@ -2650,6 +2650,13 @@ class ImapFetchLatestRequest(ImapTestRequest):
         ge=1,
         le=10,
         description="가져올 최신 메일 개수 (현재 1개만 사용)",
+    )
+
+
+class ImapManualCheckRequest(BaseModel):
+    reason: Optional[str] = Field(
+        default=None,
+        description="대시보드에서 수동 도착 확인을 요청한 사유",
     )
 
 
@@ -3675,6 +3682,76 @@ def enqueue_imap_fetch_latest(device_id: str, domain: str, payload: ImapFetchLat
         conn.commit()
     public_job = dict(job)
     public_job["payload"] = sanitize_job_payload_for_output(job["job_type"], job.get("payload"))
+    return {"job": public_job}
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/imap/manual-check")
+def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCheckRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="네이버 도메인에서만 IMAP 확인을 지원합니다.")
+    reason_text = (payload.reason or "").strip()
+    context_reason = reason_text or "사용자 수동 도착 확인"
+    missing_tokens: Set[str] = set()
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        config_data = to_dict(config_row)
+        username_value = normalize_imap_username(config_data.get("imap_username"))
+        if not username_value:
+            raise HTTPException(status_code=400, detail="IMAP 계정 ID가 설정되어 있지 않습니다.")
+        global_config = load_global_config(conn=conn)
+        substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
+        context = build_substitution_context(substitution_rules)
+        configs = load_device_configs(device_id, conn=conn)
+        config_snapshot = build_config_snapshot(configs, normalized)
+        config_snapshot["bcc_count"] = 0
+        config_snapshot["anchor_interval"] = 0
+        rng = random.SystemRandom()
+        resolved_config, _, missing_tokens, _ = resolve_substitution_outputs(
+            config_snapshot,
+            substitution_rules,
+            global_config,
+            context=context,
+            random_generator=rng,
+        )
+        minimal_config = {
+            "smtp_host": resolved_config.get("smtp_host"),
+            "smtp_port": resolved_config.get("smtp_port"),
+            "helo": resolved_config.get("helo"),
+            "header": resolved_config.get("header"),
+            "mail_from": resolved_config.get("mail_from"),
+        }
+        existing_job = conn.execute(
+            """
+            SELECT id
+            FROM jobs
+            WHERE device_id=? AND domain=? AND job_type='imap_manual_check'
+              AND status IN ('pending', 'dispatched', 'running')
+              AND cancel_requested=0
+            """,
+            (device_id, normalized),
+        ).fetchone()
+        if existing_job:
+            raise HTTPException(status_code=409, detail="이미 도착 확인 작업이 진행 중입니다.")
+        job_payload: Dict[str, Any] = {
+            "trigger": "manual",
+            "context_reason": context_reason,
+            "config": minimal_config,
+            "username": username_value,
+        }
+        job = create_job(conn, device_id, normalized, "imap_manual_check", job_payload)
+        conn.commit()
+    public_job = dict(job)
+    public_job["payload"] = sanitize_job_payload_for_output(job["job_type"], job.get("payload"))
+    log_missing_substitutions(job, missing_tokens)
     return {"job": public_job}
 
 
@@ -4755,6 +4832,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             ORDER BY
                 CASE job_type
                     WHEN 'reset_sent_sequence' THEN -1
+                    WHEN 'imap_manual_check' THEN 0
                     WHEN 'single_send' THEN 0
                     WHEN 'batch_send' THEN 1
                     ELSE 2
