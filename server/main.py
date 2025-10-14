@@ -101,6 +101,8 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "substitution_rules": [],
     "telegram_bot_token": "",
     "telegram_chat_id": "",
+    "random_substitution_mode": "auto",
+    "substitution_snapshot": {},
 }
 GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count")
 MAX_DEVICE_LOG_HISTORY = 10
@@ -120,6 +122,9 @@ RANDOM_TOKEN_CHARSETS = {
 RANDOM_TOKEN_MAX_LENGTH = 128
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 5.0
+RANDOM_SUBSTITUTION_MODES = {"auto", "lock"}
+SNAPSHOT_FIELD_KEYS = ("helo", "mail_from", "header", "anchor_email", "rcpt_to")
+LOCK_SENSITIVE_FIELDS = ("helo", "mail_from", "header", "substitution_rules")
 
 
 def ensure_storage_root() -> None:
@@ -188,6 +193,87 @@ def sanitize_stop_schedule_time(value: Any) -> str:
     except ValueError:
         return ""
     return parsed.strftime("%H:%M")
+
+
+def sanitize_iso_timestamp(value: Any) -> Optional[str]:
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+        return value.isoformat()
+    candidate = str(value).strip()
+    if not candidate:
+        return None
+    normalized = candidate.replace("Z", "+00:00") if candidate.endswith("Z") else candidate
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return candidate
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    else:
+        parsed = parsed.astimezone(timezone.utc)
+    return parsed.isoformat()
+
+
+def sanitize_random_substitution_mode(value: Any) -> str:
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in RANDOM_SUBSTITUTION_MODES:
+            return lowered
+    return "auto"
+
+
+def sanitize_substitution_snapshot(raw: Any) -> Dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {"fields": {}, "missing_tokens": []}
+    fields_input = raw.get("fields")
+    if isinstance(fields_input, dict):
+        field_source = fields_input
+    else:
+        field_source = raw
+    fields: Dict[str, str] = {}
+    for key in SNAPSHOT_FIELD_KEYS:
+        value = field_source.get(key)
+        if isinstance(value, str):
+            fields[key] = value
+    generated_at = sanitize_iso_timestamp(raw.get("generated_at"))
+    device_id = raw.get("device_id")
+    domain_raw = raw.get("domain")
+    domain_value: Optional[str] = None
+    if isinstance(domain_raw, str):
+        candidate = domain_raw.strip().lower()
+        if candidate in DOMAINS:
+            domain_value = candidate
+        elif candidate:
+            domain_value = candidate
+    missing_raw = raw.get("missing_tokens")
+    if isinstance(missing_raw, list):
+        missing_tokens = sorted({str(token).strip() for token in missing_raw if token})
+    elif missing_raw:
+        missing_tokens = [str(missing_raw).strip()]
+    else:
+        missing_tokens = []
+    snapshot = {
+        "fields": fields,
+        "missing_tokens": missing_tokens,
+    }
+    if generated_at:
+        snapshot["generated_at"] = generated_at
+    if device_id:
+        snapshot["device_id"] = str(device_id)
+    if domain_value:
+        snapshot["domain"] = domain_value
+    return snapshot
+
+
+def field_contains_tokens(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    return bool(SUBSTITUTION_PATTERN.search(value))
 
 
 def sanitize_stop_schedule_last_run(value: Any) -> Optional[str]:
@@ -634,6 +720,10 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized["substitution_rules"] = sanitize_substitution_rules(raw.get("substitution_rules"))
     sanitized["telegram_bot_token"] = sanitize_telegram_bot_token(raw.get("telegram_bot_token"))
     sanitized["telegram_chat_id"] = sanitize_telegram_chat_id(raw.get("telegram_chat_id"))
+    sanitized["random_substitution_mode"] = sanitize_random_substitution_mode(raw.get("random_substitution_mode"))
+    sanitized["substitution_snapshot"] = sanitize_substitution_snapshot(raw.get("substitution_snapshot"))
+    if sanitized["random_substitution_mode"] != "lock":
+        sanitized["substitution_snapshot"] = {"fields": {}, "missing_tokens": []}
     return sanitized
 
 
@@ -1926,6 +2016,84 @@ def apply_substitutions_to_config(
     return missing
 
 
+def resolve_substitution_outputs(
+    config_snapshot: Dict[str, Any],
+    substitution_rules: List[Dict[str, Any]],
+    global_config: Dict[str, Any],
+    *,
+    context: Optional[Dict[str, Dict[str, Any]]] = None,
+    random_generator: Optional[random.Random] = None,
+    rcpt_source: Optional[str] = None,
+    rcpt_override: bool = False,
+    override_fields: Optional[Set[str]] = None,
+) -> Tuple[Dict[str, Any], Optional[str], Set[str], Optional[Dict[str, Any]]]:
+    working = dict(config_snapshot or {})
+    overrides = set(override_fields or set())
+    mode = sanitize_random_substitution_mode(global_config.get("random_substitution_mode"))
+    snapshot_payload = sanitize_substitution_snapshot(global_config.get("substitution_snapshot"))
+    if mode == "lock":
+        locked_fields = snapshot_payload.get("fields") or {}
+        if not locked_fields:
+            raise HTTPException(
+                status_code=409,
+                detail="랜덤 치환이 락 모드지만 저장된 고정 값이 없습니다. '다시 뽑기' 후 락을 설정하거나 잠금을 해제하세요.",
+            )
+        for field in SUBSTITUTION_TARGET_FIELDS:
+            if field in overrides and field != "rcpt_to":
+                if field_contains_tokens(working.get(field)):
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"락 모드에서는 {field.upper()} 필드에 랜덤 패턴을 사용할 수 없습니다. 락을 해제하거나 고정값을 갱신하세요.",
+                    )
+                continue
+            locked_value = locked_fields.get(field)
+            if locked_value is not None and field != "rcpt_to":
+                working[field] = locked_value
+            elif field != "rcpt_to" and field_contains_tokens(working.get(field)):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"락 모드에서 {field.upper()} 값을 계산할 수 없습니다. '다시 뽑기'로 고정값을 만든 뒤 잠그거나 잠금을 해제하세요.",
+                )
+        if rcpt_override:
+            if rcpt_source and field_contains_tokens(rcpt_source):
+                raise HTTPException(
+                    status_code=409,
+                    detail="락 모드에서는 RCPT TO에 랜덤 패턴을 사용할 수 없습니다. 락을 해제하거나 고정값을 갱신하세요.",
+                )
+            rcpt_result = rcpt_source
+        else:
+            locked_rcpt = locked_fields.get("rcpt_to")
+            if locked_rcpt is not None:
+                rcpt_result = locked_rcpt
+            else:
+                if rcpt_source and field_contains_tokens(rcpt_source):
+                    raise HTTPException(
+                        status_code=409,
+                        detail="락 모드에서 RCPT TO 랜덤 값을 계산할 수 없습니다. '다시 뽑기' 후 잠그거나 잠금을 해제하세요.",
+                    )
+                rcpt_result = rcpt_source
+        missing_tokens = set(snapshot_payload.get("missing_tokens") or [])
+        return working, rcpt_result, missing_tokens, snapshot_payload
+    rng = random_generator or random.SystemRandom()
+    effective_context = context or build_substitution_context(substitution_rules)
+    missing_tokens = apply_substitutions_to_config(
+        working,
+        substitution_rules,
+        context=effective_context,
+        random_generator=rng,
+    )
+    rcpt_result: Optional[str] = None
+    if rcpt_source is not None:
+        rcpt_result, rcpt_missing = substitute_tokens(
+            rcpt_source,
+            substitution_rules,
+            random_generator=rng,
+            context=effective_context,
+        )
+        missing_tokens.update(rcpt_missing)
+    return working, rcpt_result, missing_tokens, None
+
+
 def log_missing_substitutions(job: Dict[str, Any], missing: Iterable[str]) -> None:
     deduped = sorted({token for token in missing if token})
     if not deduped:
@@ -2574,31 +2742,29 @@ def preview_single_header(device_id: str, domain: str, payload: HeaderPreviewReq
     overrides = sanitize_preview_override(payload.config_override)
     if overrides:
         config_snapshot.update(overrides)
-    if payload.rcpt_to is not None:
-        config_snapshot["rcpt_to"] = str(payload.rcpt_to or "").strip()
+    rcpt_override = payload.rcpt_to is not None
+    rcpt_source = str(payload.rcpt_to or "").strip() if rcpt_override else config_snapshot.get("rcpt_to")
     rng = random.SystemRandom()
-    missing_tokens = apply_substitutions_to_config(
+    resolved_config, resolved_rcpt, missing_tokens, snapshot_meta = resolve_substitution_outputs(
         config_snapshot,
         substitution_rules,
+        global_config,
         context=context,
         random_generator=rng,
+        rcpt_source=rcpt_source,
+        rcpt_override=rcpt_override,
+        override_fields=set(overrides.keys()) if overrides else None,
     )
-    rcpt_source = config_snapshot.get("rcpt_to") or ""
-    substituted_rcpt, rcpt_missing = substitute_tokens(
-        rcpt_source,
-        substitution_rules,
-        random_generator=rng,
-        context=context,
-    )
-    missing_tokens.update(rcpt_missing)
+    rcpt_value = resolved_rcpt if resolved_rcpt is not None else (rcpt_source or "")
+    generated_marker = snapshot_meta.get("generated_at") if snapshot_meta else None
     return HeaderPreviewResponse(
-        helo=config_snapshot.get("helo", ""),
-        mail_from=config_snapshot.get("mail_from", ""),
-        header=config_snapshot.get("header", ""),
-        rcpt_to=substituted_rcpt,
-        anchor_email=config_snapshot.get("anchor_email", ""),
+        helo=resolved_config.get("helo", ""),
+        mail_from=resolved_config.get("mail_from", ""),
+        header=resolved_config.get("header", ""),
+        rcpt_to=rcpt_value,
+        anchor_email=resolved_config.get("anchor_email", ""),
         missing_tokens=sorted(missing_tokens),
-        generated_at=now_ts(),
+        generated_at=generated_marker or now_ts(),
     )
 
 
@@ -2633,6 +2799,32 @@ class SubstitutionPreviewItem(BaseModel):
     key: Optional[str] = None
     source: Optional[str] = ""
     encoding: Optional[str] = None
+
+
+class SubstitutionSnapshotResponse(BaseModel):
+    fields: Dict[str, str] = Field(default_factory=dict)
+    generated_at: Optional[str] = None
+    device_id: Optional[str] = None
+    domain: Optional[str] = None
+    missing_tokens: List[str] = Field(default_factory=list)
+
+
+class SubstitutionLockRequest(BaseModel):
+    helo: Optional[str] = None
+    mail_from: Optional[str] = None
+    header: Optional[str] = None
+    anchor_email: Optional[str] = None
+    rcpt_to: Optional[str] = None
+    device_id: Optional[str] = None
+    domain: Optional[str] = None
+    missing_tokens: Optional[List[str]] = None
+
+
+class SubstitutionRefreshRequest(BaseModel):
+    device_id: Optional[str] = None
+    domain: Optional[str] = None
+    rcpt_to: Optional[str] = None
+    header_override: Optional[str] = None
 
 
 class SubstitutionPreviewRequest(BaseModel):
@@ -2673,6 +2865,15 @@ class GlobalConfigResponse(BaseModel):
     substitution_rules: List[SubstitutionRule] = Field(default_factory=list)
     telegram_bot_token: str
     telegram_chat_id: str
+    random_substitution_mode: str
+    substitution_snapshot: SubstitutionSnapshotResponse = Field(default_factory=SubstitutionSnapshotResponse)
+
+
+class SubstitutionLockResponse(BaseModel):
+    mode: str
+    snapshot: SubstitutionSnapshotResponse
+    updated_at: Optional[str] = None
+    config: GlobalConfigResponse
 
 
 class GlobalBatchRequest(BaseModel):
@@ -2781,13 +2982,13 @@ def preview_substitution_endpoint(payload: SubstitutionPreviewRequest) -> Substi
     return SubstitutionPreviewResponse(results=results)
 
 
-@app.get("/api/global/config", response_model=GlobalConfigResponse)
-def get_global_config_endpoint() -> GlobalConfigResponse:
-    config = load_global_config()
+def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse:
     schedule_time = sanitize_stop_schedule_time(config.get("stop_schedule_time"))
     schedule_enabled = sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled"))
     if schedule_enabled and not schedule_time:
         schedule_enabled = False
+    mode_value = sanitize_random_substitution_mode(config.get("random_substitution_mode"))
+    snapshot_payload = sanitize_substitution_snapshot(config.get("substitution_snapshot"))
     return GlobalConfigResponse(
         helo=config.get("helo", ""),
         mail_from=config.get("mail_from", ""),
@@ -2806,7 +3007,25 @@ def get_global_config_endpoint() -> GlobalConfigResponse:
         ],
         telegram_bot_token=sanitize_telegram_bot_token(config.get("telegram_bot_token")),
         telegram_chat_id=sanitize_telegram_chat_id(config.get("telegram_chat_id")),
+        random_substitution_mode=mode_value,
+        substitution_snapshot=SubstitutionSnapshotResponse(**snapshot_payload),
     )
+
+
+def build_lock_operation_response(config: Dict[str, Any]) -> SubstitutionLockResponse:
+    normalized = build_global_config_response(config)
+    return SubstitutionLockResponse(
+        mode=normalized.random_substitution_mode,
+        snapshot=normalized.substitution_snapshot,
+        updated_at=normalized.updated_at,
+        config=normalized,
+    )
+
+
+@app.get("/api/global/config", response_model=GlobalConfigResponse)
+def get_global_config_endpoint() -> GlobalConfigResponse:
+    config = load_global_config()
+    return build_global_config_response(config)
 
 
 @app.post("/api/global/config/apply")
@@ -2817,6 +3036,12 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
     with db_lock, get_conn() as conn:
         current_config = load_global_config(conn=conn)
         stored_config = sanitize_global_config_payload(current_config)
+        previous_lock_mode = sanitize_random_substitution_mode(stored_config.get("random_substitution_mode"))
+        lock_signature_before = json.dumps(
+            {field: stored_config.get(field) for field in LOCK_SENSITIVE_FIELDS},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
         previous_active_domain = stored_config.get("active_domain", "naver")
         requested_active_domain = (
             sanitize_global_active_domain(payload.active_domain)
@@ -2925,6 +3150,15 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
             applied_fields.append("active_domain")
         stored_config["active_domain"] = requested_active_domain
         device_count = max(device_count, domain_update_count)
+        lock_signature_after = json.dumps(
+            {field: stored_config.get(field) for field in LOCK_SENSITIVE_FIELDS},
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if previous_lock_mode == "lock" and lock_signature_after != lock_signature_before:
+            stored_config["random_substitution_mode"] = "auto"
+            stored_config["substitution_snapshot"] = {"fields": {}, "missing_tokens": []}
+            applied_fields.append("random_substitution_mode")
         updated_at = save_global_config(conn, stored_config)
         conn.commit()
         refreshed_config = load_global_config(conn=conn)
@@ -2951,6 +3185,129 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         "applied_fields": unique_fields,
         "schedule_state": schedule_state,
     }
+
+
+def _sanitize_lock_fields(payload: SubstitutionLockRequest) -> Dict[str, str]:
+    fields: Dict[str, str] = {}
+    for key in SNAPSHOT_FIELD_KEYS:
+        value = getattr(payload, key, None)
+        if value is None:
+            continue
+        text = str(value)
+        if field_contains_tokens(text):
+            raise HTTPException(
+                status_code=400,
+                detail=f"{key.upper()} 값에 치환 토큰이 포함되어 있습니다. 미리보기에서 생성된 실제 값을 전달하세요.",
+            )
+        fields[key] = text
+    return fields
+
+
+@app.post("/api/global/substitution-lock", response_model=SubstitutionLockResponse)
+def create_substitution_lock(payload: SubstitutionLockRequest) -> SubstitutionLockResponse:
+    lock_fields = _sanitize_lock_fields(payload)
+    if not lock_fields:
+        raise HTTPException(status_code=400, detail="잠글 문자열 값을 최소 1개 이상 전달하세요.")
+    missing_tokens = sorted({str(token).strip() for token in (payload.missing_tokens or []) if token})
+    snapshot_payload: Dict[str, Any] = {
+        "fields": lock_fields,
+        "missing_tokens": missing_tokens,
+        "generated_at": now_ts(),
+    }
+    if payload.device_id:
+        snapshot_payload["device_id"] = str(payload.device_id).strip()
+    if payload.domain:
+        snapshot_payload["domain"] = normalize_domain(payload.domain)
+    with db_lock, get_conn() as conn:
+        current_config = load_global_config(conn=conn)
+        stored_config = sanitize_global_config_payload(current_config)
+        stored_config["random_substitution_mode"] = "lock"
+        stored_config["substitution_snapshot"] = sanitize_substitution_snapshot(snapshot_payload)
+        updated_at = save_global_config(conn, stored_config)
+        conn.commit()
+        refreshed_config = load_global_config(conn=conn)
+        refreshed_config["updated_at"] = updated_at
+    return build_lock_operation_response(refreshed_config)
+
+
+@app.post("/api/global/substitution-lock/refresh", response_model=SubstitutionLockResponse)
+def refresh_substitution_lock(payload: SubstitutionRefreshRequest) -> SubstitutionLockResponse:
+    device_id = (payload.device_id or "").strip()
+    if not device_id:
+        raise HTTPException(status_code=400, detail="다시 뽑기를 실행할 디바이스 ID를 전달하세요.")
+    domain = normalize_domain(payload.domain or "naver")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        global_config = load_global_config(conn=conn)
+        substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
+        context = build_substitution_context(substitution_rules)
+        configs = load_device_configs(device_id, conn=conn)
+        config_snapshot = build_config_snapshot(configs, domain)
+        override_fields: Set[str] = set()
+        if payload.header_override is not None:
+            config_snapshot["header"] = payload.header_override
+            override_fields.add("header")
+        rcpt_source = (payload.rcpt_to or "").strip() if payload.rcpt_to is not None else config_snapshot.get("rcpt_to")
+        rng = random.SystemRandom()
+        auto_config = dict(global_config)
+        auto_config["random_substitution_mode"] = "auto"
+        auto_config["substitution_snapshot"] = {"fields": {}, "missing_tokens": []}
+        resolved_config, resolved_rcpt, missing_tokens, _ = resolve_substitution_outputs(
+            config_snapshot,
+            substitution_rules,
+            auto_config,
+            context=context,
+            random_generator=rng,
+            rcpt_source=rcpt_source,
+            rcpt_override=payload.rcpt_to is not None,
+            override_fields=override_fields,
+        )
+        if missing_tokens:
+            unresolved = ", ".join(sorted(missing_tokens))
+            raise HTTPException(
+                status_code=400,
+                detail=f"치환되지 않은 토큰({unresolved})이 있어 랜덤 값을 고정할 수 없습니다.",
+            )
+        lock_fields: Dict[str, str] = {}
+        for key in SNAPSHOT_FIELD_KEYS:
+            value = resolved_config.get(key)
+            if isinstance(value, str):
+                lock_fields[key] = value
+        if resolved_rcpt is not None:
+            lock_fields["rcpt_to"] = resolved_rcpt
+        if not lock_fields:
+            raise HTTPException(status_code=400, detail="고정할 필드 값을 생성하지 못했습니다.")
+        snapshot_payload: Dict[str, Any] = {
+            "fields": lock_fields,
+            "missing_tokens": [],
+            "generated_at": now_ts(),
+            "device_id": device_id,
+            "domain": domain,
+        }
+        stored_config = sanitize_global_config_payload(global_config)
+        stored_config["random_substitution_mode"] = "lock"
+        stored_config["substitution_snapshot"] = sanitize_substitution_snapshot(snapshot_payload)
+        updated_at = save_global_config(conn, stored_config)
+        conn.commit()
+        refreshed_config = load_global_config(conn=conn)
+        refreshed_config["updated_at"] = updated_at
+    return build_lock_operation_response(refreshed_config)
+
+
+@app.post("/api/global/substitution-lock/reset", response_model=SubstitutionLockResponse)
+def reset_substitution_lock() -> SubstitutionLockResponse:
+    with db_lock, get_conn() as conn:
+        current_config = load_global_config(conn=conn)
+        stored_config = sanitize_global_config_payload(current_config)
+        stored_config["random_substitution_mode"] = "auto"
+        stored_config["substitution_snapshot"] = {"fields": {}, "missing_tokens": []}
+        updated_at = save_global_config(conn, stored_config)
+        conn.commit()
+        refreshed_config = load_global_config(conn=conn)
+        refreshed_config["updated_at"] = updated_at
+    return build_lock_operation_response(refreshed_config)
 
 
 @app.post("/api/global/telegram/test")
@@ -3418,17 +3775,20 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
             domain = forced_domain or normalize_domain(active)
             configs = load_device_configs(device_id, conn=conn)
             config_snapshot = build_config_snapshot(configs, domain)
-            missing_tokens = apply_substitutions_to_config(
+            rng = random.SystemRandom()
+            resolved_config, _, missing_tokens, _ = resolve_substitution_outputs(
                 config_snapshot,
                 substitution_rules,
+                global_config,
                 context=context,
+                random_generator=rng,
             )
             job = create_job(
                 conn,
                 device_id,
                 domain,
                 "batch_send",
-                {"config": config_snapshot},
+                {"config": resolved_config},
             )
             log_missing_substitutions(job, missing_tokens)
             created_jobs.append(job)
@@ -3459,20 +3819,21 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             raise HTTPException(status_code=400, detail="RCPT TO 주소가 필요합니다.")
         if payload.header_override:
             config_snapshot["header"] = payload.header_override
+        override_fields: Set[str] = set()
+        if payload.header_override:
+            override_fields.add("header")
         rng = random.SystemRandom()
-        missing_tokens = apply_substitutions_to_config(
+        resolved_config, resolved_rcpt, missing_tokens, snapshot_meta = resolve_substitution_outputs(
             config_snapshot,
             substitution_rules,
+            global_config,
             context=context,
             random_generator=rng,
+            rcpt_source=rcpt_to,
+            rcpt_override=bool(payload.rcpt_to),
+            override_fields=override_fields,
         )
-        substituted_rcpt, rcpt_missing = substitute_tokens(
-            rcpt_to,
-            substitution_rules,
-            random_generator=rng,
-            context=context,
-        )
-        missing_tokens.update(rcpt_missing)
+        substituted_rcpt = resolved_rcpt or rcpt_to
         force_imap_check = bool(payload.force_imap_check)
         job = create_job(
             conn,
@@ -3481,7 +3842,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             "single_send",
             {
                 "rcpt_to": substituted_rcpt,
-                "config": config_snapshot,
+                "config": resolved_config,
                 "force_imap_check": force_imap_check,
             },
         )
@@ -3502,17 +3863,20 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
-        missing_tokens = apply_substitutions_to_config(
+        rng = random.SystemRandom()
+        resolved_config, _, missing_tokens, _ = resolve_substitution_outputs(
             config_snapshot,
             substitution_rules,
+            global_config,
             context=context,
+            random_generator=rng,
         )
         job = create_job(
             conn,
             device_id,
             domain,
             "batch_send",
-            {"config": config_snapshot},
+            {"config": resolved_config},
         )
         conn.commit()
     log_missing_substitutions(job, missing_tokens)

@@ -408,6 +408,29 @@ header {
 .global-form textarea {
   min-height: 120px;
 }
+
+.field .field-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.random-lock-badge {
+  font-size: 12px;
+  line-height: 1.2;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-accent-soft);
+  color: var(--color-accent-strong);
+  border: 1px solid rgba(37, 99, 235, 0.25);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.random-lock-badge.hidden {
+  display: none;
+}
 .header-field textarea {
   min-height: 220px;
 }
@@ -494,6 +517,12 @@ header {
 }
 .single-preview-card {
   max-width: 720px;
+}
+.single-preview-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 .single-preview-body {
   display: flex;
@@ -2152,7 +2181,10 @@ button:not(:disabled):hover {
     <div class="modal-header">
       <div>
         <h2 id="singlePreviewTitle">단일 발송 헤더 미리보기</h2>
-        <div class="meta" id="singlePreviewSubtitle"></div>
+        <div class="meta single-preview-meta">
+          <span id="singlePreviewSubtitle"></span>
+          <span class="random-lock-badge hidden" id="singlePreviewLockBadge">🔒 RAND 고정</span>
+        </div>
       </div>
       <button type="button" class="ghost" data-action="close-single-preview">닫기</button>
     </div>
@@ -2275,6 +2307,8 @@ const GLOBAL_DEFAULTS = {
   substitution_rules: [],
   telegram_bot_token: "",
   telegram_chat_id: "",
+  random_substitution_mode: "auto",
+  substitution_snapshot: { fields: {}, generated_at: null, device_id: null, domain: null, missing_tokens: [] },
 };
 const GLOBAL_INPUT_IDS = {
   active_domain: "globalActiveDomainGroup",
@@ -2288,6 +2322,7 @@ const GLOBAL_INPUT_IDS = {
   telegram_bot_token: "globalTelegramBotToken",
   telegram_chat_id: "globalTelegramChatId",
 };
+const SNAPSHOT_FIELD_KEYS = ["helo", "mail_from", "header", "anchor_email", "rcpt_to"];
 
 const IMAP_DEFAULT_ALLOWED_LATENCY = 20;
 const IMAP_ALLOWED_MIN = 5;
@@ -2319,8 +2354,17 @@ const state = {
   },
   pollingHandle: null,
   successCounters: {},
-  globalConfig: { ...GLOBAL_DEFAULTS, updated_at: null, stop_schedule_last_run: null, stop_schedule_next_run: null },
-  globalDraft: { ...GLOBAL_DEFAULTS },
+  globalConfig: {
+    ...GLOBAL_DEFAULTS,
+    substitution_snapshot: JSON.parse(JSON.stringify(GLOBAL_DEFAULTS.substitution_snapshot)),
+    updated_at: null,
+    stop_schedule_last_run: null,
+    stop_schedule_next_run: null,
+  },
+  globalDraft: {
+    ...GLOBAL_DEFAULTS,
+    substitution_snapshot: JSON.parse(JSON.stringify(GLOBAL_DEFAULTS.substitution_snapshot)),
+  },
   globalDirty: {
     active_domain: false,
     helo: false,
@@ -2895,27 +2939,60 @@ function collectConfigPayload(card, currentDevice, domain) {
   };
 }
 
+function containsSubstitutionToken(value) {
+  if (typeof value !== "string") {
+    return false;
+  }
+  return /\$\{[^}]+\}/.test(value);
+}
+
 function prepareSinglePreviewRequest(card, currentDevice, domain) {
   const { payload } = collectConfigPayload(card, currentDevice, domain);
-  const overrides = {
+  const lockActive = isRandomLockActive();
+  const snapshot = lockActive ? currentRandomSnapshot() : null;
+  const snapshotFields = snapshot?.fields || {};
+  const rawOverrides = {
     helo: payload.helo,
     mail_from: payload.mail_from,
     header: payload.header,
     anchor_email: payload.anchor_email,
   };
-  const rcpt = (payload.rcpt_to || "").trim();
+  const overrides = lockActive ? {} : rawOverrides;
   const baseConfig = bestConfig(currentDevice, domain) || {};
+  const rawRcpt = (payload.rcpt_to || "").trim();
+  const snapshotRcpt = typeof snapshotFields.rcpt_to === "string" ? snapshotFields.rcpt_to.trim() : "";
+  let rcpt = rawRcpt;
+  if (lockActive) {
+    if (snapshotRcpt) {
+      rcpt = snapshotRcpt;
+    } else if (containsSubstitutionToken(rawRcpt)) {
+      rcpt = "";
+    }
+  }
   const fallback = {
-    helo: overrides.helo || baseConfig.helo || "",
-    mail_from: overrides.mail_from || baseConfig.mail_from || "",
-    header: overrides.header || baseConfig.header || "",
-    anchor_email: overrides.anchor_email || baseConfig.anchor_email || "",
-    rcpt_to: rcpt || baseConfig.rcpt_to || "",
+    helo: lockActive
+      ? (snapshotFields.helo ?? baseConfig.helo ?? "")
+      : (rawOverrides.helo || baseConfig.helo || ""),
+    mail_from: lockActive
+      ? (snapshotFields.mail_from ?? baseConfig.mail_from ?? "")
+      : (rawOverrides.mail_from || baseConfig.mail_from || ""),
+    header: lockActive
+      ? (snapshotFields.header ?? baseConfig.header ?? "")
+      : (rawOverrides.header || baseConfig.header || ""),
+    anchor_email: lockActive
+      ? (snapshotFields.anchor_email ?? baseConfig.anchor_email ?? "")
+      : (rawOverrides.anchor_email || baseConfig.anchor_email || ""),
+    rcpt_to: lockActive
+      ? (snapshotRcpt || baseConfig.rcpt_to || "")
+      : (rcpt || baseConfig.rcpt_to || ""),
   };
   const requestPayload = {
     config_override: overrides,
   };
-  if (rcpt) {
+  const shouldSendRcpt =
+    (!lockActive && rcpt) ||
+    (lockActive && !snapshotRcpt && rcpt && !containsSubstitutionToken(rcpt));
+  if (shouldSendRcpt) {
     requestPayload.rcpt_to = rcpt;
   }
   return {
@@ -2924,6 +3001,27 @@ function prepareSinglePreviewRequest(card, currentDevice, domain) {
     rcpt,
     fallback,
   };
+}
+
+async function refreshRandomSnapshot(deviceId, domain, options = {}) {
+  if (!deviceId) {
+    throw new Error("디바이스 ID가 필요합니다.");
+  }
+  const payload = { device_id: deviceId, domain };
+  if (options.rcpt_to) {
+    payload.rcpt_to = options.rcpt_to;
+  }
+  if (options.header_override) {
+    payload.header_override = options.header_override;
+  }
+  const result = await fetchJSON("/api/global/substitution-lock/refresh", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  if (result?.config) {
+    renderGlobalConfig(result.config);
+  }
+  return result;
 }
 
 function resetSinglePreviewState() {
@@ -2965,6 +3063,16 @@ function setSinglePreviewSubtitle(device, domain, generatedAt) {
     text += ` · 생성 ${formatDate(generatedAt)}`;
   }
   subtitle.textContent = text;
+  const lockBadge = document.getElementById("singlePreviewLockBadge");
+  if (lockBadge) {
+    if (isRandomLockActive()) {
+      lockBadge.classList.remove("hidden");
+      lockBadge.title = buildRandomLockTooltip();
+    } else {
+      lockBadge.classList.add("hidden");
+      lockBadge.removeAttribute("title");
+    }
+  }
 }
 
 function updateSinglePreviewFields(result = {}, fallback = {}) {
@@ -2994,18 +3102,19 @@ function updateSinglePreviewFields(result = {}, fallback = {}) {
 
 function setSinglePreviewLoading(isLoading) {
   const refreshBtn = document.querySelector('#singlePreviewModal [data-action="single-preview-refresh"]');
-  if (!refreshBtn) return;
-  if (!refreshBtn.dataset.defaultLabel) {
-    refreshBtn.dataset.defaultLabel = refreshBtn.textContent;
-  }
-  if (isLoading) {
-    refreshBtn.disabled = true;
-    refreshBtn.dataset.state = "loading";
-    refreshBtn.textContent = "불러오는 중...";
-  } else {
-    refreshBtn.disabled = false;
-    refreshBtn.textContent = refreshBtn.dataset.defaultLabel || "다시 뽑기";
-    delete refreshBtn.dataset.state;
+  if (refreshBtn) {
+    if (!refreshBtn.dataset.defaultLabel) {
+      refreshBtn.dataset.defaultLabel = refreshBtn.textContent;
+    }
+    if (isLoading) {
+      refreshBtn.disabled = true;
+      refreshBtn.dataset.state = "loading";
+      refreshBtn.textContent = "불러오는 중...";
+    } else {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = refreshBtn.dataset.defaultLabel || "다시 뽑기";
+      delete refreshBtn.dataset.state;
+    }
   }
 }
 
@@ -3043,9 +3152,11 @@ async function openSinglePreviewModal(card, currentDevice, domain) {
     const result = await requestSinglePreview(deviceId, domain, requestBody);
     state.singlePreview.pending = false;
     state.singlePreview.lastResult = result;
+    state.singlePreview.rcpt = String(result?.rcpt_to ?? "");
     setSinglePreviewMessage("");
     setSinglePreviewSubtitle(currentDevice, domain, result?.generated_at || null);
     updateSinglePreviewFields(result, fallback);
+    updateRandomLockIndicators();
   } catch (err) {
     state.singlePreview.pending = false;
     setSinglePreviewMessage(err?.message || "미리보기를 불러오지 못했습니다.", "error");
@@ -3063,19 +3174,47 @@ async function refreshSinglePreview() {
   if (!deviceId || !domain) {
     return;
   }
-  const payload = {
-    config_override: state.singlePreview.overrides || {},
-  };
-  if (state.singlePreview.rcpt) {
-    payload.rcpt_to = state.singlePreview.rcpt;
+  const lockActive = isRandomLockActive();
+  const snapshot = lockActive ? currentRandomSnapshot() : null;
+  const snapshotFields = snapshot?.fields || {};
+  const overrides = lockActive ? {} : { ...(state.singlePreview.overrides || {}) };
+  const payload = { config_override: overrides };
+  const snapshotRcpt = typeof snapshotFields.rcpt_to === "string" ? snapshotFields.rcpt_to.trim() : "";
+  let rcptValue = String(state.singlePreview.rcpt || "").trim();
+  if (lockActive) {
+    if (snapshotRcpt) {
+      rcptValue = snapshotRcpt;
+    } else if (containsSubstitutionToken(rcptValue)) {
+      rcptValue = "";
+    }
+  }
+  const shouldSendRcpt =
+    (!lockActive && rcptValue) ||
+    (lockActive && !snapshotRcpt && rcptValue && !containsSubstitutionToken(rcptValue));
+  if (shouldSendRcpt) {
+    payload.rcpt_to = rcptValue;
   }
   state.singlePreview.pending = true;
   setSinglePreviewLoading(true);
   setSinglePreviewMessage("새로운 미리보기를 계산 중입니다...", "info");
   try {
+    if (lockActive) {
+      try {
+        await refreshRandomSnapshot(deviceId, domain, {
+          rcpt_to: shouldSendRcpt ? rcptValue : undefined,
+          header_override: (state.singlePreview.overrides || {}).header,
+        });
+        // 최신 글로벌 설정을 반영하도록 상태 갱신
+      } catch (refreshErr) {
+        state.singlePreview.pending = false;
+        setSinglePreviewMessage(refreshErr?.message || "랜덤 값을 다시 뽑지 못했습니다.", "error");
+        return;
+      }
+    }
     const result = await requestSinglePreview(deviceId, domain, payload);
     state.singlePreview.pending = false;
     state.singlePreview.lastResult = result;
+    state.singlePreview.rcpt = String(result?.rcpt_to ?? "");
     const device =
       state.devices.find((item) => item.id === deviceId) ||
       state.singlePreview.card?.__deviceData ||
@@ -3083,6 +3222,7 @@ async function refreshSinglePreview() {
     setSinglePreviewMessage("");
     setSinglePreviewSubtitle(device, domain, result?.generated_at || null);
     updateSinglePreviewFields(result, state.singlePreview.fallback || {});
+    updateRandomLockIndicators();
   } catch (err) {
     state.singlePreview.pending = false;
     setSinglePreviewMessage(err?.message || "미리보기 새로고침에 실패했습니다.", "error");
@@ -3182,6 +3322,85 @@ function formatScheduleInputValue(raw) {
   const hours = digits.slice(0, 2);
   const minutes = digits.slice(2);
   return minutes ? `${hours}:${minutes}` : hours;
+}
+
+function isRandomLockActive() {
+  return (state.globalConfig?.random_substitution_mode || "auto") === "lock";
+}
+
+function currentRandomSnapshot() {
+  const snapshot = state.globalConfig?.substitution_snapshot;
+  if (snapshot && typeof snapshot === "object") {
+    return snapshot;
+  }
+  return GLOBAL_DEFAULTS.substitution_snapshot;
+}
+
+function buildRandomLockTooltip(snapshot = currentRandomSnapshot()) {
+  if (!snapshot) {
+    return "랜덤 치환 값을 고정한 상태입니다.";
+  }
+  const pieces = [];
+  if (snapshot.generated_at) {
+    pieces.push(`고정 ${formatDate(snapshot.generated_at)}`);
+  }
+  if (snapshot.device_id) {
+    pieces.push(`디바이스 ${snapshot.device_id}`);
+  }
+  if (snapshot.domain) {
+    const label = DOMAIN_LABELS[snapshot.domain] || snapshot.domain;
+    pieces.push(`도메인 ${label}`);
+  }
+  return pieces.length
+    ? `랜덤 치환 고정 · ${pieces.join(" · ")}`
+    : "랜덤 치환 값을 고정한 상태입니다.";
+}
+
+function updateRandomLockIndicators() {
+  const locked = isRandomLockActive();
+  const snapshot = currentRandomSnapshot();
+  const tooltip = locked ? buildRandomLockTooltip(snapshot) : "";
+  Object.values(cardRegistry).forEach((card) => {
+    if (!card) return;
+    const toggleBtn = card.querySelector('button[data-action="random-lock-toggle"]');
+    if (toggleBtn) {
+      if (!toggleBtn.dataset.lockLabel) {
+        toggleBtn.dataset.lockLabel = "락 설정";
+      }
+      if (!toggleBtn.dataset.unlockLabel) {
+        toggleBtn.dataset.unlockLabel = "락 해제";
+      }
+      const loading = Boolean(toggleBtn.dataset.loading);
+      if (!loading) {
+        toggleBtn.disabled = false;
+        toggleBtn.textContent = locked
+          ? toggleBtn.dataset.unlockLabel || "락 해제"
+          : toggleBtn.dataset.lockLabel || "락 설정";
+        toggleBtn.dataset.mode = locked ? "unlock" : "lock";
+        toggleBtn.classList.toggle("danger", locked);
+      }
+    }
+    const badge = card.querySelector('[data-role="randomLockBadge"]');
+    if (badge) {
+      if (locked) {
+        badge.classList.remove("hidden");
+        badge.title = tooltip;
+      } else {
+        badge.classList.add("hidden");
+        badge.removeAttribute("title");
+      }
+    }
+  });
+  const previewBadge = document.getElementById("singlePreviewLockBadge");
+  if (previewBadge) {
+    if (locked) {
+      previewBadge.classList.remove("hidden");
+      previewBadge.title = tooltip;
+    } else {
+      previewBadge.classList.add("hidden");
+      previewBadge.removeAttribute("title");
+    }
+  }
 }
 
 async function requestDeviceScheduleUpdate(card, device, domain, payload) {
@@ -3414,6 +3633,37 @@ function normalizeGlobalFieldValue(field, value) {
   return String(value);
 }
 
+function normalizeSubstitutionSnapshot(snapshot) {
+  const source = snapshot && typeof snapshot === "object" ? snapshot : {};
+  const fieldSource = source.fields && typeof source.fields === "object" ? source.fields : source;
+  const fields = {};
+  SNAPSHOT_FIELD_KEYS.forEach((key) => {
+    if (fieldSource && typeof fieldSource[key] === "string") {
+      fields[key] = fieldSource[key];
+    }
+  });
+  const generatedAt =
+    typeof source.generated_at === "string" && source.generated_at.trim() ? source.generated_at : null;
+  const deviceId =
+    source.device_id !== undefined && source.device_id !== null
+      ? String(source.device_id).trim() || null
+      : null;
+  const domain =
+    typeof source.domain === "string" && source.domain.trim()
+      ? source.domain.trim().toLowerCase()
+      : null;
+  const missingTokens = Array.isArray(source.missing_tokens)
+    ? source.missing_tokens.map((token) => String(token).trim()).filter(Boolean)
+    : [];
+  return {
+    fields,
+    generated_at: generatedAt,
+    device_id: deviceId,
+    domain,
+    missing_tokens: missingTokens,
+  };
+}
+
 function normalizeGlobalConfig(config) {
   const normalized = {};
   GLOBAL_FIELD_LIST.forEach((field) => {
@@ -3423,6 +3673,9 @@ function normalizeGlobalConfig(config) {
   normalized.stop_schedule_last_run = config?.stop_schedule_last_run || null;
   normalized.stop_schedule_next_run = config?.stop_schedule_next_run || null;
   normalized.substitution_rules = normalizeSubstitutionRules(config?.substitution_rules || []);
+  const modeRaw = typeof config?.random_substitution_mode === "string" ? config.random_substitution_mode.trim().toLowerCase() : "auto";
+  normalized.random_substitution_mode = modeRaw === "lock" ? "lock" : "auto";
+  normalized.substitution_snapshot = normalizeSubstitutionSnapshot(config?.substitution_snapshot);
   return normalized;
 }
 
@@ -5130,11 +5383,17 @@ function renderGlobalConfig(config) {
   const normalized = normalizeGlobalConfig(config || {});
   const updatedAtEl = document.getElementById("globalUpdatedAt");
   const normalizedSubs = cloneSubstitutionRules(normalized.substitution_rules);
-  state.globalConfig = { ...normalized, substitution_rules: normalizedSubs };
+  const snapshotClone = JSON.parse(JSON.stringify(normalized.substitution_snapshot || GLOBAL_DEFAULTS.substitution_snapshot));
+  state.globalConfig = {
+    ...normalized,
+    substitution_rules: normalizedSubs,
+    substitution_snapshot: snapshotClone,
+  };
   state.globalScheduleError = "";
   state.telegramLastSavedToken = normalized.telegram_bot_token || "";
   state.telegramLastSavedChat = normalized.telegram_chat_id || "";
   syncSubstitutionRulesFromServer(normalizedSubs);
+  updateRandomLockIndicators();
   GLOBAL_FIELD_LIST.forEach((field) => {
     if (!state.globalDirty[field]) {
       state.globalDraft[field] = normalized[field];
@@ -5393,6 +5652,105 @@ function updateSingleSendControls(card, device) {
           previewBtn.disabled = false;
           previewBtn.textContent = previewBtn.dataset.defaultLabel || "미리보기";
         }
+      }
+    });
+  }
+
+  const randomRefreshBtn = card.querySelector('button[data-action="random-refresh"]');
+  if (randomRefreshBtn && !randomRefreshBtn.dataset.bound) {
+    randomRefreshBtn.dataset.bound = "true";
+    randomRefreshBtn.addEventListener("click", async () => {
+      if (randomRefreshBtn.dataset.loading) return;
+      const currentDevice = resolveCardDevice(card);
+      if (!currentDevice?.id) {
+        setNotice(card, "디바이스 정보를 확인할 수 없습니다.", "error");
+        return;
+      }
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      const rcptInput = card.querySelector('[data-field="rcpt_to"]');
+      if (!randomRefreshBtn.dataset.defaultLabel) {
+        randomRefreshBtn.dataset.defaultLabel = randomRefreshBtn.textContent;
+      }
+      randomRefreshBtn.dataset.loading = "true";
+      randomRefreshBtn.disabled = true;
+      randomRefreshBtn.textContent = "랜덤 고정 중...";
+      try {
+        await ensureConfigSynced(card, currentDevice, domain);
+        await refreshRandomSnapshot(currentDevice.id, domain, {
+          rcpt_to: rcptInput?.value?.trim() || undefined,
+        });
+        setNotice(card, "랜덤 치환 값을 다시 뽑아 고정했습니다.", "success");
+      } catch (err) {
+        setNotice(card, err?.message || "랜덤 값을 다시 뽑지 못했습니다.", "error");
+      } finally {
+        delete randomRefreshBtn.dataset.loading;
+        randomRefreshBtn.disabled = false;
+        randomRefreshBtn.textContent = randomRefreshBtn.dataset.defaultLabel || "다시 뽑기";
+      }
+    });
+  }
+
+  const randomLockToggle = card.querySelector('button[data-action="random-lock-toggle"]');
+  if (randomLockToggle && !randomLockToggle.dataset.bound) {
+    randomLockToggle.dataset.bound = "true";
+    randomLockToggle.addEventListener("click", async () => {
+      if (randomLockToggle.dataset.loading) return;
+      const mode = randomLockToggle.dataset.mode || (isRandomLockActive() ? "unlock" : "lock");
+      const currentDevice = resolveCardDevice(card);
+      if (!currentDevice?.id) {
+        setNotice(card, "디바이스 정보를 확인할 수 없습니다.", "error");
+        return;
+      }
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      if (!randomLockToggle.dataset.lockLabel) {
+        randomLockToggle.dataset.lockLabel = "락 설정";
+      }
+      if (!randomLockToggle.dataset.unlockLabel) {
+        randomLockToggle.dataset.unlockLabel = "락 해제";
+      }
+      randomLockToggle.dataset.loading = "true";
+      randomLockToggle.disabled = true;
+      randomLockToggle.textContent = mode === "lock" ? "락 설정 중..." : "락 해제 중...";
+      try {
+        if (mode === "lock") {
+          await ensureConfigSynced(card, currentDevice, domain);
+          const { requestBody } = prepareSinglePreviewRequest(card, currentDevice, domain);
+          const previewResult = await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/preview-header`, {
+            method: "POST",
+            body: JSON.stringify(requestBody),
+          });
+          const lockPayload = {
+            helo: String(previewResult.helo ?? ""),
+            mail_from: String(previewResult.mail_from ?? ""),
+            header: String(previewResult.header ?? ""),
+            anchor_email: String(previewResult.anchor_email ?? ""),
+            rcpt_to: String(previewResult.rcpt_to ?? ""),
+            missing_tokens: Array.isArray(previewResult.missing_tokens) ? previewResult.missing_tokens : [],
+            device_id: currentDevice.id,
+            domain,
+          };
+          const lockResponse = await fetchJSON("/api/global/substitution-lock", {
+            method: "POST",
+            body: JSON.stringify(lockPayload),
+          });
+          if (lockResponse?.config) {
+            renderGlobalConfig(lockResponse.config);
+          }
+          setNotice(card, "현재 값을 랜덤 락으로 고정했습니다.", "success");
+        } else {
+          const result = await fetchJSON("/api/global/substitution-lock/reset", { method: "POST" });
+          if (result?.config) {
+            renderGlobalConfig(result.config);
+          }
+          setNotice(card, "랜덤 치환 고정을 해제했습니다.");
+        }
+      } catch (err) {
+        const message = err?.message || (mode === "lock" ? "락 설정에 실패했습니다." : "락 해제에 실패했습니다.");
+        setNotice(card, message, "error");
+      } finally {
+        delete randomLockToggle.dataset.loading;
+        randomLockToggle.disabled = false;
+        updateRandomLockIndicators();
       }
     });
   }
@@ -7158,7 +7516,10 @@ function buildDeviceCard(device) {
         <input type="text" data-field="mail_from">
       </label>
       <label class="field">
-        <span>HEADER</span>
+        <span class="field-label">
+          HEADER
+          <span class="random-lock-badge hidden" data-role="randomLockBadge" title="랜덤 치환 고정">🔒 RAND 고정</span>
+        </span>
         <textarea data-field="header" placeholder="헤더를 입력하세요"></textarea>
       </label>
       <div class="action-bar">
@@ -7170,6 +7531,8 @@ function buildDeviceCard(device) {
           <button data-action="save">설정 저장</button>
           <button class="ghost" data-action="copy-global">전체 적용</button>
           <button class="ghost" data-action="single-preview">미리보기</button>
+          <button class="ghost" data-action="random-refresh">다시 뽑기</button>
+          <button class="ghost" data-action="random-lock-toggle">락 설정</button>
           <button class="secondary" data-action="single">단일 발송</button>
           <button data-action="batch">전체 발송</button>
           <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
@@ -7327,6 +7690,7 @@ function renderDevices() {
     }
     emptyHint.style.display = "none";
   }
+  updateRandomLockIndicators();
 }
 
 async function loadDevices(options = {}) {

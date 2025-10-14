@@ -21,7 +21,9 @@ from server.main import (
     SubstitutionPreviewItem,
     SubstitutionPreviewRequest,
     preview_substitution_endpoint,
+    resolve_substitution_outputs,
 )
+from fastapi import HTTPException
 
 
 class SequencedRandom(random.Random):
@@ -201,6 +203,101 @@ class SubstitutionRuleTests(unittest.TestCase):
         self.assertEqual(len(response.results), 1)
         expected = encode_substitution_value("테스트", "html_hex_min")
         self.assertEqual(response.results[0], expected)
+
+
+class RandomLockModeTests(unittest.TestCase):
+    def test_auto_mode_resolves_random_tokens(self) -> None:
+        config_snapshot = {
+            "helo": "HEL-${랜덤:영소:4}",
+            "header": "HDR-${랜덤:영소:2}",
+        }
+        rng = random.Random(7)
+        rules = canonicalize_substitution_rules([
+            {"key": "dummy", "source": "dummy"},
+        ], strict=True)
+        resolved_config, rcpt_value, missing_tokens, snapshot_meta = resolve_substitution_outputs(
+            dict(config_snapshot),
+            rules,
+            {"random_substitution_mode": "auto", "substitution_snapshot": {}},
+            random_generator=rng,
+        )
+        self.assertIsNone(rcpt_value)
+        self.assertFalse(missing_tokens)
+        self.assertIsNone(snapshot_meta)
+
+        expected_rng = random.Random(7)
+        helo_length = expected_rng.randint(4, 4)
+        helo_suffix = "".join(expected_rng.choice(string.ascii_lowercase) for _ in range(helo_length))
+        header_length = expected_rng.randint(2, 2)
+        header_suffix = "".join(expected_rng.choice(string.ascii_lowercase) for _ in range(header_length))
+        self.assertEqual(resolved_config["helo"], f"HEL-{helo_suffix}")
+        self.assertEqual(resolved_config["header"], f"HDR-{header_suffix}")
+
+    def test_lock_mode_uses_snapshot_fields(self) -> None:
+        snapshot = {
+            "fields": {
+                "helo": "LOCKED-HEL",
+                "header": "LOCKED-HDR",
+                "anchor_email": "locked@example.com",
+                "rcpt_to": "rcpt@example.com",
+            },
+            "missing_tokens": ["foo"],
+            "generated_at": "2025-10-14T12:34:56+00:00",
+            "device_id": "device-1",
+            "domain": "naver",
+        }
+        config_snapshot = {
+            "helo": "HEL-${랜덤:영소:4}",
+            "header": "HDR-${랜덤:영소:3}",
+            "anchor_email": "${랜덤:영소:5}@example.com",
+        }
+        resolved_config, rcpt_value, missing_tokens, snapshot_meta = resolve_substitution_outputs(
+            dict(config_snapshot),
+            [],
+            {"random_substitution_mode": "lock", "substitution_snapshot": snapshot},
+        )
+        self.assertEqual(resolved_config["helo"], "LOCKED-HEL")
+        self.assertEqual(resolved_config["header"], "LOCKED-HDR")
+        self.assertEqual(resolved_config["anchor_email"], "locked@example.com")
+        self.assertEqual(rcpt_value, "rcpt@example.com")
+        self.assertEqual(missing_tokens, {"foo"})
+        self.assertIsNotNone(snapshot_meta)
+        if snapshot_meta:
+            self.assertEqual(snapshot_meta.get("generated_at"), "2025-10-14T12:34:56+00:00")
+
+    def test_lock_mode_requires_snapshot_for_random_tokens(self) -> None:
+        config_snapshot = {"header": "HDR-${랜덤:영소:3}"}
+        with self.assertRaises(HTTPException):
+            resolve_substitution_outputs(
+                dict(config_snapshot),
+                [],
+                {"random_substitution_mode": "lock", "substitution_snapshot": {"fields": {}, "missing_tokens": []}},
+            )
+
+    def test_lock_mode_allows_plain_rcpt_override(self) -> None:
+        snapshot = {"fields": {"helo": "LOCKED"}, "missing_tokens": []}
+        resolved_config, rcpt_value, missing_tokens, snapshot_meta = resolve_substitution_outputs(
+            {"helo": "HEL-${랜덤:영소:2}"},
+            [],
+            {"random_substitution_mode": "lock", "substitution_snapshot": snapshot},
+            rcpt_source="user@example.com",
+            rcpt_override=True,
+        )
+        self.assertEqual(resolved_config["helo"], "LOCKED")
+        self.assertEqual(rcpt_value, "user@example.com")
+        self.assertFalse(missing_tokens)
+        self.assertIsNotNone(snapshot_meta)
+
+    def test_lock_mode_rejects_rcpt_override_with_tokens(self) -> None:
+        snapshot = {"fields": {"helo": "LOCKED"}, "missing_tokens": []}
+        with self.assertRaises(HTTPException):
+            resolve_substitution_outputs(
+                {"helo": "HEL-${랜덤:영소:2}"},
+                [],
+                {"random_substitution_mode": "lock", "substitution_snapshot": snapshot},
+                rcpt_source="${랜덤:영소:3}",
+                rcpt_override=True,
+            )
 
 
 if __name__ == "__main__":
