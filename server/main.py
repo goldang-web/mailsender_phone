@@ -74,6 +74,7 @@ IMAP_DELAY_MIN_SECONDS = 5
 IMAP_DELAY_MAX_SECONDS = 600
 IMAP_CHECK_DELAY_MIN_SECONDS = 0
 IMAP_FAILURE_ACTIONS = {"none", "stop_device", "stop_all"}
+IMAP_NEGATIVE_SKEW_TOLERANCE_SECONDS = 3.0
 
 
 app = FastAPI(title="MailSender Control Server")
@@ -301,7 +302,9 @@ def sanitize_imap_latency(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     if latency < 0:
-        return 0.0
+        if latency >= -IMAP_NEGATIVE_SKEW_TOLERANCE_SECONDS:
+            return 0.0
+        return None
     return latency
 
 
@@ -4075,7 +4078,13 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     sent_dt = datetime.fromisoformat(sent_at_value.replace("Z", "+00:00"))
                     received_dt = datetime.fromisoformat(received_at_value.replace("Z", "+00:00"))
                     delta_seconds = (received_dt - sent_dt).total_seconds()
-                    latency_value = float(delta_seconds) if delta_seconds >= 0 else 0.0
+                    if delta_seconds < 0:
+                        if delta_seconds >= -IMAP_NEGATIVE_SKEW_TOLERANCE_SECONDS:
+                            latency_value = 0.0
+                        else:
+                            latency_value = None
+                    else:
+                        latency_value = float(delta_seconds)
                 except ValueError:
                     pass
             anchor_flag = bool(report.anchor)
@@ -4252,6 +4261,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             WHERE device_id=? AND status='pending' AND cancel_requested=0
             ORDER BY
                 CASE job_type
+                    WHEN 'reset_sent_sequence' THEN -1
                     WHEN 'single_send' THEN 0
                     WHEN 'batch_send' THEN 1
                     ELSE 2

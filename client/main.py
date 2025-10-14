@@ -26,7 +26,7 @@ from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 from lib.naver_imap import probe_imap_connection, verify_delivery, fetch_latest_message_summary
 
 
-APP_VERSION = "0.0.47"
+APP_VERSION = "0.0.49"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
