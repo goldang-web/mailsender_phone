@@ -2413,7 +2413,9 @@ const JOB_STATUS_LABELS = {
   cancelled: "중지됨",
 };
 const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
-const SINGLE_JOB_TYPES = new Set(["single_send", "imap_manual_check"]);
+const SINGLE_JOB_TYPES = new Set(["single_send"]);
+const IMAP_CHECK_JOB_TYPES = new Set(["imap_manual_check"]);
+const TRACKED_SUPPORT_JOB_TYPES = new Set([...SINGLE_JOB_TYPES, ...IMAP_CHECK_JOB_TYPES]);
 
 const SUBSTITUTION_ENCODING_OPTIONS = [
   { value: "none", label: "없음" },
@@ -5534,6 +5536,24 @@ function latestSingleJob(device, domain) {
   return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
 }
 
+function latestImapManualJob(device, domain) {
+  if (!device?.jobs?.length) {
+    return null;
+  }
+  const targetDomain = normalizeDeviceDomain(domain || device.active_domain || "naver");
+  const candidates = device.jobs.filter((job) => {
+    const jobType = (job?.job_type || "").toLowerCase();
+    if (!IMAP_CHECK_JOB_TYPES.has(jobType)) {
+      return false;
+    }
+    const jobDomain = normalizeDeviceDomain(job.domain || device.active_domain || targetDomain);
+    return jobDomain === targetDomain;
+  });
+  if (!candidates.length) {
+    return null;
+  }
+  return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
+}
 
 function latestBatchJob(device) {
   if (!device?.jobs?.length) {
@@ -5587,7 +5607,7 @@ function applyScheduledSingleSendJob(card, currentDevice, scheduledJob) {
     return baseDevice;
   }
   const jobType = (scheduledJob?.job_type || "").toLowerCase();
-  if (!SINGLE_JOB_TYPES.has(jobType)) {
+  if (!TRACKED_SUPPORT_JOB_TYPES.has(jobType)) {
     updateSingleSendControls(card, baseDevice);
     return baseDevice;
   }
@@ -5595,7 +5615,7 @@ function applyScheduledSingleSendJob(card, currentDevice, scheduledJob) {
   const existingIdx = jobs.findIndex((job) => job?.id === scheduledJob.id);
   const normalizedJob = {
     ...scheduledJob,
-    job_type: scheduledJob.job_type || "single_send",
+    job_type: scheduledJob.job_type || jobType || "single_send",
     status: scheduledJob.status || "pending",
     progress: Array.isArray(scheduledJob.progress) ? scheduledJob.progress : [],
     cancel_requested: Boolean(scheduledJob.cancel_requested),
@@ -5642,10 +5662,13 @@ function resolveCardDevice(card) {
 function updateSingleSendControls(card, device) {
   const deviceData = device || card.__deviceData || {};
   const activeDomain = normalizeDeviceDomain(getActiveDomain(card, deviceData.active_domain));
-  const job = latestSingleJob(deviceData, activeDomain);
-  const isActive = job ? ACTIVE_JOB_STATES.has(job.status) : false;
+  const singleJob = latestSingleJob(deviceData, activeDomain);
+  const imapJob = latestImapManualJob(deviceData, activeDomain);
+  const singleActive = singleJob ? ACTIVE_JOB_STATES.has(singleJob.status) : false;
+  const imapActive = imapJob ? ACTIVE_JOB_STATES.has(imapJob.status) : false;
   card.dataset.currentSingleJobDomain = activeDomain;
-  card.dataset.currentSingleJobId = isActive ? (job?.id || "") : "";
+  card.dataset.currentSingleJobId = singleActive ? (singleJob?.id || "") : "";
+  card.dataset.currentImapJobId = imapActive ? (imapJob?.id || "") : "";
   const previewBtn = card.querySelector('button[data-action="single-preview"]');
   if (previewBtn) {
     previewBtn.addEventListener("click", async () => {
@@ -5781,7 +5804,7 @@ function updateSingleSendControls(card, device) {
     if (!singleBtn.dataset.defaultLabel) {
       singleBtn.dataset.defaultLabel = singleBtn.textContent;
     }
-    if (isActive) {
+    if (singleActive) {
       singleBtn.disabled = true;
       singleBtn.classList.add("is-running");
       singleBtn.textContent = "단일 발송 중...";
@@ -5826,18 +5849,18 @@ function updateSingleSendControls(card, device) {
       if (!imapCancelBtn.dataset.defaultLabel) {
         imapCancelBtn.dataset.defaultLabel = imapCancelBtn.textContent;
       }
-      const shouldShowCancel = holdActive;
+      const shouldShowCancel = holdActive || imapActive;
       imapCancelBtn.hidden = !shouldShowCancel;
       imapCancelBtn.disabled = !shouldShowCancel;
       if (!shouldShowCancel) {
         imapCancelBtn.textContent = imapCancelBtn.dataset.defaultLabel || "중지";
       }
     }
-    if (isActive) {
+    if (imapActive) {
       imapCheckBtn.disabled = true;
       imapCheckBtn.classList.add("is-running");
       imapCheckBtn.textContent = "도착 확인 중...";
-      imapCheckBtn.title = "단일 발송 작업이 완료될 때까지 기다려주세요.";
+      imapCheckBtn.title = "IMAP 도착 여부 확인 중입니다.";
     } else {
       imapCheckBtn.classList.remove("is-running");
       if (holdActive) {
@@ -7312,7 +7335,7 @@ function attachCardEvents(card) {
         return;
       }
       const currentDevice = getDevice();
-      const jobId = card.dataset.currentSingleJobId || "";
+      const jobId = card.dataset.currentImapJobId || card.dataset.currentSingleJobId || "";
       if (!jobId) {
         const block = card.querySelector('[data-role="imapBlock"]');
         if (block) {
@@ -7333,6 +7356,7 @@ function attachCardEvents(card) {
           imapCancelBtn.textContent = imapCancelBtn.dataset.defaultLabel;
         }
         setNotice(card, "중지할 작업이 없어 상태를 초기화했습니다.", "info");
+        card.dataset.currentImapJobId = "";
         card.dataset.currentSingleJobId = "";
         updateSingleSendControls(card, currentDevice);
         return;
@@ -7376,6 +7400,7 @@ function attachCardEvents(card) {
       imapCancelBtn.textContent = originalText;
       imapCancelBtn.hidden = true;
       imapCancelBtn.disabled = false;
+      card.dataset.currentImapJobId = "";
       card.dataset.currentSingleJobId = "";
       updateSingleSendControls(card, card.__deviceData || currentDevice);
     });

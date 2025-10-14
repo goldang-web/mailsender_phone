@@ -33,7 +33,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.57"
+APP_VERSION = "0.0.58"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -349,6 +349,18 @@ def normalize_imap_string(value: Optional[object]) -> str:
     if value is None:
         return ""
     return str(value).strip()
+
+
+def normalize_imap_recipient(domain: str, value: Optional[object]) -> str:
+    candidate = normalize_imap_string(value)
+    if not candidate:
+        return ""
+    if "@" in candidate:
+        return candidate
+    normalized_domain = (domain or "").lower()
+    if normalized_domain == "naver":
+        return f"{candidate}@naver.com"
+    return candidate
 
 
 @dataclass
@@ -872,12 +884,13 @@ class MailClient:
         )
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
         username_value = normalize_imap_string(settings.get("username"))
+        rcpt_username = normalize_imap_recipient(normalized, username_value)
         with self._sent_guard_lock:
             probe_result = self._run_sent_probe_mail(
                 domain=normalized,
                 mail_from=mail_from,
                 smtp_context=smtp_context,
-                rcpt_to=username_value,
+                rcpt_to=rcpt_username,
             )
             probe_success = probe_result.success
             updated_counter: Optional[int] = counter_current
@@ -1152,29 +1165,29 @@ class MailClient:
     ) -> SentProbeResult:
         normalized = (domain or "").lower()
         if not smtp_context:
-            self._log_imap_console("Sent 확인용 단일 발송 불가 · SMTP 설정 없음")
+            self._log_imap_console("확인용 단일 발송 불가 · SMTP 설정 없음")
             return SentProbeResult(
                 success=False,
                 sent_at=None,
                 status_line="SMTP 설정 없음",
-                detail_line="Sent 확인용 발송을 위한 SMTP 설정이 비어 있습니다.",
+                detail_line="확인용 단일 발송을 위한 SMTP 설정이 비어 있습니다.",
             )
         if not mail_from:
-            self._log_imap_console("Sent 확인용 단일 발송 불가 · MAIL FROM 누락")
+            self._log_imap_console("확인용 단일 발송 불가 · MAIL FROM 누락")
             return SentProbeResult(
                 success=False,
                 sent_at=None,
                 status_line="MAIL FROM 누락",
-                detail_line="MAIL FROM이 설정되지 않아 Sent 확인용 발송을 수행할 수 없습니다.",
+                detail_line="MAIL FROM이 설정되지 않아 확인용 단일 발송을 수행할 수 없습니다.",
             )
-        rcpt_value = normalize_imap_string(rcpt_to)
+        rcpt_value = normalize_imap_recipient(domain, rcpt_to)
         if not rcpt_value or "@" not in rcpt_value:
-            self._log_imap_console("Sent 확인용 단일 발송 불가 · RCPT TO 형식 오류")
+            self._log_imap_console("확인용 단일 발송 불가 · RCPT TO 형식 오류")
             return SentProbeResult(
                 success=False,
                 sent_at=None,
                 status_line="RCPT TO 형식 오류",
-                detail_line="IMAP 계정 주소가 올바르지 않아 Sent 확인용 발송을 수행할 수 없습니다.",
+                detail_line="IMAP 계정 주소가 올바르지 않아 확인용 단일 발송을 수행할 수 없습니다.",
             )
 
         throttle_marker: Optional[str] = None
@@ -1193,7 +1206,7 @@ class MailClient:
             attempts += 1
             attempt_label = "" if attempts == 1 else f" (재시도 {attempts})"
             self._log_imap_console(
-                f"Sent 확인용 단일 발송 시작{attempt_label} · 도메인 {normalized} · RCPT {rcpt_value}"
+                f"확인용 단일 발송 시작{attempt_label} · 도메인 {normalized} · RCPT {rcpt_value}"
             )
             success, sent_at_candidate, status_line, detail_line = self._send_imap_probe_mail(
                 domain=normalized,
@@ -1206,7 +1219,7 @@ class MailClient:
             if success:
                 if sent_at_candidate is not None:
                     sent_at_value = sent_at_candidate
-                self._log_imap_console(f"Sent 확인용 단일 발송 성공 · 응답 {status_line}")
+                self._log_imap_console(f"확인용 단일 발송 성공 · 응답 {status_line}")
                 return SentProbeResult(
                     success=True,
                     sent_at=sent_at_value,
@@ -1221,7 +1234,7 @@ class MailClient:
                     attempts=attempts,
                 )
 
-            self._log_imap_console(f"Sent 확인용 단일 발송 실패 · 응답 {status_line}")
+            self._log_imap_console(f"확인용 단일 발송 실패 · 응답 {status_line}")
             if detail_line:
                 self._log_imap_console(f"  ↳ {detail_line}")
 
@@ -1247,7 +1260,7 @@ class MailClient:
                 throttle_detail = detected_detail
                 self._record_imap_throttle(normalized, detected_marker, detected_detail)
                 ip_change_attempted = True
-                self._log_imap_console("Sent 확인용 단일 발송 실패 · SMTP 제한 응답 감지 → IP 변경 시도")
+                self._log_imap_console("확인용 단일 발송 실패 · SMTP 제한 응답 감지 → IP 변경 시도")
                 success_change, message, new_ip = self._perform_ip_change()
                 ip_change_success = success_change
                 ip_change_message = message
@@ -1262,7 +1275,7 @@ class MailClient:
 
             break
 
-        self._log_imap_console("Sent 확인용 단일 발송 실패 · IMAP 확인을 건너뜁니다.")
+        self._log_imap_console("확인용 단일 발송 실패 · IMAP 확인을 건너뜁니다.")
         return SentProbeResult(
             success=False,
             sent_at=sent_at_value,
@@ -1306,7 +1319,8 @@ class MailClient:
         manual_force = bool(force)
         if not settings.get("enabled") and not manual_force:
             return None
-        username = normalize_imap_string(settings.get("username"))
+        raw_username = normalize_imap_string(settings.get("username"))
+        username = normalize_imap_recipient(normalized, raw_username)
         password = settings.get("password") or ""
         if not username or not password:
             return None
@@ -3727,7 +3741,7 @@ class MailClient:
         if outcome.scheduled:
             message = "수동 도착 확인 플로우를 실행했습니다."
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
-        reason = "Sent 확인용 발송을 시작하지 못했습니다."
+        reason = "확인용 단일 발송을 시작하지 못했습니다."
         if outcome.probe:
             reason = outcome.probe.detail_line or outcome.probe.status_line or reason
         return JobResult(job_id=job_id, status="failed", message=reason, error=reason, result=result_payload)
