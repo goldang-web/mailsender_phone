@@ -2115,6 +2115,7 @@ const state = {
     pending: new Set(),
     globalPending: false,
   },
+  pendingSubstitutionRules: null,
   substitutionFeedbackTimer: null,
   substitutionModal: {
     open: false,
@@ -2973,6 +2974,33 @@ function cloneSubstitutionRules(rules) {
   }));
 }
 
+function syncSubstitutionRulesFromServer(incomingRules, options = {}) {
+  const { force = false } = options;
+  const modalOpen = Boolean(state.substitutionModal?.open);
+  const normalizedSubs = cloneSubstitutionRules(Array.isArray(incomingRules) ? incomingRules : []);
+  if (!force && modalOpen) {
+    state.pendingSubstitutionRules = cloneSubstitutionRules(normalizedSubs);
+    updateSubstitutionRowValidity();
+    updateSubstitutionModalButtons();
+    return;
+  }
+  state.pendingSubstitutionRules = null;
+  state.substitutionRules = cloneSubstitutionRules(normalizedSubs);
+  if (!state.substitutionDirty || force) {
+    state.substitutionDraft = cloneSubstitutionRules(state.substitutionRules);
+    state.substitutionInvalidRows = new Set();
+    if (modalOpen) {
+      renderSubstitutionDraft();
+      validateSubstitutionDraft({ showMessage: false });
+    } else {
+      validateSubstitutionDraft({ showMessage: false });
+    }
+  } else if (modalOpen) {
+    updateSubstitutionRowValidity();
+    updateSubstitutionModalButtons();
+  }
+}
+
 function getSubstitutionPreviewState() {
   if (!state.substitutionPreview) {
     state.substitutionPreview = {
@@ -3815,6 +3843,9 @@ function resetSubstitutionDraft() {
 function openSubstitutionModal() {
   const modal = document.getElementById("substitutionModal");
   if (!modal) return;
+  if (state.pendingSubstitutionRules) {
+    syncSubstitutionRulesFromServer(state.pendingSubstitutionRules, { force: true });
+  }
   state.substitutionModal.open = true;
   modal.classList.remove("hidden");
   setSubstitutionModalMessage("");
@@ -3834,8 +3865,16 @@ function closeSubstitutionModal(options = {}) {
   state.substitutionModal.open = false;
   setSubstitutionModalMessage("");
   setSubstitutionFeedback("");
+  const hadPending = Array.isArray(state.pendingSubstitutionRules)
+    ? true
+    : Boolean(state.pendingSubstitutionRules);
+  if (state.pendingSubstitutionRules) {
+    syncSubstitutionRulesFromServer(state.pendingSubstitutionRules, { force: discard });
+  }
   if (discard) {
-    resetSubstitutionDraft();
+    if (!hadPending) {
+      resetSubstitutionDraft();
+    }
   } else {
     validateSubstitutionDraft({ showMessage: false });
   }
@@ -4057,22 +4096,12 @@ function renderGlobalConfig(config) {
   }
   const normalized = normalizeGlobalConfig(config || {});
   const updatedAtEl = document.getElementById("globalUpdatedAt");
-  state.globalConfig = { ...normalized };
-  state.globalConfig.substitution_rules = cloneSubstitutionRules(normalized.substitution_rules);
+  const normalizedSubs = cloneSubstitutionRules(normalized.substitution_rules);
+  state.globalConfig = { ...normalized, substitution_rules: normalizedSubs };
   state.globalScheduleError = "";
   state.telegramLastSavedToken = normalized.telegram_bot_token || "";
   state.telegramLastSavedChat = normalized.telegram_chat_id || "";
-  const normalizedSubs = cloneSubstitutionRules(normalized.substitution_rules);
-  state.substitutionRules = normalizedSubs;
-  if (!state.substitutionDirty) {
-    state.substitutionDraft = cloneSubstitutionRules(normalizedSubs);
-    state.substitutionInvalidRows = new Set();
-    renderSubstitutionDraft();
-    validateSubstitutionDraft({ showMessage: false });
-  } else {
-    updateSubstitutionRowValidity();
-    updateSubstitutionModalButtons();
-  }
+  syncSubstitutionRulesFromServer(normalizedSubs);
   GLOBAL_FIELD_LIST.forEach((field) => {
     if (!state.globalDirty[field]) {
       state.globalDraft[field] = normalized[field];
