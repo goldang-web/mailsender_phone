@@ -373,7 +373,7 @@ def sanitize_imap_status(value: Any) -> str:
     if value is None:
         return ""
     candidate = str(value).strip().lower()
-    allowed = {"success", "failure", "error", "skipped", "disabled"}
+    allowed = {"success", "failure", "error", "network_error", "skipped", "disabled"}
     if candidate in allowed:
         return candidate
     return "error" if candidate else ""
@@ -4464,6 +4464,15 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             mail_from_value = (report.mail_from or config_snapshot.get("imap_last_mail_from")
                                or config_snapshot.get("mail_from") or "")
             error_value = "" if status_value == "success" else reason_text
+            if status_value == "network_error":
+                print(
+                    "[IMAP] 네트워크 오류 보고 · 디바이스 {} · 도메인 {} · 사유 {}".format(
+                        device_id,
+                        normalized_domain,
+                        reason_text or "사유 없음",
+                    ),
+                    flush=True,
+                )
             conn.execute(
                 """
                 UPDATE device_configs
@@ -4515,11 +4524,13 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             suppress_auto_notification = not is_batch_context
             if suppress_auto_notification:
                 notify_before_stop = False
-            should_stop = (
-                bool(report.trigger_stop)
-                and status_value in {"failure", "error"}
+            should_stop = False
+            if (
+                status_value in {"failure", "error"}
                 and failure_action != "none"
-            )
+                and bool(report.trigger_stop)
+            ):
+                should_stop = True
             if should_stop:
                 delay_seconds_value = getattr(report, "delay_seconds", None)
                 detail_parts: List[str] = []

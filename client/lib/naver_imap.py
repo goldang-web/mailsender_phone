@@ -1,9 +1,19 @@
 import email
 import imaplib
+import socket
+import ssl
 import time
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.utils import parseaddr, parsedate_to_datetime
+
+
+class IMAPNetworkError(Exception):
+    """IMAP 네트워크 오류를 명확하게 표현하기 위한 예외."""
+
+    def __init__(self, message: str, *, original: Exception = None) -> None:
+        super().__init__(message)
+        self.original = original
 
 
 def decode_mime_header_value(value):
@@ -507,6 +517,10 @@ def verify_delivery(
             "sent_at": sent_dt.isoformat(),
             "delay_before_check": delay_before_check,
         }
+    except imaplib.IMAP4.abort as exc:
+        raise IMAPNetworkError(f"IMAP 세션이 예기치 않게 종료되었습니다: {exc}", original=exc) from exc
+    except (socket.timeout, ssl.SSLError, OSError) as exc:
+        raise IMAPNetworkError(f"IMAP 네트워크 오류: {exc}", original=exc) from exc
     finally:
         try:
             if mail is not None:

@@ -9,6 +9,7 @@ import uuid
 import os
 import threading
 import socket
+import ssl
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -23,10 +24,15 @@ from urllib3.util.retry import Retry
 from smtp_utils import send_via_telnet
 from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
-from lib.naver_imap import probe_imap_connection, verify_delivery, fetch_latest_message_summary
+from lib.naver_imap import (
+    IMAPNetworkError,
+    probe_imap_connection,
+    verify_delivery,
+    fetch_latest_message_summary,
+)
 
 
-APP_VERSION = "0.0.51"
+APP_VERSION = "0.0.53"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -826,6 +832,7 @@ class MailClient:
                 f"유형 {send_type}"
             )
             print(f"[디버그] IMAP check delay={delay_seconds}")
+
             def has_network() -> bool:
                 try:
                     with socket.create_connection(("8.8.8.8", 53), timeout=1):
@@ -833,7 +840,7 @@ class MailClient:
                 except OSError:
                     return False
 
-            def wait_for_delay_and_network(max_delay: float) -> None:
+            def wait_for_delay_and_network(max_delay: float) -> bool:
                 if max_delay > 0:
                     deadline = time.monotonic() + max_delay
                     while True:
@@ -841,14 +848,61 @@ class MailClient:
                         if remaining <= 0:
                             break
                         time.sleep(min(1.0, remaining))
-                if has_network():
-                    return
-                self._log_imap_console("  ↳ 네트워크 연결 대기 중…")
-                while not has_network():
-                    time.sleep(1.0)
+                return has_network()
 
-            wait_for_delay_and_network(delay_seconds)
+            network_ready = wait_for_delay_and_network(delay_seconds)
+            wait_started_at = None
+            if not network_ready:
+                wait_started_at = time.monotonic()
+                deadline = wait_started_at + 60.0
+                last_log_time = wait_started_at
+                self._log_imap_console("  ↳ 네트워크 복구 대기 중… (0초 경과)")
+                while not network_ready and time.monotonic() < deadline:
+                    time.sleep(1.0)
+                    now_point = time.monotonic()
+                    elapsed = now_point - wait_started_at
+                    if now_point - last_log_time >= 5.0:
+                        self._log_imap_console(
+                            f"  ↳ 네트워크 복구 대기 중… ({int(elapsed)}초 경과)"
+                        )
+                        last_log_time = now_point
+                    network_ready = has_network()
+                    if network_ready:
+                        self._log_imap_console(f"  ↳ 네트워크 복구됨 · 대기 {elapsed:.1f}s")
+                        break
+                if not network_ready:
+                    elapsed_total = int(time.monotonic() - wait_started_at)
+                    checked_at_iso = utc_now_iso()
+                    status = "network_error"
+                    latency = None
+                    received_at = None
+                    reason_text = f"네트워크 복구 타임아웃 ({min(elapsed_total, 60)}초)"
+                    message = "네트워크 오류로 IMAP 확인을 종료합니다. 전체 중지는 발생하지 않습니다."
+                    self._log_imap_console(message)
+                    print(message, flush=True)
+                    trigger_stop = False
+                    report = {
+                        "domain": normalized,
+                        "status": status,
+                        "latency": latency,
+                        "received_at": received_at,
+                        "sent_at": sent_at_iso or sent_at_value.isoformat(),
+                        "reason": (reason_text or context_reason or ""),
+                        "job_id": job_id,
+                        "send_type": send_type,
+                        "mail_from": mail_from,
+                        "anchor": has_anchor,
+                        "trigger_stop": trigger_stop,
+                        "checked_at": checked_at_iso,
+                        "delay_seconds": int(delay_seconds),
+                        "allowed_latency_seconds": allowed_delay_value,
+                        "failure_action": failure_action_value,
+                    }
+                    self._queue_imap_report(report)
+                    return
+
             checked_at_iso = utc_now_iso()
+            status = "error"
             try:
                 result = verify_delivery(
                     email_id=username,
@@ -872,17 +926,33 @@ class MailClient:
                 )
                 if status != "success" and reason_text:
                     self._log_imap_console(f"  ↳ 사유: {reason_text}")
+            except IMAPNetworkError as exc:
+                status = "network_error"
+                latency = None
+                received_at = None
+                reason_text = str(exc)
+                self._log_imap_console("네트워크 오류로 IMAP 확인 중단")
+                print("네트워크 오류로 IMAP 확인 중단", flush=True)
+            except (socket.timeout, OSError, ssl.SSLError) as exc:
+                status = "network_error"
+                latency = None
+                received_at = None
+                reason_text = f"네트워크 예외: {exc}"
+                self._log_imap_console("네트워크 오류로 IMAP 확인 중단")
+                print("네트워크 오류로 IMAP 확인 중단", flush=True)
             except Exception as exc:  # pylint: disable=broad-except
                 status = "error"
                 latency = None
                 received_at = None
                 reason_text = f"IMAP 확인 실패: {exc}"
-            if status not in {"success", "failure", "error"}:
+            if status not in {"success", "failure", "error", "network_error"}:
                 status = "error"
             trigger_stop = bool(
                 failure_action_value in {"stop_device", "stop_all"}
                 and status in {"failure", "error"}
             )
+            if status == "network_error":
+                trigger_stop = False
             report = {
                 "domain": normalized,
                 "status": status,
@@ -1833,6 +1903,7 @@ class MailClient:
 
         processed = 0
         sent_count = 0
+        sent_reset_offset = 0
         block_count = 0
         failed_count = 0
         last_error: Optional[str] = None
@@ -1855,9 +1926,10 @@ class MailClient:
             total_candidates = sum(domain_totals.values())
             cycle_snapshot = self._cycle_snapshot(normalized)
             absolute_sent = max(0, int(self.sent_sequences.get(normalized, 0)))
+            visible_sent = max(0, sent_count - sent_reset_offset)
             return {
                 "processed": processed,
-                "sent": sent_count,
+                "sent": visible_sent,
                 "sent_sequence": absolute_sent,
                 "sent_absolute": absolute_sent,
                 "failed": failed_count,
@@ -1914,7 +1986,7 @@ class MailClient:
             last_report_at = now_point
 
         def maybe_poll_updates(force: bool = False) -> None:
-            nonlocal last_poll_at
+            nonlocal last_poll_at, sent_reset_offset
             now_point = time.monotonic()
             if not force and now_point - last_poll_at < poll_interval:
                 return
@@ -1933,8 +2005,72 @@ class MailClient:
             if isinstance(configs, dict) and configs:
                 self.apply_configs(configs)
             new_jobs = response.get("jobs") if isinstance(response, dict) else None
+            inline_jobs: List[Dict[str, object]] = []
+            queued_jobs: List[Dict[str, object]] = []
             if isinstance(new_jobs, list):
-                self._queue_jobs(new_jobs)
+                for job in new_jobs:
+                    if not isinstance(job, dict):
+                        continue
+                    job_type = str(job.get("job_type") or "")
+                    if job_type == "reset_sent_sequence":
+                        inline_jobs.append(job)
+                    else:
+                        queued_jobs.append(job)
+            for inline in inline_jobs:
+                job_id = str(inline.get("job_id") or "").strip()
+                payload = inline.get("payload") or {}
+                inline_domain = inline.get("domain")
+                if job_id:
+                    self._pending_job_ids.discard(job_id)
+                    self._active_job_ids.add(job_id)
+                    self._active_jobs[job_id] = "reset_sent_sequence"
+                    self._cancel_ack_sent.discard(job_id)
+                try:
+                    self.send_job_report(
+                        JobResult(job_id=job_id, status="running", message="작업 시작")
+                    )
+                except Exception:
+                    pass
+                try:
+                    result = self.handle_reset_sent_sequence(inline_domain, payload, job_id or "")
+                    target_domains: Set[str] = set()
+                    if isinstance(result.result, dict):
+                        domains_value = result.result.get("domains")
+                        if isinstance(domains_value, (list, tuple, set)):
+                            target_domains = {
+                                str(candidate).lower()
+                                for candidate in domains_value
+                                if candidate
+                            }
+                    if not target_domains and inline_domain:
+                        target_domains = {str(inline_domain).lower()}
+                    if normalized in target_domains:
+                        sent_reset_offset = sent_count
+                        emit_progress(force=True)
+                except Exception as exc:  # pylint: disable=broad-except
+                    message = f"발송 로그 초기화 처리 중 오류: {exc}"
+                    print(f"[경고] {message}")
+                    result = JobResult(
+                        job_id=job_id or "",
+                        status="failed",
+                        message=message,
+                        error=str(exc),
+                    )
+                try:
+                    domain_states = self.collect_domain_states()
+                    self.send_job_report(result, domain_states)
+                except Exception:  # pylint: disable=broad-except
+                    pass
+                finally:
+                    if job_id:
+                        self._active_job_ids.discard(job_id)
+                        self._active_jobs.pop(job_id, None)
+                    if job_id:
+                        self.job_controls.pop(job_id, None)
+                        self._cancel_ack_sent.discard(job_id)
+                        self._pending_job_ids.discard(job_id)
+            if queued_jobs:
+                self._queue_jobs(queued_jobs)
             controls = response.get("job_controls") if isinstance(response, dict) else None
             if isinstance(controls, list):
                 self._update_job_controls(controls)
