@@ -21,6 +21,12 @@
   --color-surface: #ffffff;
   --color-surface-subtle: #f8fafc;
   --color-surface-alt: #f9fafb;
+  --color-readonly-bg: #e2e8f0;
+  --color-readonly-border: #cbd5f5;
+  --color-readonly-text: #1f2937;
+  --color-readonly-emphasis-bg: #dbeafe;
+  --color-readonly-emphasis-border: #93c5fd;
+  --color-readonly-emphasis-text: #1d4ed8;
   --color-border: #e2e8f0;
   --color-border-strong: #cbd5f5;
   --color-chip-neutral-bg: #f1f5f9;
@@ -72,6 +78,12 @@
   --color-surface: #111c2f;
   --color-surface-subtle: #16243c;
   --color-surface-alt: #1b2a44;
+  --color-readonly-bg: #1a2a45;
+  --color-readonly-border: rgba(147, 197, 253, 0.32);
+  --color-readonly-text: #e2e8f0;
+  --color-readonly-emphasis-bg: rgba(96, 165, 250, 0.24);
+  --color-readonly-emphasis-border: rgba(96, 165, 250, 0.55);
+  --color-readonly-emphasis-text: #e0f2fe;
   --color-border: rgba(148, 163, 184, 0.25);
   --color-border-strong: rgba(148, 163, 184, 0.4);
   --color-chip-neutral-bg: rgba(148, 163, 184, 0.14);
@@ -120,6 +132,12 @@
     --color-surface: #111c2f;
     --color-surface-subtle: #16243c;
     --color-surface-alt: #1b2a44;
+    --color-readonly-bg: #1a2a45;
+    --color-readonly-border: rgba(147, 197, 253, 0.32);
+    --color-readonly-text: #e2e8f0;
+    --color-readonly-emphasis-bg: rgba(96, 165, 250, 0.24);
+    --color-readonly-emphasis-border: rgba(96, 165, 250, 0.55);
+    --color-readonly-emphasis-text: #e0f2fe;
     --color-border: rgba(148, 163, 184, 0.25);
     --color-border-strong: rgba(148, 163, 184, 0.4);
     --color-chip-neutral-bg: rgba(148, 163, 184, 0.14);
@@ -393,10 +411,6 @@ header {
 .header-field textarea {
   min-height: 220px;
 }
-.substitution-modal-card {
-  width: min(1240px, 96vw);
-  max-width: 1240px;
-}
 .substitution-modal-body {
   display: flex;
   flex-direction: column;
@@ -439,10 +453,10 @@ header {
     minmax(132px, 0.9fr)
     minmax(200px, 1.1fr)
     minmax(170px, 0.85fr)
-    auto
     minmax(220px, 1.25fr)
+    auto
     auto;
-  grid-template-areas: "handle key original encoding refresh value delete";
+  grid-template-areas: "handle key original encoding value refresh delete";
   gap: 12px;
   align-items: start;
   --substitution-field-offset: 24px;
@@ -560,12 +574,21 @@ header {
   border: 1px solid var(--color-border);
 }
 .substitution-row .field input[readonly] {
-  background: var(--color-surface-subtle);
-  color: var(--color-muted-strong);
+  background: var(--color-readonly-bg);
+  color: var(--color-readonly-text);
+  border-color: var(--color-readonly-border);
+}
+.substitution-row .value-cell input[readonly] {
+  background: var(--color-readonly-emphasis-bg);
+  color: var(--color-readonly-emphasis-text);
+  border-color: var(--color-readonly-emphasis-border);
 }
 .substitution-row .field input[readonly]:focus {
-  border-color: var(--color-border-strong);
+  border-color: var(--color-readonly-border);
   box-shadow: none;
+}
+.substitution-row .value-cell input[readonly]:focus {
+  border-color: var(--color-readonly-emphasis-border);
 }
 .substitution-row .field select:focus {
   border-color: var(--color-accent);
@@ -635,11 +658,6 @@ header {
 .substitution-feedback.success {
   color: var(--color-success);
 }
-@media (max-width: 1080px) {
-  .substitution-modal-card {
-    width: min(95vw, 960px);
-  }
-}
 @media (max-width: 960px) {
   .substitution-row {
     grid-template-columns: auto minmax(0, 1fr);
@@ -647,8 +665,8 @@ header {
       "handle key"
       "handle original"
       "handle encoding"
-      "handle refresh"
       "handle value"
+      "handle refresh"
       "handle delete";
     align-items: start;
     --substitution-field-offset: 12px;
@@ -1311,8 +1329,15 @@ button.card-delete-btn:disabled {
 .imap-status {
   font-size: 13px;
   font-weight: 600;
-  margin-bottom: 4px;
+  margin-bottom: 0;
   color: var(--color-muted-strong);
+}
+
+.imap-status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
 }
 
 .imap-status.success {
@@ -1621,6 +1646,16 @@ button:not(:disabled):hover {
   display: flex;
   flex-direction: column;
   box-shadow: 0 20px 36px var(--shadow-modal);
+}
+.modal-card.substitution-modal-card {
+  width: min(1780px, 99vw);
+  max-width: 1780px;
+}
+@media (max-width: 1080px) {
+  .modal-card.substitution-modal-card {
+    width: min(1120px, 98vw);
+    max-width: min(1120px, 98vw);
+  }
 }
 .modal-header {
   padding: 18px 22px;
@@ -2133,6 +2168,7 @@ const SUBSTITUTION_ENCODING_OPTIONS = [
   { value: "quoted_printable_utf8", label: "Quoted-Printable (=XX, UTF-8)" },
   { value: "quoted_printable_euckr", label: "Quoted-Printable (=XX, EUC-KR)" },
   { value: "mime_b64_utf8", label: "MIME Encoded-Word (=?UTF-8?B?...?=)" },
+  { value: "mungu_care", label: "문구케어 인코딩 (초성 분해)" },
 ];
 
 const SUBSTITUTION_ENCODING_ALIAS = {
@@ -2163,6 +2199,11 @@ const SUBSTITUTION_ENCODING_ALIAS = {
   mime_b64_utf8: "mime_b64_utf8",
   mime_utf8: "mime_b64_utf8",
   mime: "mime_b64_utf8",
+  mungu_care: "mungu_care",
+  "mungu-care": "mungu_care",
+  mungu: "mungu_care",
+  문구케어: "mungu_care",
+  "문구케어 인코딩": "mungu_care",
 };
 
 const SUBSTITUTION_RECOMPUTE_DELAY = 260;
@@ -3070,6 +3111,25 @@ function renderSubstitutionDraft() {
     encodingCell.appendChild(encodingLabel);
     row.appendChild(encodingCell);
 
+    const valueCell = document.createElement("div");
+    valueCell.className = "substitution-cell value-cell";
+    const valueLabel = document.createElement("label");
+    valueLabel.className = "field";
+    const valueSpan = document.createElement("span");
+    valueSpan.textContent = "치환 문구";
+    const valueInput = document.createElement("input");
+    valueInput.type = "text";
+    valueInput.placeholder = "자동 생성";
+    valueInput.autocomplete = "off";
+    valueInput.readOnly = true;
+    valueInput.dataset.subField = "value";
+    valueInput.value = typeof rule?.value === "string" ? rule.value : "";
+    valueInput.title = valueInput.value;
+    valueLabel.appendChild(valueSpan);
+    valueLabel.appendChild(valueInput);
+    valueCell.appendChild(valueLabel);
+    row.appendChild(valueCell);
+
     const refreshCell = document.createElement("div");
     refreshCell.className = "substitution-cell substitution-refresh-cell refresh-cell no-label";
     const refreshBtn = document.createElement("button");
@@ -3089,25 +3149,6 @@ function renderSubstitutionDraft() {
     }
     refreshCell.appendChild(refreshBtn);
     row.appendChild(refreshCell);
-
-    const valueCell = document.createElement("div");
-    valueCell.className = "substitution-cell value-cell";
-    const valueLabel = document.createElement("label");
-    valueLabel.className = "field";
-    const valueSpan = document.createElement("span");
-    valueSpan.textContent = "치환 문구";
-    const valueInput = document.createElement("input");
-    valueInput.type = "text";
-    valueInput.placeholder = "자동 생성";
-    valueInput.autocomplete = "off";
-    valueInput.readOnly = true;
-    valueInput.dataset.subField = "value";
-    valueInput.value = typeof rule?.value === "string" ? rule.value : "";
-    valueInput.title = valueInput.value;
-    valueLabel.appendChild(valueSpan);
-    valueLabel.appendChild(valueInput);
-    valueCell.appendChild(valueLabel);
-    row.appendChild(valueCell);
 
     const deleteBtn = document.createElement("button");
     deleteBtn.type = "button";
@@ -4256,8 +4297,8 @@ function updateSingleSendControls(card, device) {
       singleBtn.classList.remove("is-running");
       singleBtn.disabled = false;
       singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
-    }
   }
+}
 
   const imapCheckBtn = card.querySelector('button[data-action="imap-delivery-check"]');
   if (imapCheckBtn) {
@@ -4271,6 +4312,8 @@ function updateSingleSendControls(card, device) {
     const holdSetAt = Number(imapBlock?.dataset?.imapHoldSetAt || "0");
     const holdCheckedAt = imapBlock?.dataset?.imapHoldCheckedAt || "";
     const lastCheckedMarker = imapBlock?.dataset?.imapLastCheckedAt || "";
+    const holdLastStatus = imapBlock?.dataset?.imapHoldLastStatus || "";
+    const currentStatusMarker = imapBlock?.dataset?.imapLastStatus || "";
     const holdExpired = holdSetAt > 0 && Date.now() - holdSetAt > IMAP_HOLD_EXPIRY_MS;
     if (holdExpired && imapBlock) {
       delete imapBlock.dataset.imapHoldStatus;
@@ -4278,9 +4321,25 @@ function updateSingleSendControls(card, device) {
       delete imapBlock.dataset.imapHoldSetAt;
       delete imapBlock.dataset.imapHoldCountdown;
       delete imapBlock.dataset.imapHoldCountdownStart;
+      delete imapBlock.dataset.imapHoldLastStatus;
+      delete imapBlock.dataset.imapHoldToken;
+      delete imapBlock.dataset.imapHoldCountdownFetched;
       clearImapCountdown(card);
     }
-    const holdActive = !holdExpired && holdStatus === "checking" && holdCheckedAt === lastCheckedMarker;
+    const holdResultChanged = holdCheckedAt !== lastCheckedMarker || holdLastStatus !== currentStatusMarker;
+    const holdActive = !holdExpired && holdStatus === "checking" && !holdResultChanged;
+    const imapCancelBtn = imapBlock?.querySelector('button[data-action="imap-cancel-check"]') || null;
+    if (imapCancelBtn) {
+      if (!imapCancelBtn.dataset.defaultLabel) {
+        imapCancelBtn.dataset.defaultLabel = imapCancelBtn.textContent;
+      }
+      const shouldShowCancel = holdActive;
+      imapCancelBtn.hidden = !shouldShowCancel;
+      imapCancelBtn.disabled = !shouldShowCancel;
+      if (!shouldShowCancel) {
+        imapCancelBtn.textContent = imapCancelBtn.dataset.defaultLabel || "중지";
+      }
+    }
     if (isActive) {
       imapCheckBtn.disabled = true;
       imapCheckBtn.classList.add("is-running");
@@ -4316,9 +4375,13 @@ function markImapStatusChecking(card, options = {}) {
   if (!block) return false;
   const statusEl = block.querySelector('[data-role="imapStatus"]');
   if (!statusEl) return false;
+  const holdStartedAt = Date.now();
   block.dataset.imapHoldStatus = "checking";
   block.dataset.imapHoldCheckedAt = block.dataset.imapLastCheckedAt || "";
-  block.dataset.imapHoldSetAt = String(Date.now());
+  block.dataset.imapHoldLastStatus = block.dataset.imapLastStatus || "";
+  block.dataset.imapHoldSetAt = String(holdStartedAt);
+  block.dataset.imapHoldToken = String(holdStartedAt);
+  delete block.dataset.imapHoldCountdownFetched;
   const delayCandidate = typeof options.delaySeconds === "number" ? options.delaySeconds : Number(block.dataset.imapSingleDelay || "0");
   const delaySeconds = Number.isFinite(delayCandidate) ? Math.max(0, Math.round(delayCandidate)) : 0;
   if (delaySeconds > 0) {
@@ -4330,6 +4393,15 @@ function markImapStatusChecking(card, options = {}) {
   }
   statusEl.textContent = "도착 확인 중";
   statusEl.className = "imap-status warning";
+  const cancelBtn = block.querySelector('button[data-action="imap-cancel-check"]');
+  if (cancelBtn) {
+    if (!cancelBtn.dataset.defaultLabel) {
+      cancelBtn.dataset.defaultLabel = cancelBtn.textContent;
+    }
+    cancelBtn.hidden = false;
+    cancelBtn.disabled = false;
+    cancelBtn.textContent = cancelBtn.dataset.defaultLabel || "중지";
+  }
   updateImapCountdownMeta(card, block);
   clearImapCountdown(card);
   return true;
@@ -4908,8 +4980,29 @@ function updateImapCountdownMeta(card, block) {
   const remaining = computeImapHoldRemaining(block);
   if (remaining > 0) {
     metaEl.textContent = `확인까지 ${remaining}초`;
+    if (block.dataset.imapHoldCountdownFetched) {
+      delete block.dataset.imapHoldCountdownFetched;
+    }
   } else {
     metaEl.textContent = "IMAP 도착 여부를 확인 중입니다.";
+    if (
+      block.dataset.imapHoldStatus === "checking" &&
+      !block.dataset.imapHoldCountdownFetched
+    ) {
+      block.dataset.imapHoldCountdownFetched = String(Date.now());
+      if (typeof loadDevices === "function") {
+        try {
+          const maybePromise = loadDevices({ silent: true });
+          if (maybePromise && typeof maybePromise.catch === "function") {
+            maybePromise.catch((refreshErr) => {
+              console.error(refreshErr);
+            });
+          }
+        } catch (refreshErr) {
+          console.error(refreshErr);
+        }
+      }
+    }
   }
 }
 
@@ -4922,6 +5015,9 @@ function startImapCountdown(card, block) {
   }
   if (!block.dataset.imapHoldCountdownStart || block.dataset.imapHoldCountdownStart === "0") {
     block.dataset.imapHoldCountdownStart = String(Date.now());
+  }
+  if (block.dataset.imapHoldCountdownFetched) {
+    delete block.dataset.imapHoldCountdownFetched;
   }
   updateImapCountdownMeta(card, block);
   clearImapCountdown(card);
@@ -4956,12 +5052,24 @@ function renderImapSection(card, device, domain) {
     delete block.dataset.imapHoldSetAt;
     delete block.dataset.imapHoldCountdown;
     delete block.dataset.imapHoldCountdownStart;
+    delete block.dataset.imapHoldLastStatus;
+    delete block.dataset.imapHoldToken;
+    delete block.dataset.imapHoldCountdownFetched;
     block.dataset.imapLastCheckedAt = "";
     block.dataset.imapLastStatus = "";
     const anchorMetaEl = block.querySelector('[data-role="imapAnchorMeta"]');
     if (anchorMetaEl) {
       anchorMetaEl.textContent = "알박기 확인: 사용 안 함";
       anchorMetaEl.title = "네이버 도메인에서만 알박기 도착 확인을 제공합니다.";
+    }
+    const cancelBtn = block.querySelector('button[data-action="imap-cancel-check"]');
+    if (cancelBtn) {
+      cancelBtn.hidden = true;
+      cancelBtn.disabled = false;
+      if (!cancelBtn.dataset.defaultLabel) {
+        cancelBtn.dataset.defaultLabel = cancelBtn.textContent;
+      }
+      cancelBtn.textContent = cancelBtn.dataset.defaultLabel || "중지";
     }
     return;
   }
@@ -4976,6 +5084,7 @@ function renderImapSection(card, device, domain) {
   const holdStatus = block.dataset.imapHoldStatus || "";
   const holdCheckedAt = block.dataset.imapHoldCheckedAt || "";
   const holdSetAt = Number(block.dataset.imapHoldSetAt || "0");
+  const holdLastStatus = block.dataset.imapHoldLastStatus || "";
   const lastStatus = config.imap_last_status || "";
   const checkedAt = config.imap_last_checked_at;
   const receivedAt = config.imap_last_received_at || checkedAt;
@@ -5008,7 +5117,9 @@ function renderImapSection(card, device, domain) {
   }
   const currentCheckedMarker = checkedAt || "";
   const holdExpired = holdSetAt > 0 && Date.now() - holdSetAt > IMAP_HOLD_EXPIRY_MS;
-  if (holdStatus === "checking" && !holdExpired && holdCheckedAt === currentCheckedMarker) {
+  const resultChanged = holdCheckedAt !== currentCheckedMarker || holdLastStatus !== (lastStatus || "");
+  const holdActive = holdStatus === "checking" && !holdExpired && !resultChanged;
+  if (holdActive) {
     statusClass = "warning";
     statusText = "도착 확인 중";
     const remaining = computeImapHoldRemaining(block);
@@ -5019,11 +5130,26 @@ function renderImapSection(card, device, domain) {
     delete block.dataset.imapHoldSetAt;
     delete block.dataset.imapHoldCountdown;
     delete block.dataset.imapHoldCountdownStart;
+    delete block.dataset.imapHoldLastStatus;
+    delete block.dataset.imapHoldToken;
+    delete block.dataset.imapHoldCountdownFetched;
     clearImapCountdown(card);
   }
   statusEl.textContent = statusText;
   statusEl.className = `imap-status ${statusClass}`;
   metaEl.textContent = metaText;
+  const cancelBtn = block.querySelector('button[data-action="imap-cancel-check"]');
+  if (cancelBtn) {
+    if (!cancelBtn.dataset.defaultLabel) {
+      cancelBtn.dataset.defaultLabel = cancelBtn.textContent;
+    }
+    const shouldShowCancel = holdActive;
+    cancelBtn.hidden = !shouldShowCancel;
+    cancelBtn.disabled = !shouldShowCancel;
+    if (!shouldShowCancel) {
+      cancelBtn.textContent = cancelBtn.dataset.defaultLabel || "중지";
+    }
+  }
   const imapAllowedValue = clampNumber(
     config.imap_allowed_latency_seconds ?? config.imap_delay_seconds ?? IMAP_DEFAULT_ALLOWED_LATENCY,
     IMAP_ALLOWED_MIN,
@@ -5177,7 +5303,7 @@ function attachCardEvents(card) {
   const imapToggle = card.querySelector('[data-field="imap_enabled"]');
   if (imapToggle) {
     imapToggle.addEventListener("change", async (evt) => {
-      const toggledOn = evt.target.checked;
+      const wantsEnable = evt.target.checked;
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       if (domain !== "naver") {
@@ -5185,22 +5311,34 @@ function attachCardEvents(card) {
         setNotice(card, "네이버 도메인을 선택하면 IMAP 확인을 사용할 수 있습니다.", "error");
         return;
       }
-      if (toggledOn) {
+      const imapBlock = card.querySelector('[data-role="imapBlock"]');
+      const username = (imapBlock?.dataset?.imapUsername || "").trim();
+      const passwordSaved = (imapBlock?.dataset?.imapPasswordSaved || "0") === "1";
+      if (wantsEnable && !username) {
+        setNotice(card, "IMAP 계정 설정에서 네이버 ID를 저장한 뒤 다시 시도하세요.", "error");
         evt.target.checked = false;
-        openImapModal(card, currentDevice, domain, { forceEnable: true });
+        return;
+      }
+      if (wantsEnable && !passwordSaved) {
+        setNotice(card, "저장된 IMAP 비밀번호가 없습니다. 계정 설정에서 비밀번호를 저장하세요.", "error");
+        evt.target.checked = false;
         return;
       }
       evt.target.disabled = true;
       try {
         await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/imap`, {
           method: "POST",
-          body: JSON.stringify({ enabled: false }),
+          body: JSON.stringify({ enabled: wantsEnable }),
         });
-        setNotice(card, "IMAP 확인을 비활성화했습니다.");
+        if (wantsEnable) {
+          setNotice(card, "IMAP 확인을 활성화했습니다.", "success");
+        } else {
+          setNotice(card, "IMAP 확인을 비활성화했습니다.");
+        }
         await loadDevices({ silent: true });
       } catch (err) {
-        evt.target.checked = true;
-        setNotice(card, err.message || "IMAP 비활성화를 처리하지 못했습니다.", "error");
+        evt.target.checked = !wantsEnable;
+        setNotice(card, err.message || "IMAP 설정을 변경하지 못했습니다.", "error");
       } finally {
         evt.target.disabled = false;
       }
@@ -5512,7 +5650,6 @@ function attachCardEvents(card) {
 
       const rcptTo = rawUsername.includes("@") ? rawUsername : `${rawUsername}@naver.com`;
       const singleDelaySeconds = Number(imapBlock?.dataset?.imapSingleDelay || "0");
-      markImapStatusChecking(card, { delaySeconds: singleDelaySeconds });
       let jobScheduled = false;
 
       const resetImapButton = () => {
@@ -5535,12 +5672,13 @@ function attachCardEvents(card) {
           return;
         }
 
-        const payload = { domain, rcpt_to: rcptTo };
+        const payload = { domain, rcpt_to: rcptTo, force_imap_check: true };
         try {
           const result = await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-single`, {
             method: "POST",
             body: JSON.stringify(payload),
           });
+          markImapStatusChecking(card, { delaySeconds: singleDelaySeconds });
           jobScheduled = true;
           applyScheduledSingleSendJob(card, currentDevice, result?.job);
           setNotice(card, `IMAP 계정(${rcptTo})으로 도착 확인 메일을 보냈습니다.`);
@@ -5563,6 +5701,80 @@ function attachCardEvents(card) {
           resetImapButton();
         }
       }
+    });
+  }
+
+  const imapCancelBtn = card.querySelector('button[data-action="imap-cancel-check"]');
+  if (imapCancelBtn) {
+    imapCancelBtn.addEventListener("click", async () => {
+      if (imapCancelBtn.disabled || imapCancelBtn.hidden) {
+        return;
+      }
+      const currentDevice = getDevice();
+      const jobId = card.dataset.currentSingleJobId || "";
+      if (!jobId) {
+        const block = card.querySelector('[data-role="imapBlock"]');
+        if (block) {
+          delete block.dataset.imapHoldStatus;
+          delete block.dataset.imapHoldCheckedAt;
+          delete block.dataset.imapHoldSetAt;
+          delete block.dataset.imapHoldCountdown;
+          delete block.dataset.imapHoldCountdownStart;
+          delete block.dataset.imapHoldLastStatus;
+          delete block.dataset.imapHoldToken;
+          delete block.dataset.imapHoldCountdownFetched;
+        }
+        clearImapCountdown(card);
+        imapCancelBtn.hidden = true;
+        imapCancelBtn.disabled = false;
+        if (imapCancelBtn.dataset.defaultLabel) {
+          imapCancelBtn.textContent = imapCancelBtn.dataset.defaultLabel;
+        }
+        setNotice(card, "중지할 작업이 없어 상태를 초기화했습니다.", "info");
+        card.dataset.currentSingleJobId = "";
+        updateSingleSendControls(card, currentDevice);
+        return;
+      }
+      const originalText = imapCancelBtn.textContent;
+      imapCancelBtn.disabled = true;
+      imapCancelBtn.textContent = "중지 요청 중...";
+      try {
+        await fetchJSON(`/api/jobs/${jobId}/cancel`, {
+          method: "POST",
+          body: JSON.stringify({
+            device_id: currentDevice.id,
+            reason: "사용자가 IMAP 도착 확인을 중지했습니다.",
+          }),
+        });
+        setNotice(card, "도착 확인 중지를 요청했습니다.", "info");
+      } catch (err) {
+        imapCancelBtn.disabled = false;
+        imapCancelBtn.textContent = originalText;
+        setNotice(card, err.message || "도착 확인 중지에 실패했습니다.", "error");
+        return;
+      }
+      try {
+        await loadDevices({ silent: true });
+      } catch (refreshErr) {
+        console.error(refreshErr);
+      }
+      const block = card.querySelector('[data-role="imapBlock"]');
+      if (block) {
+        delete block.dataset.imapHoldStatus;
+        delete block.dataset.imapHoldCheckedAt;
+        delete block.dataset.imapHoldSetAt;
+        delete block.dataset.imapHoldCountdown;
+        delete block.dataset.imapHoldCountdownStart;
+        delete block.dataset.imapHoldLastStatus;
+        delete block.dataset.imapHoldToken;
+        delete block.dataset.imapHoldCountdownFetched;
+      }
+      clearImapCountdown(card);
+      imapCancelBtn.textContent = originalText;
+      imapCancelBtn.hidden = true;
+      imapCancelBtn.disabled = false;
+      card.dataset.currentSingleJobId = "";
+      updateSingleSendControls(card, card.__deviceData || currentDevice);
     });
   }
 
@@ -5763,7 +5975,10 @@ function buildDeviceCard(device) {
         </label>
         <button type="button" class="ghost small" data-action="imap-settings">계정 설정</button>
       </div>
-      <div class="imap-status off" data-role="imapStatus">네이버 도메인에서만 사용할 수 있습니다.</div>
+      <div class="imap-status-row" data-role="imapStatusRow">
+        <div class="imap-status off" data-role="imapStatus">네이버 도메인에서만 사용할 수 있습니다.</div>
+        <button type="button" class="ghost danger small" data-action="imap-cancel-check" hidden>중지</button>
+      </div>
       <div class="imap-meta" data-role="imapMeta">네이버 발송 시 도착 여부를 자동으로 확인합니다.</div>
       <div class="imap-anchor-meta" data-role="imapAnchorMeta" title="허용 지연 시간으로 단일 발송과 알박기 메일을 자동 확인합니다.">알박기 확인: 사용 안 함</div>
       <div class="imap-actions" data-role="imapActions">
@@ -6195,6 +6410,7 @@ async function submitImapModal() {
   const batchDelayInput = document.getElementById("imapBatchDelaySeconds");
   const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
   const failureActionSelect = document.getElementById("imapFailureAction");
+  const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const allowedLatencyValue = clampNumber(
     allowedLatencyInput.value,
     IMAP_ALLOWED_MIN,

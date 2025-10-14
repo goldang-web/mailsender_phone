@@ -4,6 +4,8 @@ import base64
 import random
 from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from mungu_care_encoding import encode_mungu_care
+
 EncodingChoice = Callable[[Sequence[str]], str]
 
 ENCODING_ALIASES: Dict[str, str] = {
@@ -40,6 +42,11 @@ ENCODING_ALIASES: Dict[str, str] = {
     "mime": "mime_b64_utf8",
     "mime-utf8": "mime_b64_utf8",
     "mime-b64-utf8": "mime_b64_utf8",
+    "mungu_care": "mungu_care",
+    "mungu-care": "mungu_care",
+    "mungu": "mungu_care",
+    "문구케어": "mungu_care",
+    "문구케어 인코딩": "mungu_care",
 }
 
 SUPPORTED_ENCODINGS: Tuple[str, ...] = (
@@ -51,6 +58,7 @@ SUPPORTED_ENCODINGS: Tuple[str, ...] = (
     "quoted_printable_utf8",
     "quoted_printable_euckr",
     "mime_b64_utf8",
+    "mungu_care",
 )
 
 HTML_RANDOM_FORMATS: Tuple[str, ...] = ("html_hex_min", "html_dec", "html_hex_fixed")
@@ -110,6 +118,7 @@ def encode_substitution_value(
     encoding: Any,
     *,
     random_choice: Optional[EncodingChoice] = None,
+    random_generator: Optional[random.Random] = None,
 ) -> str:
     """
     지정한 인코딩 규칙에 따라 원본 문자열을 치환 문자열로 변환한다.
@@ -134,6 +143,8 @@ def encode_substitution_value(
         return _encode_quoted_printable(text, "euc-kr")
     if mode == "mime_b64_utf8":
         return _encode_mime_b64_utf8(text)
+    if mode == "mungu_care":
+        return encode_mungu_care(text, rng=random_generator)
     # 정의되지 않은 값은 기본적으로 원본을 반환한다.
     return text
 
@@ -142,11 +153,17 @@ def encode_substitution_values(
     items: Iterable[Tuple[Any, Any]],
     *,
     random_choice: Optional[EncodingChoice] = None,
+    random_generator: Optional[random.Random] = None,
 ) -> List[str]:
     """
     여러 (원본, 인코딩) 조합을 한 번에 처리한다.
     """
     return [
-        encode_substitution_value(source, encoding, random_choice=random_choice)
+        encode_substitution_value(
+            source,
+            encoding,
+            random_choice=random_choice,
+            random_generator=random_generator,
+        )
         for source, encoding in items
     ]

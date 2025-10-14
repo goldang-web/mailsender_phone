@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import socket
+from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from lib import test as telnet_mailer
@@ -29,7 +30,7 @@ def send_via_telnet(
     rcpt_to: str,
     header_text: str,
     bcc_emails: Optional[List[str]] = None,
-) -> Tuple[bool, str]:
+) -> Tuple[bool, str, datetime]:
     normalized = normalize_newlines(header_text or "")
     payload = normalized.replace("\n", "\r\n")
     attempt_hosts = []
@@ -42,6 +43,7 @@ def send_via_telnet(
 
     response_text = ""
     success = False
+    completed_at = datetime.now(timezone.utc)
 
     for index, host_candidate in enumerate(attempt_hosts):
         if index > 0:
@@ -55,6 +57,7 @@ def send_via_telnet(
             bcc_emails=bcc_targets or None,
             smtp_port_override=smtp_port or None,
         )
+        completed_at = datetime.now(timezone.utc)
         lines = [line.strip() for line in response_text.split("\n") if line.strip()]
         for line in lines:
             raw = line.split(":", 1)[-1].strip() if ":" in line else line
@@ -64,4 +67,4 @@ def send_via_telnet(
         if success or host_candidate is None:
             break
 
-    return success, response_text
+    return success, response_text, completed_at

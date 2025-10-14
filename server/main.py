@@ -287,8 +287,29 @@ def sanitize_imap_latency(value: Any) -> Optional[float]:
     except (TypeError, ValueError):
         return None
     if latency < 0:
-        return None
+        return 0.0
     return latency
+
+
+def sanitize_imap_timestamp(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        candidate = value.strip()
+        if not candidate:
+            return None
+    elif isinstance(value, datetime):
+        candidate = value.isoformat()
+    else:
+        candidate = str(value).strip()
+        if not candidate:
+            return None
+    try:
+        parsed = datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    normalized = parsed.astimezone(timezone.utc)
+    return normalized.isoformat().replace("+00:00", "Z")
 
 
 def get_local_now() -> datetime:
@@ -1961,6 +1982,7 @@ def handle_auto_stop(
     metadata: Optional[Dict[str, Any]] = None,
     device_id: Optional[str] = None,
     job_types: Optional[Iterable[str]] = None,
+    suppress_notification: bool = False,
 ) -> Dict[str, Any]:
     result = cancel_active_sends(
         conn,
@@ -1968,13 +1990,15 @@ def handle_auto_stop(
         device_id=device_id,
         job_types=job_types,
     )
-    notification = maybe_dispatch_telegram_auto_stop(
-        conn,
-        reason=reason,
-        origin=origin,
-        metadata=metadata,
-        result=result,
-    )
+    notification: Optional[Dict[str, Any]] = None
+    if not suppress_notification:
+        notification = maybe_dispatch_telegram_auto_stop(
+            conn,
+            reason=reason,
+            origin=origin,
+            metadata=metadata,
+            result=result,
+        )
     payload = {
         "reason": reason,
         "origin": origin,
@@ -2139,6 +2163,7 @@ class SingleSendRequest(BaseModel):
     domain: str
     rcpt_to: Optional[str] = None
     header_override: Optional[str] = None
+    force_imap_check: Optional[bool] = False
 
 
 class BatchSendRequest(BaseModel):
@@ -2929,6 +2954,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         missing_tokens = apply_substitutions_to_config(config_snapshot, substitution_rules)
         substituted_rcpt, rcpt_missing = substitute_tokens(rcpt_to, substitution_rules)
         missing_tokens.update(rcpt_missing)
+        force_imap_check = bool(payload.force_imap_check)
         job = create_job(
             conn,
             device_id,
@@ -2937,6 +2963,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             {
                 "rcpt_to": substituted_rcpt,
                 "config": config_snapshot,
+                "force_imap_check": force_imap_check,
             },
         )
         conn.commit()
@@ -3494,6 +3521,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 print(f"[SCHEDULE] 디바이스 {device_id} 자동 중지: {schedule_reason}")
         auto_stop_context: Optional[Dict[str, Any]] = None
         device_stop_context: Optional[Dict[str, Any]] = None
+        job_type_cache: Dict[str, str] = {}
         for report in payload.imap_reports or []:
             try:
                 normalized_domain = normalize_domain(report.domain)
@@ -3509,11 +3537,26 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 continue
             config_snapshot = to_dict(config_row)
             status_value = sanitize_imap_status(report.status)
-            checked_at_value = report.checked_at or now
+            checked_at_raw = report.checked_at or now
+            checked_at_value = sanitize_imap_timestamp(checked_at_raw) or checked_at_raw
             latency_value = sanitize_imap_latency(report.latency)
             reason_text = (report.reason or "").strip()
-            sent_at_value = report.sent_at or config_snapshot.get("imap_last_sent_at")
-            received_at_value = report.received_at or config_snapshot.get("imap_last_received_at")
+            sent_at_value = (
+                sanitize_imap_timestamp(report.sent_at)
+                or sanitize_imap_timestamp(config_snapshot.get("imap_last_sent_at"))
+            )
+            received_at_value = (
+                sanitize_imap_timestamp(report.received_at)
+                or sanitize_imap_timestamp(config_snapshot.get("imap_last_received_at"))
+            )
+            if latency_value is None and sent_at_value and received_at_value:
+                try:
+                    sent_dt = datetime.fromisoformat(sent_at_value.replace("Z", "+00:00"))
+                    received_dt = datetime.fromisoformat(received_at_value.replace("Z", "+00:00"))
+                    delta_seconds = (received_dt - sent_dt).total_seconds()
+                    latency_value = float(delta_seconds) if delta_seconds >= 0 else 0.0
+                except ValueError:
+                    pass
             anchor_flag = bool(report.anchor)
             raw_allowed_latency = (
                 getattr(report, "allowed_latency_seconds", None)
@@ -3570,6 +3613,23 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             notify_before_stop = sanitize_imap_notify_before_stop_all(
                 config_snapshot.get("imap_notify_before_stop_all")
             )
+            send_type_value = (report.send_type or "").strip().lower()
+            is_batch_context = send_type_value.startswith("batch")
+            job_id_value = (report.job_id or "").strip()
+            if not is_batch_context and job_id_value:
+                cached_job_type = job_type_cache.get(job_id_value)
+                if cached_job_type is None:
+                    job_row = conn.execute(
+                        "SELECT job_type FROM jobs WHERE id=?",
+                        (job_id_value,),
+                    ).fetchone()
+                    cached_job_type = job_row["job_type"] if job_row else ""
+                    job_type_cache[job_id_value] = cached_job_type
+                if cached_job_type == "batch_send":
+                    is_batch_context = True
+            suppress_auto_notification = not is_batch_context
+            if suppress_auto_notification:
+                notify_before_stop = False
             should_stop = (
                 bool(report.trigger_stop)
                 and status_value in {"failure", "error"}
@@ -3615,6 +3675,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                         "reason": stop_reason,
                         "metadata": meta,
                         "notify_before": notify_before_stop,
+                        "suppress_notification": suppress_auto_notification,
                     }
         device_stop_result: Optional[Dict[str, Any]] = None
         if device_stop_context is not None:
@@ -3647,6 +3708,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 auto_stop_context["reason"],
                 origin="imap",
                 metadata=auto_stop_context.get("metadata"),
+                suppress_notification=bool(auto_stop_context.get("suppress_notification")),
             )
             print(f"[IMAP] 자동 전체 중지: {auto_stop_context['reason']}")
         dispatched_jobs: List[JobDispatchPayload] = []

@@ -1,6 +1,8 @@
+import random
 import unittest
 
 from encoding_utils import encode_substitution_value, normalize_encoding_name
+from mungu_care_encoding import encode_mungu_care
 
 
 class EncodingUtilsTestCase(unittest.TestCase):
@@ -42,6 +44,28 @@ class EncodingUtilsTestCase(unittest.TestCase):
     def test_normalize_encoding_alias(self) -> None:
         self.assertEqual(normalize_encoding_name("HTML-HEX-FIXED"), "html_hex_fixed")
         self.assertEqual(normalize_encoding_name(None), "none")
+
+    def test_mungu_care_encoding_matches_reference(self) -> None:
+        seed = 20251013
+        expected = encode_mungu_care(self.sample, rng=random.Random(seed))
+        actual = encode_substitution_value(
+            self.sample,
+            "mungu_care",
+            random_generator=random.Random(seed),
+        )
+        self.assertEqual(actual, expected)
+        self.assertTrue(actual.lower().startswith("=?utf-8?b?"))
+
+    def test_mungu_care_alias_normalization(self) -> None:
+        seed = 314159
+        expected = encode_mungu_care(self.sample, rng=random.Random(seed))
+        actual = encode_substitution_value(
+            self.sample,
+            "문구케어 인코딩",
+            random_generator=random.Random(seed),
+        )
+        self.assertEqual(actual, expected)
+        self.assertTrue(actual.lower().startswith("=?utf-8?b?"))
 
 
 if __name__ == "__main__":

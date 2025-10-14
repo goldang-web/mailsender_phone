@@ -6,9 +6,6 @@ from email.header import decode_header, make_header
 from email.utils import parseaddr, parsedate_to_datetime
 
 
-NEGATIVE_LATENCY_TOLERANCE_SECONDS = 1.0
-
-
 def decode_mime_header_value(value):
     if not value:
         return ""
@@ -477,27 +474,12 @@ def verify_delivery(
             print(f"[IMAP 확인] 수신시각: {_fmt_local(received_at)}", flush=True)
             print(f"[IMAP 확인] 지연: {latency_raw:.1f}초", flush=True)
             print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
-            latency = latency_raw
+            latency = max(0.0, latency_raw)
             if latency_raw < 0:
-                jitter = abs(latency_raw)
-                if jitter <= NEGATIVE_LATENCY_TOLERANCE_SECONDS:
-                    latency = 0.0
-                    print(
-                        f"[IMAP 확인] 보정: 수신 헤더가 {latency_raw:.1f}s 빠름 -> 0.0s로 간주",
-                        flush=True,
-                    )
-                else:
-                    print("[IMAP 확인] 판정: 발송 이후 메일이 아직 없습니다.", flush=True)
-                    return {
-                        "status": "failure",
-                        "latency": None,
-                        "received_at": received_at.isoformat(),
-                        "reason": "발송 이후 메일이 아직 없습니다.",
-                        "allowed_latency": allowed,
-                        "sent_at": sent_dt.isoformat(),
-                        "delay_before_check": delay_before_check,
-                    }
-            latency = max(0.0, latency)
+                print(
+                    f"[IMAP 확인] 보정: 수신 헤더가 {latency_raw:.1f}s 빠름 -> 0.0s로 간주",
+                    flush=True,
+                )
             result_payload = {
                 "latency": latency,
                 "received_at": received_at.isoformat(),

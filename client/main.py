@@ -26,7 +26,7 @@ from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 from lib.naver_imap import probe_imap_connection, verify_delivery, fetch_latest_message_summary
 
 
-APP_VERSION = "0.0.40"
+APP_VERSION = "0.0.44"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -43,6 +43,16 @@ def utc_now() -> datetime:
 
 def utc_now_iso() -> str:
     return utc_now().isoformat().replace("+00:00", "Z")
+
+
+def to_utc_iso(dt: datetime) -> str:
+    if not isinstance(dt, datetime):
+        return ""
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat().replace("+00:00", "Z")
 
 DEFAULT_CONFIG: Dict[str, object] = {
     "server_url": "http://127.0.0.1:8000",
@@ -759,6 +769,7 @@ class MailClient:
         delay_before_check: Optional[float],
         allowed_delay: Optional[int],
         context_reason: Optional[str] = None,
+        force: bool = False,
     ) -> None:
         normalized = (domain or "").lower()
         if normalized != "naver":
@@ -768,7 +779,8 @@ class MailClient:
         if not isinstance(sent_at, datetime):
             return
         settings = self._imap_settings_for_domain(normalized)
-        if not settings.get("enabled"):
+        manual_force = bool(force)
+        if not settings.get("enabled") and not manual_force:
             return
         username = normalize_imap_string(settings.get("username"))
         password = settings.get("password") or ""
@@ -800,13 +812,15 @@ class MailClient:
                 delay_seconds = float(single_delay_setting if use_single else batch_delay_setting)
             delay_seconds = max(0.0, delay_seconds)
         sent_at_value = sent_at
+        sent_at_iso = to_utc_iso(sent_at_value)
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
 
         def task() -> None:
+            start_prefix = "수동 확인 시작" if manual_force and send_type == "single" else "자동 확인 시작"
             self._log_imap_console(
-                "자동 확인 시작 · "
+                f"{start_prefix} · "
                 f"도메인 {normalized} · "
-                f"발송시각 {sent_at_value.isoformat()} · "
+                f"발송시각 {sent_at_iso or sent_at_value.isoformat()} · "
                 f"대기 {delay_seconds:.1f}s · "
                 f"허용지연 {allowed_delay_value}s · "
                 f"유형 {send_type}"
@@ -874,7 +888,7 @@ class MailClient:
                 "status": status,
                 "latency": latency,
                 "received_at": received_at,
-                "sent_at": sent_at_value.isoformat(),
+                "sent_at": sent_at_iso or sent_at_value.isoformat(),
                 "reason": (reason_text or context_reason or ""),
                 "job_id": job_id,
                 "send_type": send_type,
@@ -1663,12 +1677,13 @@ class MailClient:
     def handle_single_send(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
         config = payload.get("config") or {}
         rcpt_to = payload.get("rcpt_to")
+        force_imap_check = bool(payload.get("force_imap_check"))
         if not rcpt_to:
             return JobResult(job_id=job_id, status="failed", message="RCPT TO 정보가 없습니다.")
         normalized_domain = (domain or "").lower()
         bcc_rows: List[sqlite3.Row] = []
         bcc_emails: List[str] = []
-        success, response_text = send_via_telnet(
+        success, response_text, completed_at = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
             smtp_port=int(config.get("smtp_port") or 25),
             helo=config.get("helo", ""),
@@ -1677,7 +1692,7 @@ class MailClient:
             header_text=config.get("header", ""),
             bcc_emails=bcc_emails,
         )
-        sent_at = utc_now()
+        sent_at = completed_at if isinstance(completed_at, datetime) else utc_now()
         response_text = response_text or ""
         status = "success" if success else "failed"
         status_line, detail_line = self._smtp_status_and_detail(response_text)
@@ -1775,6 +1790,7 @@ class MailClient:
                 delay_before_check=single_delay,
                 allowed_delay=allowed_latency,
                 context_reason=detail_line or status_line,
+                force=force_imap_check,
             )
         result_payload = {
             "rcpt_to": rcpt_to,
@@ -2118,7 +2134,7 @@ class MailClient:
                     injected_emails = [email for email in (group.injected or []) if email]
                     if injected_emails:
                         bcc_emails.extend(injected_emails)
-                    success, response_text = send_via_telnet(
+                    success, response_text, completed_at = send_via_telnet(
                         smtp_host=config.get("smtp_host", ""),
                         smtp_port=int(config.get("smtp_port") or 25),
                         helo=config.get("helo", ""),
@@ -2128,7 +2144,7 @@ class MailClient:
                         bcc_emails=bcc_emails,
                     )
                     response_text = response_text or ""
-                    sent_at = utc_now()
+                    sent_at = completed_at if isinstance(completed_at, datetime) else utc_now()
                     delivery_status = self._classify_delivery(success, response_text)
                     status_line, detail_line = self._smtp_status_and_detail(response_text)
                     return DispatchOutcome(
