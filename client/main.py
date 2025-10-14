@@ -33,7 +33,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.58"
+APP_VERSION = "0.0.59"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -1122,8 +1122,7 @@ class MailClient:
         )
         payload_header = header_override or default_header
         self._log_imap_console(
-            "Sent 기준 확인용 테스트 메일 발송 시도 · "
-            f"도메인 {domain} · RCPT {rcpt_to}"
+            f"IMAP 발송 · 확인 메일 발송 시도 · RCPT {rcpt_to}"
         )
         try:
             success, response_text, completed_at = send_via_telnet(
@@ -1138,18 +1137,16 @@ class MailClient:
         except Exception as exc:  # pylint: disable=broad-except
             status_line = "테스트 메일 발송 예외"
             detail_line = str(exc)
-            self._log_imap_console(f"Sent 기준 확인용 테스트 메일 발송 실패 · {detail_line}")
+            self._log_imap_console(f"IMAP 발송 · 확인 메일 발송 실패 · {detail_line}")
             return False, None, status_line, detail_line
         status_line, detail_line = self._smtp_status_and_detail(response_text)
         if success:
             self._log_imap_console(
-                "Sent 기준 확인용 테스트 메일 발송 성공 · "
-                f"응답 {status_line}"
+                f"IMAP 발송 · 확인 메일 발송 성공 · 응답 {status_line or '-'}"
             )
             return True, completed_at, status_line, detail_line
         self._log_imap_console(
-            "Sent 기준 확인용 테스트 메일 발송 실패 · "
-            f"응답 {status_line}"
+            f"IMAP 발송 · 확인 메일 발송 실패 · 응답 {status_line or '-'}"
         )
         if detail_line:
             self._log_imap_console(f"  ↳ {detail_line}")
@@ -1165,29 +1162,29 @@ class MailClient:
     ) -> SentProbeResult:
         normalized = (domain or "").lower()
         if not smtp_context:
-            self._log_imap_console("확인용 단일 발송 불가 · SMTP 설정 없음")
+            self._log_imap_console("IMAP 발송 · SMTP 설정 없음")
             return SentProbeResult(
                 success=False,
                 sent_at=None,
                 status_line="SMTP 설정 없음",
-                detail_line="확인용 단일 발송을 위한 SMTP 설정이 비어 있습니다.",
+                detail_line="확인 메일 발송을 위한 SMTP 설정이 비어 있습니다.",
             )
         if not mail_from:
-            self._log_imap_console("확인용 단일 발송 불가 · MAIL FROM 누락")
+            self._log_imap_console("IMAP 발송 · MAIL FROM 누락")
             return SentProbeResult(
                 success=False,
                 sent_at=None,
                 status_line="MAIL FROM 누락",
-                detail_line="MAIL FROM이 설정되지 않아 확인용 단일 발송을 수행할 수 없습니다.",
+                detail_line="MAIL FROM이 설정되지 않아 확인 메일을 발송할 수 없습니다.",
             )
         rcpt_value = normalize_imap_recipient(domain, rcpt_to)
         if not rcpt_value or "@" not in rcpt_value:
-            self._log_imap_console("확인용 단일 발송 불가 · RCPT TO 형식 오류")
+            self._log_imap_console("IMAP 발송 · RCPT TO 형식 오류")
             return SentProbeResult(
                 success=False,
                 sent_at=None,
                 status_line="RCPT TO 형식 오류",
-                detail_line="IMAP 계정 주소가 올바르지 않아 확인용 단일 발송을 수행할 수 없습니다.",
+                detail_line="IMAP 계정 주소가 올바르지 않아 확인 메일을 발송할 수 없습니다.",
             )
 
         throttle_marker: Optional[str] = None
@@ -1206,7 +1203,7 @@ class MailClient:
             attempts += 1
             attempt_label = "" if attempts == 1 else f" (재시도 {attempts})"
             self._log_imap_console(
-                f"확인용 단일 발송 시작{attempt_label} · 도메인 {normalized} · RCPT {rcpt_value}"
+                f"IMAP 발송 · 확인 메일 발송 시도{attempt_label} · RCPT {rcpt_value}"
             )
             success, sent_at_candidate, status_line, detail_line = self._send_imap_probe_mail(
                 domain=normalized,
@@ -1219,7 +1216,6 @@ class MailClient:
             if success:
                 if sent_at_candidate is not None:
                     sent_at_value = sent_at_candidate
-                self._log_imap_console(f"확인용 단일 발송 성공 · 응답 {status_line}")
                 return SentProbeResult(
                     success=True,
                     sent_at=sent_at_value,
@@ -1233,11 +1229,6 @@ class MailClient:
                     ip_after_change=ip_after_change,
                     attempts=attempts,
                 )
-
-            self._log_imap_console(f"확인용 단일 발송 실패 · 응답 {status_line}")
-            if detail_line:
-                self._log_imap_console(f"  ↳ {detail_line}")
-
             if attempts >= max_attempts:
                 break
 
@@ -1260,7 +1251,7 @@ class MailClient:
                 throttle_detail = detected_detail
                 self._record_imap_throttle(normalized, detected_marker, detected_detail)
                 ip_change_attempted = True
-                self._log_imap_console("확인용 단일 발송 실패 · SMTP 제한 응답 감지 → IP 변경 시도")
+                self._log_imap_console("IMAP 발송 · SMTP 제한 응답 감지 → IP 변경 시도")
                 success_change, message, new_ip = self._perform_ip_change()
                 ip_change_success = success_change
                 ip_change_message = message
@@ -1275,7 +1266,11 @@ class MailClient:
 
             break
 
-        self._log_imap_console("확인용 단일 발송 실패 · IMAP 확인을 건너뜁니다.")
+        if last_status_line:
+            self._log_imap_console(f"  ↳ 최종 응답 {last_status_line}")
+        if last_detail_line:
+            self._log_imap_console(f"  ↳ 상세 {last_detail_line}")
+        self._log_imap_console("IMAP 발송 · 확인 메일 발송 실패 → IMAP 확인 생략")
         return SentProbeResult(
             success=False,
             sent_at=sent_at_value,
@@ -1354,21 +1349,20 @@ class MailClient:
 
         def task() -> None:
             nonlocal sent_at_value, sent_at_iso
-            start_prefix = "수동 확인 시작" if manual_force and send_type == "single" else "자동 확인 시작"
-            self._log_imap_console(
-                f"{start_prefix} · "
-                f"도메인 {normalized} · "
-                f"발송시각 {sent_at_iso or sent_at_value.isoformat()} · "
-                f"대기 {delay_seconds:.1f}s · "
-                f"허용지연 {allowed_delay_value}s · "
-                f"유형 {send_type}"
-                + (
-                    f" · Sent {sent_window_count}건"
-                    if sent_window_count is not None and sent_window_count > 0
-                    else ""
-                )
-            )
-            print(f"[디버그] IMAP check delay={delay_seconds}")
+            mode_label = "수동" if manual_force else "자동"
+            extra_parts = []
+            if sent_window_count is not None and sent_window_count > 0:
+                extra_parts.append(f"Sent {sent_window_count}건")
+            message_parts = [
+                "IMAP 확인",
+                f"{mode_label} 확인 시작",
+                f"도메인 {normalized}",
+                f"대기 {delay_seconds:.1f}s",
+                f"허용 {allowed_delay_value}s",
+            ]
+            if extra_parts:
+                message_parts.extend(extra_parts)
+            self._log_imap_console(" · ".join(message_parts))
 
             ip_change_attempted = False
             ip_change_success = False
@@ -3741,7 +3735,7 @@ class MailClient:
         if outcome.scheduled:
             message = "수동 도착 확인 플로우를 실행했습니다."
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
-        reason = "확인용 단일 발송을 시작하지 못했습니다."
+        reason = "확인 메일 발송을 시작하지 못했습니다."
         if outcome.probe:
             reason = outcome.probe.detail_line or outcome.probe.status_line or reason
         return JobResult(job_id=job_id, status="failed", message=reason, error=reason, result=result_payload)
