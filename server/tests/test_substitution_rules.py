@@ -1,14 +1,26 @@
 import random
 import re
 import string
+import sys
 import unittest
 from collections import deque
+from pathlib import Path
 
-from main import (
+TEST_DIR = Path(__file__).resolve().parent
+SERVER_DIR = TEST_DIR.parent
+if str(SERVER_DIR) not in sys.path:
+    sys.path.insert(0, str(SERVER_DIR))
+
+from server.encoding_utils import encode_substitution_value
+from server.main import (
     build_substitution_context,
     canonicalize_substitution_rules,
     apply_substitutions_to_config,
     substitute_tokens,
+    SubstitutionRule,
+    SubstitutionPreviewItem,
+    SubstitutionPreviewRequest,
+    preview_substitution_endpoint,
 )
 
 
@@ -55,6 +67,26 @@ class SubstitutionRuleTests(unittest.TestCase):
         self.assertEqual(list_rule["mode"], "list")
         self.assertEqual(list_rule["values"], ["Alpha", "Beta"])
         self.assertEqual(list_rule["description"], "샘플 목록")
+
+    def test_canonicalize_static_resolves_list_tokens_before_encoding(self) -> None:
+        rng = random.Random(123)
+        sanitized = canonicalize_substitution_rules(
+            [
+                {"key": "닉네임", "mode": "list", "values": ["테스트값"]},
+                {
+                    "key": "문구",
+                    "source": "안녕 ${목록:닉네임}",
+                    "encoding": "html_hex_min",
+                },
+            ],
+            strict=True,
+            random_generator=rng,
+        )
+        self.assertEqual(len(sanitized), 2)
+        static_rule = next(rule for rule in sanitized if rule["key"] == "문구")
+        expected = encode_substitution_value("안녕 테스트값", "html_hex_min")
+        self.assertEqual(static_rule["value"], expected)
+        self.assertNotIn("${", static_rule["value"])
 
     def test_substitute_tokens_static_random_list(self) -> None:
         sanitized = canonicalize_substitution_rules(
@@ -143,13 +175,32 @@ class SubstitutionRuleTests(unittest.TestCase):
             strict=True,
         )
         context = build_substitution_context(sanitized)
-        rng = SequencedRandom([0, 1, 2, 1, 0])
+        rng = SequencedRandom((0, 1, 2, 1, 0))
         outputs = []
         for _ in range(5):
             value, missing = substitute_tokens("${목록:닉}", sanitized, context=context, random_generator=rng)
             self.assertFalse(missing)
             outputs.append(value)
         self.assertEqual(outputs, ["Alpha", "Beta", "Gamma", "Beta", "Alpha"])
+
+    def test_preview_endpoint_resolves_lists_before_encoding(self) -> None:
+        request = SubstitutionPreviewRequest(
+            items=[
+                SubstitutionPreviewItem(
+                    key="문구",
+                    source="${목록:닉}",
+                    encoding="html_hex_min",
+                )
+            ],
+            rules=[
+                SubstitutionRule(key="닉", mode="list", values=["테스트"]),
+                SubstitutionRule(key="문구", source="${목록:닉}", encoding="html_hex_min"),
+            ],
+        )
+        response = preview_substitution_endpoint(request)
+        self.assertEqual(len(response.results), 1)
+        expected = encode_substitution_value("테스트", "html_hex_min")
+        self.assertEqual(response.results[0], expected)
 
 
 if __name__ == "__main__":

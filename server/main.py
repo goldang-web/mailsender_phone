@@ -413,15 +413,29 @@ def _extract_list_values(data: Dict[str, Any]) -> List[str]:
     return normalized
 
 
-def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[Dict[str, Any]]:
+def canonicalize_substitution_rules(
+    raw: Any,
+    *,
+    strict: bool = False,
+    random_generator: Optional[random.Random] = None,
+) -> List[Dict[str, Any]]:
     if raw is None:
         return []
     if not isinstance(raw, (list, tuple)):
         if strict:
             raise ValueError("치환 변수 목록 형식이 올바르지 않습니다.")
         return []
-    sanitized: List[Dict[str, Any]] = []
+
+    rng = random_generator
+    if rng is None:
+        system_rng = random.SystemRandom()
+        rng = random.Random(system_rng.randrange(1 << 63))
+
     seen_keys: Set[str] = set()
+    ordered_entries: List[Tuple[str, Dict[str, Any]]] = []
+    list_entries: List[Dict[str, Any]] = []
+    static_entries: Dict[str, Dict[str, Any]] = {}
+
     for item in raw:
         if hasattr(item, "dict") and callable(getattr(item, "dict")):
             data = item.dict()
@@ -431,6 +445,7 @@ def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[D
             if strict:
                 raise ValueError("치환 변수 항목 형식이 올바르지 않습니다.")
             continue
+
         key = str(data.get("key") or "").strip()
         if not key:
             if strict:
@@ -441,54 +456,156 @@ def canonicalize_substitution_rules(raw: Any, *, strict: bool = False) -> List[D
             if strict:
                 raise ValueError(f"'{key}' 변수명이 중복되었습니다.")
             continue
+
         mode = normalize_substitution_mode(data.get("mode"))
         description = _sanitize_description(data.get("description"))
+
         if mode == "list":
             values = _extract_list_values(data)
             if not values:
                 if strict:
                     raise ValueError(f"'{key}' 목록 항목을 한 개 이상 입력하세요.")
                 continue
-            sanitized.append(
-                {
-                    "key": key,
-                    "mode": "list",
-                    "values": values,
-                    "description": description,
-                    "source": "",
-                    "encoding": "none",
-                    "value": "",
-                }
-            )
+            entry = {
+                "key": key,
+                "mode": "list",
+                "values": values,
+                "description": description,
+                "source": "",
+                "encoding": "none",
+                "value": "",
+            }
+            ordered_entries.append(("list", entry))
+            list_entries.append(entry)
             seen_keys.add(key_token)
             continue
+
         source = str(data.get("source") or "")
         raw_value = data.get("value")
         if not source and raw_value is not None:
             source = str(raw_value)
         encoding = normalize_encoding_name(data.get("encoding"))
-        try:
-            computed_value = encode_substitution_value(source, encoding)
-        except UnicodeEncodeError as exc:
-            if encoding == "quoted_printable_euckr":
-                raise ValueError(f"'{key}' 원본을 EUC-KR로 변환할 수 없습니다.") from exc
-            raise ValueError(f"'{key}' 치환 값을 생성하는 중 오류가 발생했습니다.") from exc
-        if not computed_value:
+        if not source:
             if strict:
-                raise ValueError(f"'{key}' 치환 값을 입력하세요.")
+                raise ValueError(f"'{key}' 원본을 입력하세요.")
             continue
-        sanitized.append(
-            {
-                "key": key,
-                "source": source,
-                "encoding": encoding,
-                "value": computed_value,
-                "mode": "static",
-                "values": [],
-                "description": description,
-            }
-        )
+        entry = {
+            "key": key,
+            "source": source,
+            "encoding": encoding,
+            "value": "",
+            "mode": "static",
+            "values": [],
+            "description": description,
+        }
+        ordered_entries.append(("static", entry))
+        static_entries[key] = entry
         seen_keys.add(key_token)
+
+    list_map: Dict[str, Tuple[str, ...]] = {
+        entry["key"]: tuple(entry["values"])
+        for entry in list_entries
+    }
+    static_results: Dict[str, str] = {}
+    pending = {key: entry for key, entry in static_entries.items()}
+    max_iterations = max(1, len(pending) * 2)
+
+    for _ in range(max_iterations):
+        if not pending:
+            break
+        progressed = False
+        removal_queue: List[str] = []
+        for key, entry in list(pending.items()):
+            raw_source = entry.get("source", "")
+            context = {
+                "static": static_results,
+                "lists": list_map,
+            }
+            substituted, missing = substitute_tokens(
+                raw_source,
+                [],
+                random_generator=rng,
+                context=context,
+            )
+
+            unresolved_dependency = False
+            blocking_tokens: List[str] = []
+            for token in missing:
+                stripped = token.strip()
+                if not stripped:
+                    continue
+                if stripped in pending:
+                    unresolved_dependency = True
+                    continue
+                if stripped in static_results:
+                    continue
+                list_match = LIST_TOKEN_PATTERN.match(stripped)
+                if list_match:
+                    list_name = list_match.group(1).strip()
+                    blocking_tokens.append(f"목록:{list_name}")
+                    continue
+                if RANDOM_TOKEN_PATTERN.match(stripped):
+                    blocking_tokens.append(stripped)
+                    continue
+                blocking_tokens.append(stripped)
+
+            if blocking_tokens:
+                if strict:
+                    raise ValueError(
+                        f"'{key}' 치환에서 {', '.join(sorted(set(blocking_tokens)))} 패턴을 처리하지 못했습니다."
+                    )
+                continue
+            if unresolved_dependency:
+                continue
+
+            try:
+                encoded_value = encode_substitution_value(
+                    substituted,
+                    entry.get("encoding"),
+                    random_choice=rng.choice if hasattr(rng, "choice") else None,
+                    random_generator=rng,
+                )
+            except UnicodeEncodeError as exc:
+                if strict and entry.get("encoding") == "quoted_printable_euckr":
+                    raise ValueError(f"'{key}' 원본을 EUC-KR로 변환할 수 없습니다.") from exc
+                raise ValueError(f"'{key}' 치환 값을 생성하는 중 오류가 발생했습니다.") from exc
+
+            if not encoded_value:
+                if strict:
+                    raise ValueError(f"'{key}' 치환 값을 입력하세요.")
+                continue
+
+            entry["value"] = encoded_value
+            static_results[key] = encoded_value
+            removal_queue.append(key)
+            progressed = True
+
+        for key in removal_queue:
+            pending.pop(key, None)
+
+        if not progressed:
+            break
+
+    if pending:
+        if strict:
+            unresolved = ", ".join(sorted(pending.keys()))
+            raise ValueError(f"치환 변수 {unresolved} 값을 계산하지 못했습니다.")
+        unresolved_keys = set(pending.keys())
+        ordered_entries = [
+            (kind, entry)
+            for kind, entry in ordered_entries
+            if not (kind == "static" and entry.get("key") in unresolved_keys)
+        ]
+
+    sanitized: List[Dict[str, Any]] = []
+    for kind, entry in ordered_entries:
+        if kind == "list":
+            sanitized.append(entry)
+        else:
+            if entry.get("key") in static_results:
+                sanitized.append(entry)
+            elif strict:
+                raise ValueError(f"'{entry.get('key')}' 치환 값을 계산하지 못했습니다.")
     return sanitized
 
 
@@ -2510,12 +2627,14 @@ class SubstitutionRule(BaseModel):
 
 
 class SubstitutionPreviewItem(BaseModel):
+    key: Optional[str] = None
     source: Optional[str] = ""
     encoding: Optional[str] = None
 
 
 class SubstitutionPreviewRequest(BaseModel):
     items: List[SubstitutionPreviewItem] = Field(default_factory=list)
+    rules: Optional[List[SubstitutionRule]] = None
 
 
 class SubstitutionPreviewResponse(BaseModel):
@@ -2592,12 +2711,57 @@ def list_devices() -> Dict[str, Any]:
 @app.post("/api/substitution/encode", response_model=SubstitutionPreviewResponse)
 def preview_substitution_endpoint(payload: SubstitutionPreviewRequest) -> SubstitutionPreviewResponse:
     items = payload.items or []
+    base_rules: List[Dict[str, Any]]
+    if payload.rules:
+        base_rules = payload.rules
+    else:
+        config = load_global_config()
+        base_rules = config.get("substitution_rules") or []
+
+    rng = random.Random(random.SystemRandom().randrange(1 << 63))
+    sanitized_rules = canonicalize_substitution_rules(base_rules, random_generator=rng)
+    context = build_substitution_context(sanitized_rules)
+    static_base = context.get("static") or {}
+    list_base = context.get("lists") or {}
+
     results: List[str] = []
     for index, item in enumerate(items, start=1):
         source = item.source or ""
         encoding = normalize_encoding_name(item.encoding)
+        key = (item.key or "").strip()
+        if not source:
+            results.append("")
+            continue
+
+        preview_rng = random.Random(random.SystemRandom().randrange(1 << 63))
+        static_map = dict(static_base)
+        if key:
+            static_map.pop(key, None)
+        substitution_context = {
+            "static": static_map,
+            "lists": list_base,
+        }
+
+        substituted, missing = substitute_tokens(
+            source,
+            sanitized_rules,
+            random_generator=preview_rng,
+            context=substitution_context,
+        )
+        if missing:
+            unresolved = ", ".join(sorted(missing))
+            raise HTTPException(
+                status_code=400,
+                detail=f"{index}번 행: {unresolved} 패턴을 치환하지 못했습니다.",
+            )
+
         try:
-            encoded = encode_substitution_value(source, encoding)
+            encoded = encode_substitution_value(
+                substituted,
+                encoding,
+                random_choice=preview_rng.choice if hasattr(preview_rng, "choice") else None,
+                random_generator=preview_rng,
+            )
         except UnicodeEncodeError as exc:
             if encoding == "quoted_printable_euckr":
                 raise HTTPException(
@@ -2608,7 +2772,9 @@ def preview_substitution_endpoint(payload: SubstitutionPreviewRequest) -> Substi
                 status_code=400,
                 detail=f"{index}번 행: 치환 값을 생성하지 못했습니다.",
             ) from exc
+
         results.append(encoded)
+
     return SubstitutionPreviewResponse(results=results)
 
 

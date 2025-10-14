@@ -4259,6 +4259,7 @@ async function performSubstitutionRecompute(index) {
     return;
   }
   const sourceText = typeof rule?.source === "string" ? rule.source : "";
+  const key = typeof rule?.key === "string" ? rule.key : "";
   const encoding = normalizeSubstitutionEncoding(rule?.encoding);
   const token = (preview.tokens.get(index) || 0) + 1;
   preview.tokens.set(index, token);
@@ -4272,7 +4273,7 @@ async function performSubstitutionRecompute(index) {
   preview.pending.add(index);
   renderSubstitutionDraft();
   try {
-    const response = await requestSubstitutionPreview([{ source: sourceText, encoding }]);
+    const response = await requestSubstitutionPreview([{ key, source: sourceText, encoding }]);
     const results = Array.isArray(response?.results) ? response.results : [];
     if (preview.tokens.get(index) !== token) {
       return;
@@ -4314,6 +4315,7 @@ async function refreshAllSubstitutionRows() {
     let results = [];
     if (entriesWithSource.length > 0) {
       const payload = entriesWithSource.map(({ rule }) => ({
+        key: typeof rule?.key === "string" ? rule.key : "",
         source: rule.source,
         encoding: normalizeSubstitutionEncoding(rule?.encoding),
       }));
@@ -4349,12 +4351,22 @@ async function requestSubstitutionPreview(items) {
     return { results: [] };
   }
   const payloadItems = items.map((item) => ({
+    key: typeof item?.key === "string" ? item.key : "",
     source: typeof item?.source === "string" ? item.source : "",
     encoding: normalizeSubstitutionEncoding(item?.encoding),
   }));
+  const rulesPayload = cloneSubstitutionRules(state.substitutionDraft).map((rule) => ({
+    key: typeof rule?.key === "string" ? rule.key : "",
+    mode: normalizeSubstitutionMode(rule?.mode),
+    source: typeof rule?.source === "string" ? rule.source : "",
+    encoding: normalizeSubstitutionEncoding(rule?.encoding),
+    value: typeof rule?.value === "string" ? rule.value : "",
+    values: Array.isArray(rule?.values) ? [...rule.values] : [],
+    description: normalizeSubstitutionDescription(rule?.description),
+  }));
   return fetchJSON("/api/substitution/encode", {
     method: "POST",
-    body: JSON.stringify({ items: payloadItems }),
+    body: JSON.stringify({ items: payloadItems, rules: rulesPayload }),
   });
 }
 
