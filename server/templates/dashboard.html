@@ -450,7 +450,7 @@ header {
   display: grid;
   grid-template-columns:
     auto
-    minmax(132px, 0.9fr)
+    minmax(80px, 0.45fr)
     minmax(200px, 1.1fr)
     minmax(170px, 0.85fr)
     minmax(220px, 1.25fr)
@@ -1944,7 +1944,6 @@ button:not(:disabled):hover {
       <div class="substitution-toolbar">
         <p class="substitution-hint">변수명은 공백 없이 작성하고, 동일한 이름을 중복 등록할 수 없습니다.</p>
         <div class="substitution-toolbar-actions">
-          <button type="button" class="ghost" id="substitutionRefreshAllBtn">전체 새로고침</button>
           <button type="button" class="secondary" id="substitutionAddRowBtn">행 추가</button>
         </div>
       </div>
@@ -1953,6 +1952,7 @@ button:not(:disabled):hover {
     </div>
     <div class="modal-footer">
       <button type="button" class="ghost" id="substitutionCancelBtn">취소</button>
+      <button type="button" class="ghost" id="substitutionRefreshAllBtn">전체 새로고침</button>
       <button type="button" id="substitutionSaveBtn" disabled>저장</button>
     </div>
   </div>
