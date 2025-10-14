@@ -2002,41 +2002,6 @@ button:not(:disabled):hover {
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
           </div>
         </div>
-        <div class="global-form">
-          <div class="field domain-field">
-            <span>활성 도메인</span>
-            <div class="domain-radio-group" id="globalActiveDomainGroup">
-              <label>
-                <input type="radio" name="globalActiveDomain" value="naver">
-                네이버
-              </label>
-              <label>
-                <input type="radio" name="globalActiveDomain" value="daum">
-                다음
-              </label>
-            </div>
-          </div>
-          <label class="field">
-            <span>HELO</span>
-            <input type="text" id="globalHelo" placeholder="예: mail.example.com">
-          </label>
-          <label class="field">
-            <span>MAIL FROM</span>
-            <input type="text" id="globalMailFrom" placeholder="sender@example.com">
-          </label>
-          <label class="field compact">
-            <span>세션 수</span>
-            <input type="number" id="globalSessionCount" min="1" step="1" placeholder="1 이상">
-          </label>
-          <label class="field compact">
-            <span>BCC 수</span>
-            <input type="number" id="globalBccCount" min="0" max="30" step="1" placeholder="0~30">
-          </label>
-          <label class="field header-field">
-            <span>HEADER</span>
-            <textarea id="globalHeader" placeholder="헤더를 입력하세요"></textarea>
-          </label>
-        </div>
       </div>
       <div class="global-split">
         <div class="global-section">
@@ -7116,18 +7081,20 @@ function attachCardEvents(card) {
         session_count: payload.session_count,
         bcc_count: payload.bcc_count,
       });
-      state.globalDraft.active_domain = sanitizedDomain;
-      state.globalDirty.active_domain = true;
-      document
-        .querySelectorAll('input[name="globalActiveDomain"]')
-        .forEach((radio) => {
-          radio.checked = radio.value === sanitizedDomain;
-        });
       setGlobalStatus("선택한 카드 설정을 전체 기기에 적용합니다...", "info");
       copyGlobalBtn.disabled = true;
       copyGlobalBtn.textContent = "전체 적용 중...";
       try {
-        await handleGlobalApply();
+        await handleGlobalApply({
+          overrides: {
+            active_domain: sanitizedDomain,
+            helo: payload.helo,
+            mail_from: payload.mail_from,
+            header: payload.header,
+            session_count: payload.session_count,
+            bcc_count: payload.bcc_count,
+          },
+        });
       } finally {
         copyGlobalBtn.disabled = false;
         copyGlobalBtn.textContent = copyGlobalBtn.dataset.defaultLabel || "전체 적용";
@@ -8370,7 +8337,8 @@ document.getElementById("globalStopAllBtn").addEventListener("click", () => {
   handleGlobalStopAll();
 });
 
-async function handleGlobalApply() {
+async function handleGlobalApply(options = {}) {
+  const overrides = options?.overrides && typeof options.overrides === "object" ? options.overrides : {};
   const applyBtn = document.getElementById("globalApplyBtn");
   const heloInput = document.getElementById("globalHelo");
   const mailInput = document.getElementById("globalMailFrom");
@@ -8384,25 +8352,97 @@ async function handleGlobalApply() {
   const telegramChatInput = document.getElementById("globalTelegramChatId");
   if (!applyBtn) return;
 
-  const activeDomainValue = sanitizeGlobalDomain(
-    activeDomainRadio?.value ?? state.globalDraft.active_domain ?? GLOBAL_DEFAULTS.active_domain,
-  );
-  if (!activeDomainRadio || activeDomainRadio.value !== activeDomainValue) {
-    document.querySelectorAll('input[name="globalActiveDomain"]').forEach((radio) => {
-      radio.checked = radio.value === activeDomainValue;
-    });
+  const hasActiveDomainOverride = Object.prototype.hasOwnProperty.call(overrides, "active_domain");
+  const hasHeloOverride = Object.prototype.hasOwnProperty.call(overrides, "helo");
+  const hasMailFromOverride = Object.prototype.hasOwnProperty.call(overrides, "mail_from");
+  const hasHeaderOverride = Object.prototype.hasOwnProperty.call(overrides, "header");
+  const hasSessionOverride = Object.prototype.hasOwnProperty.call(overrides, "session_count");
+  const hasBccOverride = Object.prototype.hasOwnProperty.call(overrides, "bcc_count");
+
+  let activeDomainValue;
+  if (hasActiveDomainOverride) {
+    activeDomainValue = sanitizeGlobalDomain(overrides.active_domain);
+  } else if (activeDomainRadio) {
+    activeDomainValue = sanitizeGlobalDomain(activeDomainRadio.value);
+  } else if (state.globalDraft.active_domain) {
+    activeDomainValue = sanitizeGlobalDomain(state.globalDraft.active_domain);
+  }
+  if (activeDomainValue !== undefined) {
+    state.globalDraft.active_domain = activeDomainValue;
+    if (activeDomainRadio?.value !== activeDomainValue) {
+      document.querySelectorAll('input[name="globalActiveDomain"]').forEach((radio) => {
+        radio.checked = radio.value === activeDomainValue;
+      });
+    }
   }
 
-  const heloValue = heloInput?.value.trim() ?? "";
-  const mailValue = mailInput?.value.trim() ?? "";
-  const headerValue = headerInput?.value ?? "";
-  const sessionValue = sanitizeSessionValue(sessionInput?.value ?? state.globalDraft.session_count ?? GLOBAL_DEFAULTS.session_count);
-  if (sessionInput && sessionInput.value !== sessionValue) {
-    sessionInput.value = sessionValue;
+  let heloValue;
+  if (hasHeloOverride) {
+    heloValue = (overrides.helo ?? "").toString().trim();
+  } else if (heloInput) {
+    heloValue = heloInput.value.trim();
   }
-  const bccValue = sanitizeBccValue(bccInput?.value ?? state.globalDraft.bcc_count ?? GLOBAL_DEFAULTS.bcc_count);
-  if (bccInput && bccInput.value !== bccValue) {
-    bccInput.value = bccValue;
+  if (heloValue !== undefined) {
+    state.globalDraft.helo = heloValue;
+    if (heloInput && heloInput.value !== heloValue) {
+      heloInput.value = heloValue;
+    }
+  }
+
+  let mailValue;
+  if (hasMailFromOverride) {
+    mailValue = (overrides.mail_from ?? "").toString().trim();
+  } else if (mailInput) {
+    mailValue = mailInput.value.trim();
+  }
+  if (mailValue !== undefined) {
+    state.globalDraft.mail_from = mailValue;
+    if (mailInput && mailInput.value !== mailValue) {
+      mailInput.value = mailValue;
+    }
+  }
+
+  let headerValue;
+  if (hasHeaderOverride) {
+    headerValue = overrides.header ?? "";
+  } else if (headerInput) {
+    headerValue = headerInput.value;
+  }
+  if (headerValue !== undefined) {
+    state.globalDraft.header = headerValue;
+    if (headerInput && headerInput.value !== headerValue) {
+      headerInput.value = headerValue;
+    }
+  }
+
+  let sessionValue;
+  if (hasSessionOverride) {
+    sessionValue = sanitizeSessionValue(String(overrides.session_count ?? ""));
+  } else if (sessionInput) {
+    sessionValue = sanitizeSessionValue(sessionInput.value ?? state.globalDraft.session_count ?? GLOBAL_DEFAULTS.session_count);
+  } else {
+    sessionValue = state.globalDraft.session_count ?? GLOBAL_DEFAULTS.session_count;
+  }
+  if (sessionValue !== undefined) {
+    if (sessionInput && sessionInput.value !== sessionValue) {
+      sessionInput.value = sessionValue;
+    }
+    state.globalDraft.session_count = sessionValue;
+  }
+
+  let bccValue;
+  if (hasBccOverride) {
+    bccValue = sanitizeBccValue(String(overrides.bcc_count ?? ""));
+  } else if (bccInput) {
+    bccValue = sanitizeBccValue(bccInput.value ?? state.globalDraft.bcc_count ?? GLOBAL_DEFAULTS.bcc_count);
+  } else {
+    bccValue = sanitizeBccValue(state.globalDraft.bcc_count ?? GLOBAL_DEFAULTS.bcc_count);
+  }
+  if (bccValue !== undefined) {
+    if (bccInput && bccInput.value !== bccValue) {
+      bccInput.value = bccValue;
+    }
+    state.globalDraft.bcc_count = bccValue;
   }
   const telegramTokenValue = telegramTokenInput?.value.trim() ?? "";
   const telegramChatValue = telegramChatInput?.value.trim() ?? "";
@@ -8430,12 +8470,6 @@ async function handleGlobalApply() {
     return;
   }
 
-  state.globalDraft.active_domain = activeDomainValue;
-  state.globalDraft.helo = heloValue;
-  state.globalDraft.mail_from = mailValue;
-  state.globalDraft.header = headerValue;
-  state.globalDraft.session_count = sessionValue;
-  state.globalDraft.bcc_count = bccValue;
   state.globalDraft.stop_schedule_time = sanitizedSchedule || "";
   state.globalDraft.stop_schedule_enabled = toggleChecked;
   state.globalDirty.stop_schedule_time = true;
@@ -8450,18 +8484,29 @@ async function handleGlobalApply() {
   const substitutionPayload = cloneSubstitutionRules(state.substitutionRules);
   const upcomingRulesSnapshot = JSON.stringify(substitutionPayload);
 
-  const payload = {
-    active_domain: activeDomainValue,
-    helo: heloValue,
-    mail_from: mailValue,
-    header: headerValue,
-    session_count: Number(sessionValue),
-    bcc_count: parseBccInput(bccValue),
-    stop_schedule_enabled: toggleChecked && Boolean(sanitizedSchedule),
-    stop_schedule_time: sanitizedSchedule || "",
-    telegram_bot_token: telegramTokenValue,
-    telegram_chat_id: telegramChatValue,
-  };
+  const payload = {};
+  if (activeDomainValue !== undefined && (hasActiveDomainOverride || activeDomainRadio)) {
+    payload.active_domain = activeDomainValue;
+  }
+  if (heloValue !== undefined && (hasHeloOverride || heloInput)) {
+    payload.helo = heloValue;
+  }
+  if (mailValue !== undefined && (hasMailFromOverride || mailInput)) {
+    payload.mail_from = mailValue;
+  }
+  if (headerValue !== undefined && (hasHeaderOverride || headerInput)) {
+    payload.header = headerValue;
+  }
+  if (sessionValue !== undefined && (hasSessionOverride || sessionInput)) {
+    payload.session_count = Number(sessionValue);
+  }
+  if (bccValue !== undefined && (hasBccOverride || bccInput)) {
+    payload.bcc_count = parseBccInput(bccValue);
+  }
+  payload.stop_schedule_enabled = toggleChecked && Boolean(sanitizedSchedule);
+  payload.stop_schedule_time = sanitizedSchedule || "";
+  payload.telegram_bot_token = telegramTokenValue;
+  payload.telegram_chat_id = telegramChatValue;
   payload.substitution_rules = substitutionPayload;
 
   const originalText = applyBtn.textContent;
