@@ -32,7 +32,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.53"
+APP_VERSION = "0.0.54"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -77,7 +77,9 @@ IMAP_ALLOWED_LATENCY_MIN_SECONDS = 5
 IMAP_ALLOWED_LATENCY_MAX_SECONDS = 600
 IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS = 20
 IMAP_DEFAULT_SINGLE_DELAY_SECONDS = 20
-IMAP_DEFAULT_BATCH_DELAY_SECONDS = 20
+IMAP_DEFAULT_SENT_THRESHOLD = 90
+IMAP_SENT_THRESHOLD_MIN = 1
+IMAP_SENT_THRESHOLD_MAX = 1000
 
 DOMAIN_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -277,7 +279,7 @@ def sanitize_imap_delay(
     default: Optional[int] = None,
     minimum: Optional[int] = None,
 ) -> int:
-    effective_default = default if default is not None else IMAP_DEFAULT_BATCH_DELAY_SECONDS
+    effective_default = default if default is not None else IMAP_DEFAULT_SINGLE_DELAY_SECONDS
     effective_min = minimum if minimum is not None else 0
     try:
         delay = int(value) if value is not None else effective_default
@@ -297,6 +299,19 @@ def sanitize_imap_allowed_latency(
     except (TypeError, ValueError):
         latency = effective_default
     return max(IMAP_ALLOWED_LATENCY_MIN_SECONDS, min(IMAP_ALLOWED_LATENCY_MAX_SECONDS, latency))
+
+
+def sanitize_imap_sent_threshold(
+    value: Optional[object],
+    *,
+    default: Optional[int] = None,
+) -> int:
+    effective_default = default if default is not None else IMAP_DEFAULT_SENT_THRESHOLD
+    try:
+        threshold = int(value) if value is not None else effective_default
+    except (TypeError, ValueError):
+        threshold = effective_default
+    return max(IMAP_SENT_THRESHOLD_MIN, min(IMAP_SENT_THRESHOLD_MAX, threshold))
 
 
 def sanitize_imap_failure_action(value: Optional[object]) -> str:
@@ -422,22 +437,37 @@ class MailClient:
                 default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
                 minimum=0,
             )
-            batch_delay = sanitize_imap_delay(
-                entry.get("batch_delay_seconds"),
-                default=legacy_delay if legacy_delay else IMAP_DEFAULT_BATCH_DELAY_SECONDS,
-                minimum=0,
+            sent_threshold = sanitize_imap_sent_threshold(
+                entry.get("sent_threshold"),
+                default=IMAP_DEFAULT_SENT_THRESHOLD,
             )
+            try:
+                sent_since_last_check = int(entry.get("sent_since_last_check") or 0)
+            except (TypeError, ValueError):
+                sent_since_last_check = 0
+            sent_since_last_check = max(0, sent_since_last_check)
             self.imap_settings[domain] = {
                 "enabled": bool(entry.get("enabled")),
                 "username": normalize_imap_string(entry.get("username")),
                 "password": entry.get("password") or "",
                 "single_delay_seconds": single_delay,
-                "batch_delay_seconds": batch_delay,
                 "allowed_latency_seconds": allowed_latency,
                 "failure_action": sanitize_imap_failure_action(entry.get("failure_action")),
                 "notify_before_stop_all": sanitize_bool_flag(entry.get("notify_before_stop_all")),
-                "delay_seconds": legacy_delay,
+                "sent_threshold": sent_threshold,
+                "sent_since_last_check": sent_since_last_check,
+                "sent_last_reset_at": entry.get("sent_last_reset_at"),
             }
+        self._imap_sent_counters: Dict[str, int] = {}
+        for domain in DOMAINS:
+            try:
+                self._imap_sent_counters[domain] = max(
+                    0,
+                    int(self.imap_settings.get(domain, {}).get("sent_since_last_check") or 0),
+                )
+            except (TypeError, ValueError):
+                self._imap_sent_counters[domain] = 0
+        self._imap_settings_dirty: Set[str] = set()
         self._schedule_events: Dict[str, Dict[str, object]] = {}
         self.session = requests.Session()
         self._configure_session()
@@ -624,6 +654,7 @@ class MailClient:
         self.config["sent_sequences"] = self.sent_sequences
         self.config["imap_settings"] = snapshot["imap_settings"]
         self._sequence_dirty.clear()
+        self._imap_settings_dirty.clear()
         self._last_sequence_flush = time.monotonic()
 
     # ------------------------------------------------------------------ #
@@ -643,6 +674,15 @@ class MailClient:
     def _serialize_imap_settings(self) -> Dict[str, Dict[str, object]]:
         serialized: Dict[str, Dict[str, object]] = {}
         for domain, settings in self.imap_settings.items():
+            sent_threshold = sanitize_imap_sent_threshold(
+                settings.get("sent_threshold"),
+                default=IMAP_DEFAULT_SENT_THRESHOLD,
+            )
+            try:
+                sent_since = int(settings.get("sent_since_last_check") or 0)
+            except (TypeError, ValueError):
+                sent_since = 0
+            sent_since = max(0, sent_since)
             serialized[domain] = {
                 "enabled": bool(settings.get("enabled")),
                 "username": normalize_imap_string(settings.get("username")),
@@ -652,18 +692,15 @@ class MailClient:
                     default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
                     minimum=0,
                 ),
-                "batch_delay_seconds": sanitize_imap_delay(
-                    settings.get("batch_delay_seconds"),
-                    default=IMAP_DEFAULT_BATCH_DELAY_SECONDS,
-                    minimum=0,
-                ),
                 "allowed_latency_seconds": sanitize_imap_allowed_latency(
                     settings.get("allowed_latency_seconds"),
                     default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
                 ),
                 "failure_action": sanitize_imap_failure_action(settings.get("failure_action")),
                 "notify_before_stop_all": sanitize_bool_flag(settings.get("notify_before_stop_all")),
-                "delay_seconds": sanitize_imap_delay(settings.get("delay_seconds")),
+                "sent_threshold": sent_threshold,
+                "sent_since_last_check": sent_since,
+                "sent_last_reset_at": settings.get("sent_last_reset_at"),
             }
         return serialized
 
@@ -692,18 +729,43 @@ class MailClient:
                 "username": "",
                 "password": "",
                 "single_delay_seconds": IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
-                "batch_delay_seconds": IMAP_DEFAULT_BATCH_DELAY_SECONDS,
                 "allowed_latency_seconds": IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
                 "failure_action": "none",
                 "notify_before_stop_all": False,
-                "delay_seconds": IMAP_DEFAULT_BATCH_DELAY_SECONDS,
+                "sent_threshold": IMAP_DEFAULT_SENT_THRESHOLD,
+                "sent_since_last_check": 0,
+                "sent_last_reset_at": None,
             }
             self.imap_settings[normalized] = settings
         return settings
 
+    def _current_sent_threshold(self, domain: str) -> int:
+        settings = self._imap_settings_for_domain(domain)
+        threshold = sanitize_imap_sent_threshold(
+            settings.get("sent_threshold"),
+            default=IMAP_DEFAULT_SENT_THRESHOLD,
+        )
+        settings["sent_threshold"] = threshold
+        return threshold
+
+    def _get_sent_counter(self, domain: str) -> int:
+        normalized = (domain or "").lower()
+        return max(0, int(self._imap_sent_counters.get(normalized, 0)))
+
+    def _set_sent_counter(self, domain: str, value: int, *, reset_timestamp: Optional[str] = None) -> None:
+        normalized = (domain or "").lower()
+        counter = max(0, int(value or 0))
+        settings = self._imap_settings_for_domain(normalized)
+        self._imap_sent_counters[normalized] = counter
+        settings["sent_since_last_check"] = counter
+        if reset_timestamp is not None:
+            settings["sent_last_reset_at"] = reset_timestamp
+        self._imap_settings_dirty.add(normalized)
+
     def _update_imap_settings_from_server(self, domain: str, payload: Dict[str, object]) -> None:
         if not isinstance(payload, dict):
             return
+        normalized = (domain or "").lower()
         settings = self._imap_settings_for_domain(domain)
         settings["enabled"] = bool(payload.get("imap_enabled"))
         settings["username"] = normalize_imap_string(payload.get("imap_username"))
@@ -714,19 +776,9 @@ class MailClient:
                 pass
             else:
                 settings["password"] = raw_password or ""
-        settings["delay_seconds"] = sanitize_imap_delay(
-            payload.get("imap_batch_delay_seconds"),
-            default=IMAP_DEFAULT_BATCH_DELAY_SECONDS,
-            minimum=0,
-        )
         settings["single_delay_seconds"] = sanitize_imap_delay(
             payload.get("imap_single_delay_seconds"),
             default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
-            minimum=0,
-        )
-        settings["batch_delay_seconds"] = sanitize_imap_delay(
-            payload.get("imap_batch_delay_seconds"),
-            default=settings.get("delay_seconds"),
             minimum=0,
         )
         settings["allowed_latency_seconds"] = sanitize_imap_allowed_latency(
@@ -737,6 +789,18 @@ class MailClient:
         settings["notify_before_stop_all"] = sanitize_bool_flag(
             payload.get("imap_notify_before_stop_all")
         )
+        settings["sent_threshold"] = sanitize_imap_sent_threshold(
+            payload.get("imap_sent_threshold"),
+            default=settings.get("sent_threshold")
+        )
+        try:
+            sent_since_value = int(payload.get("imap_sent_since_last_check") or 0)
+        except (TypeError, ValueError):
+            sent_since_value = 0
+        settings["sent_since_last_check"] = max(0, sent_since_value)
+        settings["sent_last_reset_at"] = payload.get("imap_sent_last_reset_at")
+        self._imap_sent_counters[normalized] = settings["sent_since_last_check"]
+        self._imap_settings_dirty.add(normalized)
         settings["last_status"] = payload.get("imap_last_status")
         settings["last_checked_at"] = payload.get("imap_last_checked_at")
         settings["last_latency"] = payload.get("imap_last_latency")
@@ -776,22 +840,24 @@ class MailClient:
         allowed_delay: Optional[int],
         context_reason: Optional[str] = None,
         force: bool = False,
-    ) -> None:
+        sent_window_count: Optional[int] = None,
+        sent_threshold: Optional[int] = None,
+    ) -> Optional[Future]:
         normalized = (domain or "").lower()
         if normalized != "naver":
-            return
+            return None
         if not mail_from:
-            return
+            return None
         if not isinstance(sent_at, datetime):
-            return
+            return None
         settings = self._imap_settings_for_domain(normalized)
         manual_force = bool(force)
         if not settings.get("enabled") and not manual_force:
-            return
+            return None
         username = normalize_imap_string(settings.get("username"))
         password = settings.get("password") or ""
         if not username or not password:
-            return
+            return None
         allowed_setting = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
         allowed_delay_value = sanitize_imap_allowed_latency(
             allowed_delay if allowed_delay is not None else allowed_setting,
@@ -802,24 +868,21 @@ class MailClient:
             default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
             minimum=0,
         )
-        batch_delay_setting = sanitize_imap_delay(
-            settings.get("batch_delay_seconds"),
-            default=IMAP_DEFAULT_BATCH_DELAY_SECONDS,
-            minimum=0,
-        )
         if delay_before_check is None:
-            use_single = send_type == "single" and not has_anchor
-            delay_seconds = float(single_delay_setting if use_single else batch_delay_setting)
+            delay_seconds = float(single_delay_setting)
         else:
             try:
                 delay_seconds = float(delay_before_check)
             except (TypeError, ValueError):
-                use_single = send_type == "single" and not has_anchor
-                delay_seconds = float(single_delay_setting if use_single else batch_delay_setting)
+                delay_seconds = float(single_delay_setting)
             delay_seconds = max(0.0, delay_seconds)
         sent_at_value = sent_at
         sent_at_iso = to_utc_iso(sent_at_value)
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
+        threshold_value = sanitize_imap_sent_threshold(
+            sent_threshold if sent_threshold is not None else settings.get("sent_threshold"),
+            default=IMAP_DEFAULT_SENT_THRESHOLD,
+        )
 
         def task() -> None:
             start_prefix = "수동 확인 시작" if manual_force and send_type == "single" else "자동 확인 시작"
@@ -830,6 +893,11 @@ class MailClient:
                 f"대기 {delay_seconds:.1f}s · "
                 f"허용지연 {allowed_delay_value}s · "
                 f"유형 {send_type}"
+                + (
+                    f" · Sent {sent_window_count}건"
+                    if sent_window_count is not None and sent_window_count > 0
+                    else ""
+                )
             )
             print(f"[디버그] IMAP check delay={delay_seconds}")
 
@@ -897,9 +965,11 @@ class MailClient:
                         "delay_seconds": int(delay_seconds),
                         "allowed_latency_seconds": allowed_delay_value,
                         "failure_action": failure_action_value,
+                        "sent_window_count": sent_window_count,
+                        "sent_threshold": threshold_value,
                     }
                     self._queue_imap_report(report)
-                    return
+                    return report
 
             checked_at_iso = utc_now_iso()
             status = "error"
@@ -969,13 +1039,17 @@ class MailClient:
                 "delay_seconds": int(delay_seconds),
                 "allowed_latency_seconds": allowed_delay_value,
                 "failure_action": failure_action_value,
+                "sent_window_count": sent_window_count,
+                "sent_threshold": threshold_value,
             }
             self._queue_imap_report(report)
+            return report
 
         future = self._imap_executor.submit(task)
         with self._imap_lock:
             self._imap_futures.add(future)
         future.add_done_callback(self._on_imap_future_done)
+        return future
     def _maybe_flush_sent_sequences(self, force: bool = False) -> None:
         if not force and not self._sequence_dirty:
             return
@@ -1898,6 +1972,11 @@ class MailClient:
         bcc_count = self._sanitize_bcc_count(config.get("bcc_count"))
         group_size = max(1, 1 + bcc_count)
         anchor_interval = self._sanitize_anchor_interval(config.get("anchor_interval"))
+        settings = self._imap_settings_for_domain(normalized)
+        mail_from_value = config.get("mail_from", "")
+        current_sent_counter = self._get_sent_counter(normalized)
+        threshold_check_request: Optional[Dict[str, object]] = None
+        threshold_check_future: Optional[Future] = None
         anchor_email = self._sanitize_anchor_email(config.get("anchor_email"))
         anchor_enabled = bool(anchor_interval and anchor_email)
 
@@ -2315,6 +2394,95 @@ class MailClient:
                     dispatched_db_total = end_total
                     return group
 
+                def register_sent_success(sent_at: datetime, detail_text: Optional[str], increment: int) -> None:
+                    nonlocal current_sent_counter, threshold_check_request
+                    if increment <= 0:
+                        return
+                    current_sent_counter = max(0, current_sent_counter + increment)
+                    settings_local = self._imap_settings_for_domain(normalized)
+                    threshold_value = self._current_sent_threshold(normalized)
+                    self._set_sent_counter(normalized, current_sent_counter)
+                    if current_sent_counter >= threshold_value and threshold_check_request is None:
+                        self._log_imap_console(
+                            f"Sent 확인 기준 도달 · 누적 {current_sent_counter}건"
+                        )
+                        threshold_check_request = {
+                            "sent_at": sent_at,
+                            "detail": detail_text,
+                            "mail_from": mail_from_value,
+                            "allowed_latency": sanitize_imap_allowed_latency(
+                                settings_local.get("allowed_latency_seconds"),
+                                default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
+                            ),
+                            "single_delay": sanitize_imap_delay(
+                                settings_local.get("single_delay_seconds"),
+                                default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                                minimum=0,
+                            ),
+                            "threshold": threshold_value,
+                            "sent_count": current_sent_counter,
+                        }
+
+                def ensure_threshold_check() -> None:
+                    nonlocal threshold_check_request, threshold_check_future, current_sent_counter
+                    if threshold_check_future is not None:
+                        return
+                    if not threshold_check_request:
+                        return
+                    if inflight:
+                        return
+                    request = threshold_check_request
+                    threshold_check_request = None
+                    future = self._submit_imap_check(
+                        domain=normalized,
+                        job_id=job_id,
+                        send_type="sent-threshold",
+                        mail_from=str(request.get("mail_from") or mail_from_value),
+                        sent_at=request.get("sent_at") or utc_now(),
+                        has_anchor=False,
+                        delay_before_check=float(request.get("single_delay") or 0),
+                        allowed_delay=int(request.get("allowed_latency") or 0),
+                        context_reason=str(request.get("detail") or "Sent 기준 확인"),
+                        sent_window_count=int(request.get("sent_count") or 0),
+                        sent_threshold=int(request.get("threshold") or IMAP_DEFAULT_SENT_THRESHOLD),
+                    )
+                    if future is None:
+                        current_sent_counter = 0
+                        self._set_sent_counter(normalized, 0, reset_timestamp=utc_now_iso())
+                        return
+                    threshold_check_future = future
+                    report_payload: Optional[Dict[str, object]] = None
+                    try:
+                        report_payload = future.result()
+                    except Exception as exc:  # pylint: disable=broad-except
+                        self._log_imap_console(f"Sent 기준 확인 중 예외 발생: {exc}")
+                    finally:
+                        threshold_check_future = None
+                    status_value = None
+                    if isinstance(report_payload, dict):
+                        status_value = report_payload.get("status")
+                    if status_value == "success":
+                        current_sent_counter = 0
+                        self._set_sent_counter(normalized, 0, reset_timestamp=utc_now_iso())
+                        self._log_imap_console("Sent 누적 확인 성공 · 카운터 초기화")
+                    else:
+                        threshold_value = self._current_sent_threshold(normalized)
+                        fallback_counter = max(0, threshold_value - 1)
+                        current_sent_counter = fallback_counter
+                        self._set_sent_counter(normalized, fallback_counter)
+                        if status_value:
+                            self._log_imap_console(
+                                f"Sent 누적 확인 실패({status_value}) · 카운터 {fallback_counter}건으로 롤백"
+                            )
+                        else:
+                            self._log_imap_console(
+                                f"Sent 누적 확인 결과 없음 · 카운터 {fallback_counter}건으로 롤백"
+                            )
+
+                
+
+                
+
                 initial_rows = reserve_candidates(fetch_batch_size)
                 if not initial_rows:
                     empty_summary = build_summary()
@@ -2453,26 +2621,9 @@ class MailClient:
                             }
                         )
                         print(display_line)
-                        if group.injected and normalized == "naver":
-                            mail_from_value = config.get("mail_from", "")
-                            settings = self._imap_settings_for_domain(normalized)
-                            allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
-                            batch_delay = sanitize_imap_delay(
-                                settings.get("batch_delay_seconds"),
-                                default=IMAP_DEFAULT_BATCH_DELAY_SECONDS,
-                                minimum=0,
-                            )
-                            self._submit_imap_check(
-                                domain=normalized,
-                                job_id=job_id,
-                                send_type="batch-anchor",
-                                mail_from=mail_from_value,
-                                sent_at=outcome.sent_at,
-                                has_anchor=True,
-                                delay_before_check=batch_delay,
-                                allowed_delay=allowed_latency,
-                                context_reason=detail_for_log or outcome.status_line,
-                            )
+                        if normalized == "naver":
+                            total_increment = group_size_actual + anchor_count
+                            register_sent_success(outcome.sent_at, detail_for_log, total_increment)
                     else:
                         is_block = outcome.delivery_status == "block"
                         label = "Block" if is_block else "Fail"
@@ -2620,6 +2771,7 @@ class MailClient:
                             check_schedule_trigger()
                             if not stop_requested:
                                 while len(inflight) < session_count:
+                                    ensure_threshold_check()
                                     group = next_group()
                                     if not group:
                                         break
@@ -2641,12 +2793,14 @@ class MailClient:
                                 for future in done:
                                     group = inflight.pop(future)
                                     process_future(future, group)
+                                ensure_threshold_check()
                                 if fatal_error and not inflight:
                                     break
                                 check_schedule_trigger()
                                 maybe_poll_updates()
                                 continue
                             check_schedule_trigger()
+                            ensure_threshold_check()
                             maybe_poll_updates()
                             if stop_requested:
                                 break
@@ -2661,6 +2815,7 @@ class MailClient:
                             for future in done:
                                 group = inflight.pop(future)
                                 process_future(future, group)
+                            ensure_threshold_check()
                             check_schedule_trigger()
                             maybe_poll_updates()
                 finally:
@@ -2672,6 +2827,8 @@ class MailClient:
 
         emit_progress(force=True)
         summary = build_summary()
+        if self._imap_settings_dirty:
+            self.persist()
         if cancel_requested:
             headline = stop_reason or "사용자 요청으로 배치 발송 중단"
             final_message = format_summary(headline, summary)

@@ -1600,13 +1600,13 @@ button.card-delete-btn:disabled {
   margin-bottom: 0;
 }
 
-.imap-anchor-meta {
+.imap-threshold-meta {
   margin-top: 6px;
   font-size: 12px;
   color: var(--color-muted);
 }
 
-.imap-anchor-meta strong {
+.imap-threshold-meta strong {
   color: var(--color-text);
 }
 
@@ -2214,8 +2214,8 @@ button:not(:disabled):hover {
           <input type="number" id="imapSingleDelaySeconds" min="0" max="600" required title="단일 발송 성공 후 IMAP 확인을 시작하기 전까지 기다릴 시간을 지정합니다. 0으로 설정하면 즉시 확인합니다.">
         </label>
         <label class="field">
-          <span>전체·배치 발송 확인 대기 (초)</span>
-          <input type="number" id="imapBatchDelaySeconds" min="0" max="600" required title="BCC 포함 전체 발송 또는 알박기 점검을 시작하기 전 대기 시간을 지정합니다.">
+          <span>Sent 누적 확인 간격 (건)</span>
+          <input type="number" id="imapSentThreshold" min="1" max="1000" required title="Sent 누적 건수가 지정 값에 도달할 때 IMAP 확인을 실행합니다.">
         </label>
         <label class="field">
           <span>허용 지연 시간 (초)</span>
@@ -2235,7 +2235,7 @@ button:not(:disabled):hover {
             </label>
           </div>
         </div>
-        <p class="field-hint">대기 시간은 확인을 시작하기 전 지연을, 허용 지연은 발송과 수신 사이의 최대 허용 간격을 의미합니다. 실패 시 대응에 따라 중지 범위가 결정됩니다.</p>
+        <p class="field-hint">단일 발송 확인 대기는 확인을 시작하기 전 지연을 의미하며, Sent 누적 간격은 발송 성공 건수가 기준에 도달할 때마다 IMAP 확인을 실행합니다. 허용 지연은 발송과 수신 사이의 최대 허용 간격이며, 실패 시 대응에 따라 중지 범위가 결정됩니다.</p>
       </form>
     </div>
     <div class="modal-footer">
@@ -2293,7 +2293,9 @@ const IMAP_DEFAULT_ALLOWED_LATENCY = 20;
 const IMAP_ALLOWED_MIN = 5;
 const IMAP_ALLOWED_MAX = 600;
 const IMAP_DEFAULT_SINGLE_DELAY = 20;
-const IMAP_DEFAULT_BATCH_DELAY = 20;
+const IMAP_DEFAULT_SENT_THRESHOLD = 90;
+const IMAP_SENT_THRESHOLD_MIN = 1;
+const IMAP_SENT_THRESHOLD_MAX = 1000;
 const IMAP_SINGLE_MIN_DELAY = 0;
 const IMAP_FAILURE_ACTIONS = ["none", "stop_device", "stop_all"];
 
@@ -5879,16 +5881,7 @@ function markImapStatusChecking(card, options = {}) {
   if (requestedKind) {
     block.dataset.imapHoldKind = requestedKind;
   } else if (delaySeconds > 0) {
-    const batchDelay = Number(block.dataset.imapBatchDelay || "0");
-    const singleDelay = Number(block.dataset.imapSingleDelay || "0");
-    const tolerance = 1;
-    if (batchDelay && Math.abs(batchDelay - delaySeconds) <= tolerance) {
-      block.dataset.imapHoldKind = "batch";
-    } else if (singleDelay && Math.abs(singleDelay - delaySeconds) <= tolerance) {
-      block.dataset.imapHoldKind = "single";
-    } else {
-      delete block.dataset.imapHoldKind;
-    }
+    block.dataset.imapHoldKind = "single";
   } else {
     delete block.dataset.imapHoldKind;
   }
@@ -6135,7 +6128,9 @@ function bestConfig(device, domain) {
     imap_password_saved: false,
     imap_allowed_latency_seconds: IMAP_DEFAULT_ALLOWED_LATENCY,
     imap_single_delay_seconds: IMAP_DEFAULT_SINGLE_DELAY,
-    imap_batch_delay_seconds: IMAP_DEFAULT_BATCH_DELAY,
+    imap_sent_threshold: IMAP_DEFAULT_SENT_THRESHOLD,
+    imap_sent_since_last_check: 0,
+    imap_sent_last_reset_at: null,
     imap_failure_action: "none",
     imap_notify_before_stop_all: false,
     imap_last_status: "",
@@ -6484,36 +6479,26 @@ function resolveImapHoldKind(block) {
   if (!delaySeconds) {
     return "";
   }
-  const batchDelay = Number(block.dataset.imapBatchDelay || "0");
-  const singleDelay = Number(block.dataset.imapSingleDelay || "0");
-  const tolerance = 1;
-  if (batchDelay && Math.abs(batchDelay - delaySeconds) <= tolerance) {
-    block.dataset.imapHoldKind = "batch";
-    return "batch";
-  }
-  if (singleDelay && Math.abs(singleDelay - delaySeconds) <= tolerance) {
-    block.dataset.imapHoldKind = "single";
-    return "single";
-  }
-  return "";
+  block.dataset.imapHoldKind = "single";
+  return "single";
 }
 
 function describeImapHold(block, remainingSeconds) {
   const kind = resolveImapHoldKind(block);
   if (remainingSeconds > 0) {
-    if (kind === "batch") {
-      return `배치 대기 중 · 확인까지 ${remainingSeconds}초`;
-    }
     if (kind === "single") {
       return `단일 대기 중 · 확인까지 ${remainingSeconds}초`;
     }
+    if (kind === "threshold") {
+      return `Sent 기준 대기 중 · 확인까지 ${remainingSeconds}초`;
+    }
     return `확인까지 ${remainingSeconds}초`;
-  }
-  if (kind === "batch") {
-    return "알박기 도착 여부를 확인 중입니다.";
   }
   if (kind === "single") {
     return "단일 도착 여부를 확인 중입니다.";
+  }
+  if (kind === "threshold") {
+    return "Sent 누적 기준으로 도착 여부를 확인 중입니다.";
   }
   return "IMAP 도착 여부를 확인 중입니다.";
 }
@@ -6589,7 +6574,9 @@ function renderImapSection(card, device, domain) {
     block.dataset.imapUsername = "";
     block.dataset.imapAllowedLatency = String(IMAP_DEFAULT_ALLOWED_LATENCY);
     block.dataset.imapSingleDelay = String(IMAP_DEFAULT_SINGLE_DELAY);
-    block.dataset.imapBatchDelay = String(IMAP_DEFAULT_BATCH_DELAY);
+    block.dataset.imapSentThreshold = String(IMAP_DEFAULT_SENT_THRESHOLD);
+    block.dataset.imapSentSince = "0";
+    block.dataset.imapSentLastReset = "";
     block.dataset.imapFailureAction = "none";
     block.dataset.imapNotifyBeforeStopAll = "0";
     block.dataset.imapPasswordSaved = "0";
@@ -6604,10 +6591,10 @@ function renderImapSection(card, device, domain) {
     block.dataset.imapLastCheckedAt = "";
     block.dataset.imapLastStatus = "";
     delete block.dataset.imapHoldKind;
-    const anchorMetaEl = block.querySelector('[data-role="imapAnchorMeta"]');
-    if (anchorMetaEl) {
-      anchorMetaEl.textContent = "알박기 확인: 사용 안 함";
-      anchorMetaEl.title = "네이버 도메인에서만 알박기 도착 확인을 제공합니다.";
+    const thresholdMetaEl = block.querySelector('[data-role="imapThresholdMeta"]');
+    if (thresholdMetaEl) {
+      thresholdMetaEl.textContent = "Sent 누적 확인: 사용 안 함";
+      thresholdMetaEl.title = "네이버 도메인에서만 Sent 누적 기준으로 IMAP 확인을 제공합니다.";
     }
     if (configMetaEl) {
       configMetaEl.textContent = "IMAP 설정: 사용 안 함";
@@ -6631,7 +6618,7 @@ function renderImapSection(card, device, domain) {
   }
   const statusEl = block.querySelector('[data-role="imapStatus"]');
   const metaEl = block.querySelector('[data-role="imapMeta"]');
-  const anchorMetaEl = block.querySelector('[data-role="imapAnchorMeta"]');
+  const thresholdMetaEl = block.querySelector('[data-role="imapThresholdMeta"]');
   const holdStatus = block.dataset.imapHoldStatus || "";
   const holdCheckedAt = block.dataset.imapHoldCheckedAt || "";
   const holdSetAt = Number(block.dataset.imapHoldSetAt || "0");
@@ -6682,7 +6669,7 @@ function renderImapSection(card, device, domain) {
   const holdKind = resolveImapHoldKind(block);
   if (holdActive) {
     statusClass = "warning";
-    statusText = holdKind === "batch" ? "알박기 확인 중" : "도착 확인 중";
+    statusText = holdKind === "threshold" ? "Sent 누적 확인 중" : "도착 확인 중";
     const remaining = computeImapHoldRemaining(block);
     metaText = describeImapHold(block, remaining);
   } else if (holdStatus) {
@@ -6724,12 +6711,13 @@ function renderImapSection(card, device, domain) {
     IMAP_ALLOWED_MAX,
     IMAP_DEFAULT_SINGLE_DELAY,
   );
-  const imapBatchDelayValue = clampNumber(
-    config.imap_batch_delay_seconds ?? IMAP_DEFAULT_BATCH_DELAY,
-    IMAP_SINGLE_MIN_DELAY,
-    IMAP_ALLOWED_MAX,
-    IMAP_DEFAULT_BATCH_DELAY,
+  const imapSentThresholdValue = clampNumber(
+    config.imap_sent_threshold ?? IMAP_DEFAULT_SENT_THRESHOLD,
+    IMAP_SENT_THRESHOLD_MIN,
+    IMAP_SENT_THRESHOLD_MAX,
+    IMAP_DEFAULT_SENT_THRESHOLD,
   );
+  const imapSentSinceValue = Math.max(0, Number(config.imap_sent_since_last_check || 0));
   const failureActionValue = IMAP_FAILURE_ACTIONS.includes(config.imap_failure_action)
     ? config.imap_failure_action
     : "none";
@@ -6763,22 +6751,30 @@ function renderImapSection(card, device, domain) {
       failureLine += notifyBeforeStop ? " · 텔레그램 알림 켜짐" : " · 텔레그램 알림 꺼짐";
     }
     summaryLines.push(failureLine);
-    summaryLines.push(`대기 시간: 단일 ${imapSingleDelayValue}초 · 배치 ${imapBatchDelayValue}초`);
+    summaryLines.push(`대기 시간: 단일 ${imapSingleDelayValue}초`);
+    summaryLines.push(`Sent 누적 확인: ${imapSentThresholdValue}건마다`);
     configMetaEl.textContent = summaryLines.join("\n");
     configMetaEl.title = "";
   }
-  if (anchorMetaEl) {
+  if (thresholdMetaEl) {
     if (!config.imap_enabled) {
-      anchorMetaEl.textContent = "알박기 확인: IMAP 비활성";
+      thresholdMetaEl.textContent = "Sent 누적 확인: IMAP 비활성";
+      thresholdMetaEl.title = "네이버 도메인에서 Sent 기준 확인을 사용할 수 있습니다.";
     } else {
-      anchorMetaEl.textContent = `알박기 확인: 허용 지연 ${imapAllowedValue}초 · 배치 대기 ${imapBatchDelayValue}초`;
+      const sentSinceLabel = imapSentSinceValue > 0 ? ` · 현재 누적 ${imapSentSinceValue}건` : "";
+      thresholdMetaEl.textContent = `Sent 누적 확인: ${imapSentThresholdValue}건마다${sentSinceLabel}`;
+      const resetInfo = config.imap_sent_last_reset_at
+        ? `마지막 초기화: ${formatDate(config.imap_sent_last_reset_at)}`
+        : "최근 IMAP 성공 시점 이후 누적";
+      thresholdMetaEl.title = `${resetInfo}. Sent가 기준에 도달하면 단일 대기 시간을 적용해 IMAP 확인을 실행하며, 성공 시 카운터를 초기화하고 실패 시 설정된 대응을 즉시 적용합니다.`;
     }
-    anchorMetaEl.title = "허용 지연 시간으로 단일 발송과 알박기 메일 모두를 확인하며, 내부적으로 필요한 만큼 자동으로 대기합니다.";
   }
   block.dataset.imapUsername = config.imap_username || "";
   block.dataset.imapAllowedLatency = String(imapAllowedValue);
   block.dataset.imapSingleDelay = String(imapSingleDelayValue);
-  block.dataset.imapBatchDelay = String(imapBatchDelayValue);
+  block.dataset.imapSentThreshold = String(imapSentThresholdValue);
+  block.dataset.imapSentSince = String(imapSentSinceValue);
+  block.dataset.imapSentLastReset = config.imap_sent_last_reset_at || "";
   block.dataset.imapFailureAction = failureActionValue;
   block.dataset.imapNotifyBeforeStopAll = config.imap_notify_before_stop_all ? "1" : "0";
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
@@ -7586,7 +7582,7 @@ function buildDeviceCard(device) {
         <button type="button" class="ghost danger small" data-action="imap-cancel-check" hidden>중지</button>
       </div>
       <div class="imap-meta" data-role="imapMeta">네이버 발송 시 도착 여부를 자동으로 확인합니다.</div>
-      <div class="imap-anchor-meta" data-role="imapAnchorMeta" title="허용 지연 시간으로 단일 발송과 알박기 메일을 자동 확인합니다.">알박기 확인: 사용 안 함</div>
+      <div class="imap-threshold-meta" data-role="imapThresholdMeta" title="Sent 누적 기준으로 IMAP 확인을 실행합니다.">Sent 누적 확인: 사용 안 함</div>
       <div class="imap-config-meta" data-role="imapConfigMeta">IMAP 설정: 사용 안 함</div>
       <div class="imap-actions" data-role="imapActions">
         <button type="button" class="secondary small" data-action="imap-delivery-check">도착 확인</button>
@@ -7918,7 +7914,7 @@ function openImapModal(card, device, domain, options = {}) {
   const usernameInput = document.getElementById("imapUsername");
   const passwordInput = document.getElementById("imapPassword");
   const singleDelayInput = document.getElementById("imapSingleDelaySeconds");
-  const batchDelayInput = document.getElementById("imapBatchDelaySeconds");
+  const sentThresholdInput = document.getElementById("imapSentThreshold");
   const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
   const failureActionSelect = document.getElementById("imapFailureAction");
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
@@ -7933,7 +7929,7 @@ function openImapModal(card, device, domain, options = {}) {
     passwordToggle.setAttribute("aria-pressed", "false");
   }
   const blockSingleDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapSingleDelay;
-  const blockBatchDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapBatchDelay;
+  const blockSentThreshold = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapSentThreshold;
   const blockAllowedLatency = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapAllowedLatency;
   const blockFailureAction = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapFailureAction;
   const blockNotifyRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapNotifyBeforeStopAll;
@@ -7951,13 +7947,13 @@ function openImapModal(card, device, domain, options = {}) {
     IMAP_DEFAULT_SINGLE_DELAY,
   );
   singleDelayInput.value = singleDelayValue;
-  const batchDelayValue = clampNumber(
-    blockBatchDelay ?? config.imap_batch_delay_seconds ?? IMAP_DEFAULT_BATCH_DELAY,
-    IMAP_SINGLE_MIN_DELAY,
-    IMAP_ALLOWED_MAX,
-    IMAP_DEFAULT_BATCH_DELAY,
+  const sentThresholdValue = clampNumber(
+    blockSentThreshold ?? config.imap_sent_threshold ?? IMAP_DEFAULT_SENT_THRESHOLD,
+    IMAP_SENT_THRESHOLD_MIN,
+    IMAP_SENT_THRESHOLD_MAX,
+    IMAP_DEFAULT_SENT_THRESHOLD,
   );
-  batchDelayInput.value = batchDelayValue;
+  sentThresholdInput.value = sentThresholdValue;
   if (failureActionSelect) {
     const normalizedFailure = (blockFailureAction || config.imap_failure_action || "").toString().toLowerCase();
     failureActionSelect.value = IMAP_FAILURE_ACTIONS.includes(normalizedFailure) ? normalizedFailure : "none";
@@ -8015,7 +8011,7 @@ async function submitImapModal() {
   const passwordInput = document.getElementById("imapPassword");
   const rawPassword = passwordInput.value;
   const singleDelayInput = document.getElementById("imapSingleDelaySeconds");
-  const batchDelayInput = document.getElementById("imapBatchDelaySeconds");
+  const sentThresholdInput = document.getElementById("imapSentThreshold");
   const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
   const failureActionSelect = document.getElementById("imapFailureAction");
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
@@ -8033,13 +8029,13 @@ async function submitImapModal() {
     IMAP_DEFAULT_SINGLE_DELAY,
   );
   singleDelayInput.value = singleDelayValue;
-  const batchDelayValue = clampNumber(
-    batchDelayInput.value,
-    IMAP_SINGLE_MIN_DELAY,
-    IMAP_ALLOWED_MAX,
-    IMAP_DEFAULT_BATCH_DELAY,
+  const sentThresholdValue = clampNumber(
+    sentThresholdInput.value,
+    IMAP_SENT_THRESHOLD_MIN,
+    IMAP_SENT_THRESHOLD_MAX,
+    IMAP_DEFAULT_SENT_THRESHOLD,
   );
-  batchDelayInput.value = batchDelayValue;
+  sentThresholdInput.value = sentThresholdValue;
   const failureActionValue = failureActionSelect && IMAP_FAILURE_ACTIONS.includes(failureActionSelect.value)
     ? failureActionSelect.value
     : "none";
@@ -8057,13 +8053,12 @@ async function submitImapModal() {
     enabled: true,
     username,
     single_delay_seconds: singleDelayValue,
-    batch_delay_seconds: batchDelayValue,
+    sent_threshold: sentThresholdValue,
     allowed_latency_seconds: allowedLatencyValue,
     failure_action: failureActionValue,
     notify_before_stop_all: Boolean(
       notifyCheckbox && !notifyCheckbox.disabled && notifyCheckbox.checked
     ),
-    delay_seconds: allowedLatencyValue,
   };
   if (rawPassword) {
     payload.password = rawPassword;
