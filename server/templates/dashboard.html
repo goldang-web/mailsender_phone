@@ -3251,6 +3251,53 @@ function formatDate(iso) {
   }
 }
 
+function formatRelativeTime(iso, options = {}) {
+  if (!iso) return "";
+  const { allowSeconds = true } = options;
+  let date;
+  try {
+    date = new Date(iso);
+    if (Number.isNaN(date.getTime())) return "";
+  } catch (err) {
+    return "";
+  }
+  const now = Date.now();
+  let diffMs = now - date.getTime();
+  if (diffMs < 0) diffMs = 0;
+  const diffSeconds = Math.floor(diffMs / 1000);
+  if (diffSeconds <= 0) {
+    return "방금 전";
+  }
+  if (diffSeconds < 60) {
+    if (!allowSeconds) {
+      return "1분 미만 전";
+    }
+    return `${diffSeconds}초 전`;
+  }
+  const diffMinutes = Math.floor(diffSeconds / 60);
+  if (diffMinutes < 60) {
+    return `${diffMinutes}분 전`;
+  }
+  const diffHours = Math.floor(diffMinutes / 60);
+  if (diffHours < 24) {
+    return `${diffHours}시간 전`;
+  }
+  const diffDays = Math.floor(diffHours / 24);
+  if (diffDays < 7) {
+    return `${diffDays}일 전`;
+  }
+  const diffWeeks = Math.floor(diffDays / 7);
+  if (diffWeeks < 4) {
+    return `${diffWeeks}주 전`;
+  }
+  const diffMonths = Math.floor(diffDays / 30);
+  if (diffMonths < 12) {
+    return `${diffMonths}개월 전`;
+  }
+  const diffYears = Math.floor(diffDays / 365);
+  return `${diffYears}년 전`;
+}
+
 function formatCount(value) {
   const numeric = Number(value) || 0;
   return numeric.toLocaleString("ko-KR");
@@ -6602,19 +6649,28 @@ function renderImapSection(card, device, domain) {
     statusText = "IMAP 확인 대기 중";
     if (lastStatus === "success") {
       statusClass = "success";
-      statusText = "최근 확인 성공";
+      const relativeLabel = formatRelativeTime(checkedAt || receivedAt, { allowSeconds: true });
+      statusText = relativeLabel ? `최근 확인 성공 (${relativeLabel})` : "최근 확인 성공";
       const latencyText = Number.isFinite(latencyValue) ? `${latencyValue.toFixed(1)}초` : "-";
-      metaText = `${receivedAt ? `도착: ${formatDate(receivedAt)}` : "최근 확인"} · 지연 ${latencyText}`;
+      const relativeMeta = relativeLabel ? ` · ${relativeLabel}` : "";
+      metaText = `${receivedAt ? `도착: ${formatDate(receivedAt)}` : "최근 확인"}${relativeMeta} · 지연 ${latencyText}`;
     } else if (lastStatus === "failure") {
       statusClass = "error";
-      statusText = "최근 확인 실패";
-      metaText = `${checkedAt ? formatDate(checkedAt) : "최근 확인"} · ${reasonText || "허용 지연 초과"}`;
+      const relativeLabel = formatRelativeTime(checkedAt, { allowSeconds: true });
+      statusText = relativeLabel ? `최근 확인 실패 (${relativeLabel})` : "최근 확인 실패";
+      const relativeMeta = relativeLabel ? ` · ${relativeLabel}` : "";
+      metaText = `${checkedAt ? formatDate(checkedAt) : "최근 확인"}${relativeMeta} · ${reasonText || "허용 지연 초과"}`;
     } else if (lastStatus === "error") {
       statusClass = "error";
-      statusText = "IMAP 확인 오류";
-      metaText = reasonText || "IMAP 확인 중 오류가 발생했습니다.";
+      const relativeLabel = formatRelativeTime(checkedAt, { allowSeconds: true });
+      statusText = relativeLabel ? `IMAP 확인 오류 (${relativeLabel})` : "IMAP 확인 오류";
+      const relativeMeta = relativeLabel ? `최근 확인 ${relativeLabel} · ` : "";
+      const description = reasonText || "IMAP 확인 중 오류가 발생했습니다.";
+      metaText = relativeMeta ? `${relativeMeta}${description}` : description;
     } else if (checkedAt) {
-      metaText = `최근 확인: ${formatDate(checkedAt)}`;
+      const relativeLabel = formatRelativeTime(checkedAt, { allowSeconds: true });
+      const relativeMeta = relativeLabel ? ` (${relativeLabel})` : "";
+      metaText = `최근 확인: ${formatDate(checkedAt)}${relativeMeta}`;
     } else {
       metaText = "발송 후 자동으로 도착 여부를 확인합니다.";
     }
