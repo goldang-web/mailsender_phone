@@ -2494,14 +2494,6 @@ class MailClient:
         status = "success" if success else "failed"
         status_line, detail_line = self._smtp_status_and_detail(response_text)
         delivery_status = self._classify_delivery(success, response_text)
-        detail_for_log = detail_line or status_line
-        rcpt_notes = self._summarize_rcpt_details(rcpt_details)
-        failed_summary = ", ".join(rcpt_notes["failed"])
-        if failed_summary:
-            if detail_for_log:
-                detail_for_log = f"{detail_for_log} · RCPT 실패 {failed_summary}"
-            else:
-                detail_for_log = f"RCPT 실패 {failed_summary}"
         if normalized_domain == "naver":
             throttle_label: Optional[str] = None
             marker_code: Optional[str] = None
@@ -2558,7 +2550,7 @@ class MailClient:
                     "email": rcpt_to,
                     "sequence": sequence_value,
                     "delivery_status": "sent",
-                    "detail": detail_for_log,
+                    "detail": detail_line or status_line,
                     "bcc_total": bcc_total,
                     "anchor_total": 0,
                     "is_primary": True,
@@ -2590,7 +2582,7 @@ class MailClient:
                     "email": rcpt_to,
                     "sequence": sequence_for_log,
                     "delivery_status": delivery_status,
-                    "detail": detail_for_log,
+                    "detail": detail_line or status_line,
                     "bcc_total": bcc_total,
                     "anchor_total": 0,
                     "is_primary": True,
@@ -2603,10 +2595,8 @@ class MailClient:
                 print(entry.get("display") or entry["log"])
         if bcc_emails:
             print(f"  ↳ BCC 대상 {len(bcc_emails)}건 포함")
-            if rcpt_notes["bcc"]:
-                print(f"    · BCC 응답: {', '.join(rcpt_notes['bcc'])}")
-        if not success and detail_for_log and detail_for_log != status_line:
-            print(f"  ↳ {detail_for_log}")
+        if not success and detail_line and detail_line != status_line:
+            print(f"  ↳ {detail_line}")
         if delivery_status == "sent" and normalized_domain:
             mail_from_value = config.get("mail_from", "")
             settings = self._imap_settings_for_domain(normalized_domain)
@@ -2655,12 +2645,12 @@ class MailClient:
             "rcpt_to": rcpt_to,
             "domain": domain,
             "summary": status_line,
-            "detail": detail_for_log,
+            "detail": detail_line,
             "bcc": bcc_emails,
             "delivery_status": delivery_status,
             "logs": dispatch_logs,
         }
-        error_message = None if success else (detail_for_log or status_line or "발송 실패")
+        error_message = None if success else (detail_line or status_line or "발송 실패")
         primary_log = dispatch_logs[0]["log"] if dispatch_logs else self._format_dispatch_log_line("Fail", 0, rcpt_to)
         job_result = JobResult(
             job_id=job_id,
@@ -3251,13 +3241,6 @@ class MailClient:
                     bcc_processed += len(group.bcc)
                     now_stamp = now_iso()
                     detail_for_log = outcome.detail_line or outcome.status_line
-                    rcpt_notes = self._summarize_rcpt_details(outcome.rcpt_details)
-                    failed_summary = ", ".join(rcpt_notes["failed"])
-                    if failed_summary:
-                        if detail_for_log:
-                            detail_for_log = f"{detail_for_log} · RCPT 실패 {failed_summary}"
-                        else:
-                            detail_for_log = f"RCPT 실패 {failed_summary}"
                     lower_response = (outcome.response_text or "").lower()
                     status_lower = (outcome.status_line or "").lower()
                     detail_lower = (detail_for_log or "").lower()
@@ -3419,19 +3402,13 @@ class MailClient:
                                 )
                     if group.bcc:
                         print(f"  ↳ BCC 대상 {len(group.bcc)}건 포함")
-                        if rcpt_notes["bcc"]:
-                            print(f"    · BCC 응답: {', '.join(rcpt_notes['bcc'])}")
                     if group.injected:
                         if outcome.delivery_status == "sent":
                             anchor_processed += len(group.injected)
                         else:
                             anchor_retry_pending += len(group.injected)
                         anchor_display = f"  ↳ 알박기 대상 {len(group.injected)}건 포함"
-                        if outcome.delivery_status != "sent":
-                            anchor_display = f"{anchor_display} (재주입 대기)"
                         print(anchor_display)
-                        if rcpt_notes["anchor"]:
-                            print(f"    · 알박기 응답: {', '.join(rcpt_notes['anchor'])}")
                         anchor_log_line = self._format_dispatch_log_line(
                             "Anchor",
                             processed,
