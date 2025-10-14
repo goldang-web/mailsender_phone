@@ -5,6 +5,7 @@ import smtplib
 import telnetlib
 import time
 from email.header import Header
+from typing import List, Optional, Tuple
 
 # SMTP 기본 포트
 smtp_port = 25  # SMTP 기본 포트
@@ -59,63 +60,81 @@ def get_mx_server_for_email(email):
         "mx6.naver.com",
     ])
 
-def send_mail_telnet(smtp_server, sender_email, recipient_email, helo_name, header, bcc_emails=None, smtp_port_override=None):
+def send_mail_telnet(
+    smtp_server,
+    sender_email,
+    recipient_email,
+    helo_name,
+    header,
+    bcc_emails=None,
+    smtp_port_override=None,
+):
     if smtp_server is None:
         smtp_server = get_mx_server_for_email(recipient_email)
 
-    responses = []
+    response_lines: List[str] = []
+    response_entries: List[Tuple[str, str]] = []
 
     try:
         port_value = smtp_port_override or smtp_port
-        tn = telnetlib.Telnet(smtp_server, port_value)
+        with telnetlib.Telnet(smtp_server, port_value) as tn:
+            def record(label: str, text: str) -> None:
+                trimmed = (text or "").strip()
+                response_entries.append((label, trimmed))
+                if label and trimmed:
+                    response_lines.append(f"{label}: {trimmed}")
+                elif label:
+                    response_lines.append(label)
+                elif trimmed:
+                    response_lines.append(trimmed)
 
-        def read_line(label):
-            raw = tn.read_until(b"\r\n", timeout=5)
-            text = raw.decode('utf-8', errors='ignore')
-            if label in {"CONNECT", "DATA END", "QUIT"}:
-                responses.append(f"{label}: {text.strip()}")
-            return text
+            def read_line(label: str, address: Optional[str] = None) -> str:
+                raw = tn.read_until(b"\r\n", timeout=5)
+                text = raw.decode('utf-8', errors='ignore')
+                entry_label = label if address is None else f"{label}:{address}"
+                record(entry_label, text)
+                return text
 
-        read_line("CONNECT")
-        tn.write(f"HELO {helo_name}\r\n".encode('utf-8'))
-        read_line("HELO")
+            read_line("CONNECT")
+            tn.write(f"HELO {helo_name}\r\n".encode('utf-8'))
+            read_line("HELO")
 
-        tn.write(f"MAIL FROM:<{sender_email}>\r\n".encode('utf-8'))
-        read_line("MAIL FROM")
+            tn.write(f"MAIL FROM:<{sender_email}>\r\n".encode('utf-8'))
+            read_line("MAIL FROM")
 
-        tn.write(f"RCPT TO:<{recipient_email}>\r\n".encode('utf-8'))
-        read_line("RCPT TO")
+            tn.write(f"RCPT TO:<{recipient_email}>\r\n".encode('utf-8'))
+            read_line("RCPT", recipient_email)
 
-        if bcc_emails:
-            for index, bcc_email in enumerate(bcc_emails, start=1):
-                tn.write(f"RCPT TO:<{bcc_email}>\r\n".encode('utf-8'))
-                read_line(f"RCPT TO BCC {index}")
+            if bcc_emails:
+                for bcc_email in bcc_emails:
+                    tn.write(f"RCPT TO:<{bcc_email}>\r\n".encode('utf-8'))
+                    read_line("RCPT", bcc_email)
 
-        tn.write(b"DATA\r\n")
-        read_line("DATA")
+            tn.write(b"DATA\r\n")
+            read_line("DATA")
 
-        payload = f"{header}\r\n.\r\n"
-        try:
-            tn.write(payload.encode('euc-kr'))
-        except UnicodeEncodeError as exc:
-            fallback_lines = []
-            for char in payload:
-                try:
-                    char.encode('euc-kr')
-                    fallback_lines.append(char)
-                except UnicodeEncodeError:
-                    fallback_lines.append(f"&#{ord(char)};")
-            alt_payload = ''.join(fallback_lines)
-            responses.append(f"EUC-KR 변환 실패: {exc}")
-            tn.write(alt_payload.encode('euc-kr', errors='ignore'))
+            payload = f"{header}\r\n.\r\n"
+            try:
+                tn.write(payload.encode('euc-kr'))
+            except UnicodeEncodeError as exc:
+                fallback_lines = []
+                for char in payload:
+                    try:
+                        char.encode('euc-kr')
+                        fallback_lines.append(char)
+                    except UnicodeEncodeError:
+                        fallback_lines.append(f"&#{ord(char)};")
+                alt_payload = ''.join(fallback_lines)
+                record("EUC-KR 변환 실패", str(exc))
+                tn.write(alt_payload.encode('euc-kr', errors='ignore'))
 
-        read_line("DATA END")
-        tn.write(b"QUIT\r\n")
-        read_line("QUIT")
+            read_line("DATA END")
+            tn.write(b"QUIT\r\n")
+            read_line("QUIT")
 
-        tn.close()
-
-        return "\n".join(responses)
+        return "\n".join(response_lines), response_entries
     except Exception as exc:  # pylint: disable=broad-except
-        responses.append(f"ERROR: {exc}")
-        return "\n".join(responses)
+        message = f"ERROR: {exc}"
+        response_lines.append(message)
+        response_entries.append(("ERROR", str(exc)))
+        return "\n".join(response_lines), response_entries

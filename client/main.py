@@ -33,7 +33,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.59"
+APP_VERSION = "0.0.60"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -394,6 +394,7 @@ class DispatchOutcome:
     status_line: str
     detail_line: Optional[str]
     sent_at: datetime
+    rcpt_details: Optional[List[Dict[str, object]]] = None
 
 
 @dataclass
@@ -885,6 +886,30 @@ class MailClient:
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
         username_value = normalize_imap_string(settings.get("username"))
         rcpt_username = normalize_imap_recipient(normalized, username_value)
+        if counter_mode == "manual":
+            base_counter = self._get_sent_counter(normalized)
+        else:
+            base_counter = counter_current if counter_current is not None else self._get_sent_counter(normalized)
+        updated_counter: Optional[int] = base_counter
+        if not bool(settings.get("enabled")):
+            detail_message = "IMAP 도착 확인이 비활성화되어 있어 확인 메일을 발송하지 않습니다."
+            self._log_imap_console(f"IMAP 확인 비활성화 상태 · 가드 플로우 생략 ({normalized or '-'})")
+            probe_payload: Optional[SentProbeResult] = None
+            if report_probe_failure:
+                probe_payload = SentProbeResult(
+                    success=False,
+                    sent_at=None,
+                    status_line="IMAP 비활성",
+                    detail_line=detail_message,
+                )
+            return ImapGuardOutcome(
+                probe=probe_payload,
+                future=None,
+                sent_window_count=updated_counter,
+                sent_threshold=threshold_value,
+                scheduled=False,
+                failure_report_enqueued=False,
+            )
         with self._sent_guard_lock:
             probe_result = self._run_sent_probe_mail(
                 domain=normalized,
@@ -893,16 +918,13 @@ class MailClient:
                 rcpt_to=rcpt_username,
             )
             probe_success = probe_result.success
-            updated_counter: Optional[int] = counter_current
             if counter_mode == "threshold":
-                base_counter = counter_current if counter_current is not None else self._get_sent_counter(normalized)
                 if probe_success:
                     updated_counter = max(0, base_counter + 1)
                 else:
                     updated_counter = max(0, threshold_value - 1)
                 self._set_sent_counter(normalized, updated_counter)
             elif counter_mode == "manual":
-                base_counter = self._get_sent_counter(normalized)
                 if probe_success:
                     updated_counter = max(0, base_counter + 1)
                     self._set_sent_counter(normalized, updated_counter)
@@ -1016,6 +1038,20 @@ class MailClient:
             settings["sent_last_reset_at"] = reset_timestamp
         self._imap_settings_dirty.add(normalized)
 
+    def _rollback_sent_counter(self, domain: str, amount: int, floor: int) -> int:
+        normalized = (domain or "").lower()
+        decrement = max(0, int(amount or 0))
+        if decrement <= 0:
+            return self._get_sent_counter(normalized)
+        floor_value = max(0, int(floor or 0))
+        stored_counter = self._get_sent_counter(normalized)
+        if stored_counter <= floor_value:
+            return stored_counter
+        new_counter = max(floor_value, stored_counter - decrement)
+        if new_counter != stored_counter:
+            self._set_sent_counter(normalized, new_counter)
+        return new_counter
+
     def _update_imap_settings_from_server(self, domain: str, payload: Dict[str, object]) -> None:
         if not isinstance(payload, dict):
             return
@@ -1125,7 +1161,7 @@ class MailClient:
             f"IMAP 발송 · 확인 메일 발송 시도 · RCPT {rcpt_to}"
         )
         try:
-            success, response_text, completed_at = send_via_telnet(
+            success, response_text, completed_at, _rcpt_details = send_via_telnet(
                 smtp_host=smtp_host,
                 smtp_port=smtp_port,
                 helo=helo_name,
@@ -1879,6 +1915,35 @@ class MailClient:
             return "block"
         return "failed"
 
+    @staticmethod
+    def _summarize_rcpt_details(entries: Optional[List[Dict[str, object]]]) -> Dict[str, List[str]]:
+        summary: Dict[str, List[str]] = {
+            "anchor": [],
+            "bcc": [],
+            "primary": [],
+            "failed": [],
+        }
+        if not entries:
+            return summary
+        for item in entries:
+            address = str(item.get("address") or "").strip() or "-"
+            code = str(item.get("code") or "").strip()
+            message_text = str(item.get("message") or "").strip()
+            success_flag = bool(item.get("success"))
+            label = f"{address}→{code or '-'}"
+            if not success_flag and message_text and message_text != code:
+                trimmed = message_text if len(message_text) <= 60 else f"{message_text[:57]}..."
+                label = f"{label} ({trimmed})"
+            if item.get("is_anchor"):
+                summary["anchor"].append(label)
+            elif item.get("is_bcc"):
+                summary["bcc"].append(label)
+            elif item.get("is_primary"):
+                summary["primary"].append(label)
+            if not success_flag:
+                summary["failed"].append(label)
+        return summary
+
     def _select_bcc_candidates(
         self,
         domain: str,
@@ -2415,7 +2480,7 @@ class MailClient:
         normalized_domain = (domain or "").lower()
         bcc_rows: List[sqlite3.Row] = []
         bcc_emails: List[str] = []
-        success, response_text, completed_at = send_via_telnet(
+        success, response_text, completed_at, rcpt_details = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
             smtp_port=int(config.get("smtp_port") or 25),
             helo=config.get("helo", ""),
@@ -2429,6 +2494,14 @@ class MailClient:
         status = "success" if success else "failed"
         status_line, detail_line = self._smtp_status_and_detail(response_text)
         delivery_status = self._classify_delivery(success, response_text)
+        detail_for_log = detail_line or status_line
+        rcpt_notes = self._summarize_rcpt_details(rcpt_details)
+        failed_summary = ", ".join(rcpt_notes["failed"])
+        if failed_summary:
+            if detail_for_log:
+                detail_for_log = f"{detail_for_log} · RCPT 실패 {failed_summary}"
+            else:
+                detail_for_log = f"RCPT 실패 {failed_summary}"
         if normalized_domain == "naver":
             throttle_label: Optional[str] = None
             marker_code: Optional[str] = None
@@ -2485,10 +2558,11 @@ class MailClient:
                     "email": rcpt_to,
                     "sequence": sequence_value,
                     "delivery_status": "sent",
-                    "detail": detail_line or status_line,
+                    "detail": detail_for_log,
                     "bcc_total": bcc_total,
                     "anchor_total": 0,
                     "is_primary": True,
+                    "rcpt_details": rcpt_details,
                 }
             )
             print(display_line)
@@ -2516,11 +2590,12 @@ class MailClient:
                     "email": rcpt_to,
                     "sequence": sequence_for_log,
                     "delivery_status": delivery_status,
-                    "detail": detail_line or status_line,
+                    "detail": detail_for_log,
                     "bcc_total": bcc_total,
                     "anchor_total": 0,
                     "is_primary": True,
                     "bcc_recipients": list(bcc_emails),
+                    "rcpt_details": rcpt_details,
                 }
             )
         if delivery_status != "sent":
@@ -2528,8 +2603,10 @@ class MailClient:
                 print(entry.get("display") or entry["log"])
         if bcc_emails:
             print(f"  ↳ BCC 대상 {len(bcc_emails)}건 포함")
-        if not success and detail_line and detail_line != status_line:
-            print(f"  ↳ {detail_line}")
+            if rcpt_notes["bcc"]:
+                print(f"    · BCC 응답: {', '.join(rcpt_notes['bcc'])}")
+        if not success and detail_for_log and detail_for_log != status_line:
+            print(f"  ↳ {detail_for_log}")
         if delivery_status == "sent" and normalized_domain:
             mail_from_value = config.get("mail_from", "")
             settings = self._imap_settings_for_domain(normalized_domain)
@@ -2578,12 +2655,12 @@ class MailClient:
             "rcpt_to": rcpt_to,
             "domain": domain,
             "summary": status_line,
-            "detail": detail_line,
+            "detail": detail_for_log,
             "bcc": bcc_emails,
             "delivery_status": delivery_status,
             "logs": dispatch_logs,
         }
-        error_message = None if success else (detail_line or status_line or "발송 실패")
+        error_message = None if success else (detail_for_log or status_line or "발송 실패")
         primary_log = dispatch_logs[0]["log"] if dispatch_logs else self._format_dispatch_log_line("Fail", 0, rcpt_to)
         job_result = JobResult(
             job_id=job_id,
@@ -2987,7 +3064,7 @@ class MailClient:
                     injected_emails = [email for email in (group.injected or []) if email]
                     if injected_emails:
                         bcc_emails.extend(injected_emails)
-                    success, response_text, completed_at = send_via_telnet(
+                    success, response_text, completed_at, rcpt_details = send_via_telnet(
                         smtp_host=config.get("smtp_host", ""),
                         smtp_port=int(config.get("smtp_port") or 25),
                         helo=config.get("helo", ""),
@@ -2995,6 +3072,7 @@ class MailClient:
                         rcpt_to=rcpt_to,
                         header_text=config.get("header", ""),
                         bcc_emails=bcc_emails,
+                        anchor_emails=injected_emails,
                     )
                     response_text = response_text or ""
                     sent_at = completed_at if isinstance(completed_at, datetime) else utc_now()
@@ -3007,6 +3085,7 @@ class MailClient:
                         status_line=status_line,
                         detail_line=detail_line,
                         sent_at=sent_at,
+                        rcpt_details=rcpt_details,
                     )
 
                 def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
@@ -3155,7 +3234,7 @@ class MailClient:
                 def process_future(future: Future, group: DispatchGroup) -> None:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
                     nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
-                    nonlocal anchor_retry_pending
+                    nonlocal anchor_retry_pending, current_sent_counter
                     try:
                         outcome = future.result()
                     except Exception as exc:  # pylint: disable=broad-except
@@ -3165,12 +3244,20 @@ class MailClient:
                             delivery_status="failed",
                             status_line="예외 발생",
                             detail_line=str(exc),
+                            rcpt_details=None,
                         )
                     recipients = [group.primary] + group.bcc
                     previous_statuses = [item.previous_status for item in recipients]
                     bcc_processed += len(group.bcc)
                     now_stamp = now_iso()
                     detail_for_log = outcome.detail_line or outcome.status_line
+                    rcpt_notes = self._summarize_rcpt_details(outcome.rcpt_details)
+                    failed_summary = ", ".join(rcpt_notes["failed"])
+                    if failed_summary:
+                        if detail_for_log:
+                            detail_for_log = f"{detail_for_log} · RCPT 실패 {failed_summary}"
+                        else:
+                            detail_for_log = f"RCPT 실패 {failed_summary}"
                     lower_response = (outcome.response_text or "").lower()
                     status_lower = (outcome.status_line or "").lower()
                     detail_lower = (detail_for_log or "").lower()
@@ -3269,6 +3356,7 @@ class MailClient:
                                 "is_primary": True,
                                 "bcc_recipients": [record.email for record in group.bcc],
                                 "anchor": list(group.injected),
+                                "rcpt_details": outcome.rcpt_details,
                             }
                         )
                         print(display_line)
@@ -3309,6 +3397,7 @@ class MailClient:
                                 "bcc_recipients": [record.email for record in group.bcc],
                                 "anchor": list(group.injected),
                                 "failed_recipients": recipient_emails,
+                                "rcpt_details": outcome.rcpt_details,
                             }
                         )
                         print(display_line)
@@ -3320,15 +3409,29 @@ class MailClient:
                         else:
                             failed_count += group_size_actual
                             last_error = detail_for_log
+                        if normalized == "naver":
+                            failure_decrement = group_size_actual + anchor_count
+                            if failure_decrement > 0:
+                                current_sent_counter = self._rollback_sent_counter(
+                                    normalized,
+                                    failure_decrement,
+                                    current_sent_counter,
+                                )
                     if group.bcc:
                         print(f"  ↳ BCC 대상 {len(group.bcc)}건 포함")
+                        if rcpt_notes["bcc"]:
+                            print(f"    · BCC 응답: {', '.join(rcpt_notes['bcc'])}")
                     if group.injected:
                         if outcome.delivery_status == "sent":
                             anchor_processed += len(group.injected)
                         else:
                             anchor_retry_pending += len(group.injected)
                         anchor_display = f"  ↳ 알박기 대상 {len(group.injected)}건 포함"
+                        if outcome.delivery_status != "sent":
+                            anchor_display = f"{anchor_display} (재주입 대기)"
                         print(anchor_display)
+                        if rcpt_notes["anchor"]:
+                            print(f"    · 알박기 응답: {', '.join(rcpt_notes['anchor'])}")
                         anchor_log_line = self._format_dispatch_log_line(
                             "Anchor",
                             processed,
@@ -3347,6 +3450,7 @@ class MailClient:
                                 "anchor_total": len(group.injected),
                                 "is_primary": False,
                                 "anchor": list(group.injected),
+                                "rcpt_details": outcome.rcpt_details,
                             }
                         )
                     if throttle_detected:
