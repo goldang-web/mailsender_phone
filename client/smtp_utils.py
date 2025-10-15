@@ -42,7 +42,7 @@ def send_via_telnet(
     anchor_emails: Optional[List[str]] = None,
     *,
     debug: Optional[bool] = None,
-) -> Tuple[bool, str, datetime, List[Dict[str, object]]]:
+) -> Tuple[bool, str, datetime, List[Dict[str, object]], Dict[str, str]]:
     try:
         telnet_mailer.READ_LINE_TIMEOUT = int(TELNET_READ_TIMEOUT_SECONDS)
     except Exception:
@@ -89,6 +89,7 @@ def send_via_telnet(
 
         rcpt_details = []
         data_end_code = ""
+        data_end_message = ""
         rcpt_success = True
         for label, message in response_entries:
             if not label:
@@ -117,6 +118,7 @@ def send_via_telnet(
             elif label == "DATA END":
                 detail_text = message or ""
                 data_end_code = detail_text.split()[0] if detail_text else ""
+                data_end_message = detail_text
         if not rcpt_details:
             # 구형 응답 포맷 대비: RCPT 라인 없이 250만 있는 경우
             rcpt_success = True
@@ -124,5 +126,8 @@ def send_via_telnet(
         success = rcpt_success and final_ack_success
         if success or host_candidate is None:
             break
-
-    return success, response_text, completed_at, rcpt_details
+    data_response = {
+        "code": data_end_code,
+        "message": data_end_message,
+    }
+    return success, response_text, completed_at, rcpt_details, data_response

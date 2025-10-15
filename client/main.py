@@ -44,7 +44,7 @@ DATA_DIR = BASE_DIR / "data"
 LOG_DIR = BASE_DIR / "logs"
 
 DOMAINS = ("naver", "daum")
-EMAIL_STATUSES = ("pending", "reserved", "sent", "block", "failed", "removed")
+EMAIL_STATUSES = ("pending", "reserved", "sent", "block", "failed", "nouser", "removed")
 SMTP_RECIPIENT_LIMIT = 25
 
 THROTTLE_MARKER_MESSAGES = {
@@ -113,7 +113,7 @@ CREATE TABLE IF NOT EXISTS emails (
     email TEXT NOT NULL UNIQUE,
     source_file TEXT,
     version INTEGER,
-    status TEXT CHECK(status IN ('pending','reserved','sent','block','failed','removed')) NOT NULL DEFAULT 'pending',
+    status TEXT CHECK(status IN ('pending','reserved','sent','block','failed','nouser','removed')) NOT NULL DEFAULT 'pending',
     priority INTEGER DEFAULT 100,
     reserved_by TEXT,
     reserved_at TEXT,
@@ -431,6 +431,8 @@ class DispatchOutcome:
     detail_line: Optional[str]
     sent_at: datetime
     rcpt_details: Optional[List[Dict[str, object]]] = None
+    data_response_code: str = ""
+    data_response_message: Optional[str] = None
 
 
 @dataclass
@@ -653,7 +655,11 @@ class MailClient:
                 break
             except requests.RequestException as exc:
                 last_exc = exc
-                print(f"[HTTP {method.upper()}] 요청 실패 (시도 {attempt}/{max_attempts}): {exc}")
+                if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+                    message = self._summarize_http_connection_error(method, url, exc)
+                else:
+                    message = f"HTTP {method.upper()} 요청 실패: {exc}"
+                print(message)
                 if attempt >= max_attempts or not self._should_retry(exc):
                     raise
                 self._reset_session()
@@ -678,6 +684,25 @@ class MailClient:
             "badstatusline",
         )
         return any(signature in message for signature in retry_signatures)
+
+    @staticmethod
+    def _summarize_http_connection_error(method: str, url: str, exc: requests.RequestException) -> str:
+        parsed = urlparse(url)
+        host = parsed.hostname or "-"
+        if parsed.scheme == "https":
+            default_port = 443
+        else:
+            default_port = 80
+        port = parsed.port or default_port
+        reason = "Connection error"
+        message_lower = str(exc).lower()
+        if "connection refused" in message_lower:
+            reason = "Connection refused"
+        elif "timed out" in message_lower or isinstance(exc, requests.exceptions.Timeout):
+            reason = "Timed out"
+        elif "name or service not known" in message_lower or "temporary failure in name resolution" in message_lower:
+            reason = "DNS failure"
+        return f"HTTP {method.upper()} 연결 실패: {reason} ({host}:{port})"
 
     def _get_cycle_entry(self, domain: str) -> Dict[str, object]:
         normalized = (domain or "").lower()
@@ -1200,7 +1225,7 @@ class MailClient:
             domain=normalized,
         )
         try:
-            success, response_text, completed_at, _rcpt_details = send_via_telnet(
+            success, response_text, completed_at, _rcpt_details, _data_response = send_via_telnet(
                 smtp_host=smtp_host,
                 smtp_port=smtp_port,
                 helo=helo_name,
@@ -2015,6 +2040,47 @@ class MailClient:
                 summary["failed"].append(label)
         return summary
 
+    @staticmethod
+    def _normalize_email_key(email: Optional[str]) -> str:
+        if email is None:
+            return ""
+        return str(email).strip().lower()
+
+    @staticmethod
+    def _extract_nouser_map(entries: Optional[List[Dict[str, object]]]) -> Dict[str, str]:
+        mapping: Dict[str, str] = {}
+        if not entries:
+            return mapping
+        for item in entries:
+            address_key = MailClient._normalize_email_key(item.get("address"))
+            if not address_key:
+                continue
+            code = str(item.get("code") or "").strip().lower()
+            message_text = str(item.get("message") or "").strip()
+            message_lower = message_text.lower()
+            if not code.startswith("550"):
+                continue
+            if "5.1.1" not in message_lower and "5.1.1" not in code:
+                continue
+            if "no such user" not in message_lower and "user unknown" not in message_lower:
+                continue
+            mapping[address_key] = message_text or item.get("code") or "550 5.1.1 No such user"
+        return mapping
+
+    @staticmethod
+    def _is_data_accepted(data_code: Optional[str], data_message: Optional[str]) -> bool:
+        code_value = str(data_code or "").strip()
+        message_value = str(data_message or "").strip()
+        code_upper = code_value.upper()
+        message_lower = message_value.lower()
+        if code_upper.startswith("250") and "2.0.0" in code_upper:
+            return True
+        if message_lower.startswith("250") and "2.0.0" in message_lower:
+            return True
+        if code_upper.startswith("250") and "2.0.0" in message_lower:
+            return True
+        return False
+
     def _select_bcc_candidates(
         self,
         domain: str,
@@ -2117,6 +2183,7 @@ class MailClient:
             "sent": totals.get("sent", 0),
             "failed": totals.get("failed", 0),
             "block": totals.get("block", 0),
+            "nouser": totals.get("nouser", 0),
             "removed": totals.get("removed", 0),
             "remaining": remaining,
             "cycle_completed": cycle_info.get("cycle_completed"),
@@ -2560,7 +2627,7 @@ class MailClient:
             candidate_bcc_entries = []
         bcc_emails = self._sanitize_email_list(candidate_bcc_entries, limit=30)
         bcc_rows: List[sqlite3.Row] = []
-        success, response_text, completed_at, rcpt_details = send_via_telnet(
+        success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
             smtp_port=int(config.get("smtp_port") or 25),
             helo=config.get("helo", ""),
@@ -2605,75 +2672,63 @@ class MailClient:
                 self._record_imap_throttle(normalized_domain, marker_code, throttle_label or detail_line)
         if bcc_rows and normalized_domain:
             self._update_email_rows(normalized_domain, bcc_rows, delivery_status, detail_line or status_line)
-        recipients = [rcpt_to] + bcc_emails
-        dispatch_logs: List[Dict[str, object]] = []
-        bcc_total = len(bcc_emails)
-        failure_reason = detail_line or status_line or "응답 없음"
-        if delivery_status == "sent":
-            total_increment = 1 + bcc_total
-            sequence_value = self._next_sent_sequence(normalized_domain or None, total_increment)
-            meta_items: List[Tuple[str, object]] = [("primary", 1)]
-            if bcc_total > 0:
-                meta_items.append(("bcc", bcc_total))
-            log_line = self._format_dispatch_log_line("Sent", sequence_value, rcpt_to, meta_items)
-            display_line = self._format_dispatch_display_line(
-                "Sent",
-                rcpt_to,
-                bcc_total,
-                0,
-                True,
-                self.device_name,
-                sequence=sequence_value,
-            )
-            dispatch_logs.append(
-                {
-                    "log": log_line,
-                    "display": display_line,
-                    "email": rcpt_to,
-                    "sequence": sequence_value,
-                    "delivery_status": "sent",
-                    "detail": detail_line or status_line,
-                    "bcc_total": bcc_total,
-                    "anchor_total": 0,
-                    "is_primary": True,
-                    "rcpt_details": rcpt_details,
-                }
-            )
-            print(display_line)
+
+        nouser_map = self._extract_nouser_map(rcpt_details)
+        nouser_emails_display = sorted(
+            {
+                str(entry.get("address") or "").strip()
+                for entry in (rcpt_details or [])
+                if self._normalize_email_key(entry.get("address")) in nouser_map
+            }
+        )
+        data_ok = self._is_data_accepted(
+            (data_response or {}).get("code"),
+            (data_response or {}).get("message"),
+        )
+        sequence_domain = (normalized_domain or (self.active_domain or "naver")).lower()
+        session_index = 1
+        recipient_keys: List[str] = []
+        primary_key = self._normalize_email_key(rcpt_to)
+        if primary_key:
+            recipient_keys.append(primary_key)
+        for email in bcc_emails:
+            key = self._normalize_email_key(email)
+            if key:
+                recipient_keys.append(key)
+        nouser_count = sum(1 for key in recipient_keys if key in nouser_map)
+        successful_recipient_count = len(recipient_keys) - nouser_count if data_ok else 0
+        session_success = successful_recipient_count > 0 and data_ok
+        delivery_status = "sent" if session_success else delivery_status
+        if session_success:
+            accumulated_total = self._next_sent_sequence(normalized_domain or None, successful_recipient_count)
         else:
-            label = "Block" if delivery_status == "block" else "Fail"
-            meta_items: List[Tuple[str, object]] = [("primary", 1)]
-            if bcc_total > 0:
-                meta_items.append(("bcc", bcc_total))
-            sequence_domain = (normalized_domain or (self.active_domain or "naver")).lower()
-            base_sequence = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
-            sequence_for_log = base_sequence + 1
-            log_line = self._format_dispatch_log_line(label, sequence_for_log, rcpt_to, meta_items)
-            display_line = self._format_dispatch_display_line(
-                label,
-                rcpt_to,
-                bcc_total,
-                0,
-                True,
-                self.device_name,
-                detail=failure_reason,
-            )
-            dispatch_logs.append(
-                {
-                    "log": log_line,
-                    "display": display_line,
-                    "email": rcpt_to,
-                    "sequence": sequence_for_log,
-                    "delivery_status": delivery_status,
-                    "detail": detail_line or status_line,
-                    "bcc_total": bcc_total,
-                    "anchor_total": 0,
-                    "is_primary": True,
-                    "bcc_recipients": list(bcc_emails),
-                    "rcpt_details": rcpt_details,
-                }
-            )
-            print(display_line)
+            accumulated_total = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
+        log_line = self._format_dispatch_log_line(
+            "Sent" if session_success else "Fail",
+            session_index,
+            accumulated_total,
+            include_anchor=False,
+        )
+        dispatch_logs: List[Dict[str, object]] = [
+            {
+                "log": log_line,
+                "display": log_line,
+                "email": rcpt_to,
+                "sequence": accumulated_total,
+                "delivery_status": delivery_status,
+                "detail": detail_line or status_line,
+                "bcc_total": len(bcc_emails),
+                "anchor_total": 0,
+                "is_primary": True,
+                "rcpt_details": rcpt_details,
+                "nouser_total": nouser_count,
+                "nouser_emails": nouser_emails_display,
+                "tags": ["nouser"] if nouser_count else [],
+                "bcc_recipients": list(bcc_emails),
+            }
+        ]
+        print(log_line)
+        status = "success" if session_success else "failed"
         if delivery_status == "sent" and normalized_domain and self._imap_enabled(normalized_domain):
             mail_from_value = config.get("mail_from", "")
             settings = self._imap_settings_for_domain(normalized_domain)
@@ -2726,9 +2781,16 @@ class MailClient:
             "bcc": bcc_emails,
             "delivery_status": delivery_status,
             "logs": dispatch_logs,
+            "nouser_total": nouser_count,
+            "nouser_emails": nouser_emails_display,
+            "data_response": data_response,
         }
-        error_message = None if success else (detail_line or status_line or "발송 실패")
-        primary_log = dispatch_logs[0]["log"] if dispatch_logs else self._format_dispatch_log_line("Fail", 0, rcpt_to)
+        error_message = None if session_success else (detail_line or status_line or "발송 실패")
+        primary_log = (
+            dispatch_logs[0]["log"]
+            if dispatch_logs
+            else self._format_dispatch_log_line("Fail", 1, max(0, int(self.sent_sequences.get(sequence_domain, 0))), include_anchor=False)
+        )
         job_result = JobResult(
             job_id=job_id,
             status=status,
@@ -2771,6 +2833,8 @@ class MailClient:
         bcc_processed = 0
         anchor_processed = 0
         anchor_retry_pending = 0
+        session_processed = 0
+        nouser_count = 0
         dispatched_db_total = 0
         progress_interval = min(3.0, max(1.0, float(self.interval or 3)))
         last_report_at = time.monotonic()
@@ -2797,6 +2861,7 @@ class MailClient:
                 "block": block_count,
                 "bcc": bcc_processed,
                 "anchor": anchor_processed,
+                "nouser": nouser_count,
                 "remaining": remaining_count,
                 "total": total_candidates,
                 "reserved": domain_totals.get("reserved", 0),
@@ -2818,12 +2883,13 @@ class MailClient:
             block_total = int(summary_snapshot.get("block") or 0)
             bcc_total = int(summary_snapshot.get("bcc") or 0)
             anchor_total = int(summary_snapshot.get("anchor") or 0)
+            nouser_total = int(summary_snapshot.get("nouser") or 0)
             remaining_total = int(summary_snapshot.get("remaining") or 0)
             cycles_completed = int(summary_snapshot.get("cycles_completed") or 0)
             message = (
                 f"{prefix} 처리={processed_count} 성공={sent_total} "
                 f"실패={failed_total} 차단={block_total} BCC={bcc_total} "
-                f"알박기={anchor_total} 잔여={remaining_total}"
+                f"알박기={anchor_total} NoUser={nouser_total} 잔여={remaining_total}"
             )
             if absolute_sent:
                 message = f"{message} · 누적={absolute_sent}"
@@ -3133,7 +3199,7 @@ class MailClient:
                     if injected_emails:
                         payload_bcc.extend(injected_emails)
                     payload_bcc.extend(bcc_recipients)
-                    success, response_text, completed_at, rcpt_details = send_via_telnet(
+                    success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
                         smtp_host=config.get("smtp_host", ""),
                         smtp_port=int(config.get("smtp_port") or 25),
                         helo=config.get("helo", ""),
@@ -3156,6 +3222,8 @@ class MailClient:
                         detail_line=detail_line,
                         sent_at=sent_at,
                         rcpt_details=rcpt_details,
+                        data_response_code=str((data_response or {}).get("code", "")),
+                        data_response_message=(data_response or {}).get("message"),
                     )
 
                 def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
@@ -3343,7 +3411,7 @@ class MailClient:
                 def process_future(future: Future, group: DispatchGroup) -> None:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
                     nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
-                    nonlocal anchor_retry_pending, current_sent_counter
+                    nonlocal anchor_retry_pending, current_sent_counter, session_processed, nouser_count
                     try:
                         outcome = future.result()
                     except Exception as exc:  # pylint: disable=broad-except
@@ -3413,14 +3481,47 @@ class MailClient:
                         throttle_detected = False
                         matched_message = recipient_limit_message
                     error_text = None if outcome.delivery_status == "sent" else (detail_for_log or outcome.status_line or "")[-500:]
+                    session_processed += 1
+                    group_size_actual = len(recipients)
+                    recipient_emails = [record.email for record in recipients]
+                    bcc_count = len(group.bcc)
+                    anchor_count = len(group.injected)
+                    nouser_map = self._extract_nouser_map(outcome.rcpt_details)
+                    nouser_emails_display = [
+                        record.email
+                        for record in recipients
+                        if self._normalize_email_key(record.email) in nouser_map
+                    ]
+                    data_ok = self._is_data_accepted(
+                        outcome.data_response_code,
+                        outcome.data_response_message,
+                    )
+                    recipient_keys = [self._normalize_email_key(record.email) for record in recipients]
+                    db_nouser_flags = [key in nouser_map for key in recipient_keys]
+                    db_nouser_count = sum(1 for flag in db_nouser_flags if flag)
+                    nouser_count += db_nouser_count
+                    anchor_success_count = anchor_count if data_ok else 0
+                    anchor_retry_count = anchor_count - anchor_success_count
+                    db_successful_recipient_count = 0
+
                     for prev_status in previous_statuses:
                         status_key = (prev_status or "pending").lower()
                         domain_totals[status_key] = max(0, domain_totals.get(status_key, 0) - 1)
-                    for record in recipients:
-                        persist_status = outcome.delivery_status
-                        if persist_status == "block" or throttle_detected:
+
+                    for record, key, is_nouser in zip(recipients, recipient_keys, db_nouser_flags):
+                        if is_nouser:
+                            persist_status = "nouser"
+                            last_error_value = (nouser_map.get(key) or "550 5.1.1 No such user")[:500]
+                        elif throttle_detected or outcome.delivery_status == "block":
                             persist_status = "pending"
-                        status_key = (persist_status or "pending").lower()
+                            last_error_value = error_text
+                        elif data_ok:
+                            persist_status = "sent"
+                            last_error_value = None
+                            db_successful_recipient_count += 1
+                        else:
+                            persist_status = "failed"
+                            last_error_value = error_text
                         conn.execute(
                             """
                             UPDATE emails
@@ -3435,146 +3536,86 @@ class MailClient:
                             (
                                 persist_status,
                                 now_stamp,
-                                None if outcome.delivery_status == "sent" else error_text,
+                                last_error_value,
                                 record.id,
                             ),
                         )
-                        domain_totals[status_key] = domain_totals.get(status_key, 0) + 1
+                        domain_totals[persist_status] = domain_totals.get(persist_status, 0) + 1
                     conn.commit()
-                    group_size_actual = len(recipients)
+
                     processed += group_size_actual
-                    dispatch_logs: List[Dict[str, object]] = []
-                    recipient_emails = [record.email for record in recipients]
-                    bcc_count = len(group.bcc)
-                    anchor_count = len(group.injected)
-                    anchor_success_count = anchor_count if outcome.delivery_status == "sent" else 0
-                    anchor_retry_count = 0 if outcome.delivery_status == "sent" else anchor_count
-                    primary_email = recipient_emails[0] if recipient_emails else "-"
+                    success_increment = db_successful_recipient_count + anchor_success_count
+                    session_success = data_ok and success_increment > 0
+                    delivery_status_payload = (
+                        "sent"
+                        if session_success
+                        else ("throttle" if throttle_detected else outcome.delivery_status)
+                    )
                     failure_detail = detail_for_log or outcome.status_line or "응답 없음"
-                    if outcome.delivery_status == "sent":
-                        sent_count += group_size_actual
-                        sequence = self._next_sent_sequence(normalized, group_size_actual)
-                        meta_items: List[Tuple[str, object]] = [("primary", 1)]
-                        if bcc_count > 0:
-                            meta_items.append(("bcc", bcc_count))
-                        if anchor_count > 0:
-                            meta_items.append(("anchor", anchor_count))
-                        log_line = self._format_dispatch_log_line("Sent", sequence, primary_email, meta_items)
-                        display_line = self._format_dispatch_display_line(
-                            "Sent",
-                            primary_email,
-                            bcc_count,
-                            anchor_count,
-                            True,
-                            self.device_name,
-                            sequence=sequence,
-                        )
-                        dispatch_logs.append(
-                            {
-                                "log": log_line,
-                                "display": display_line,
-                                "email": primary_email,
-                                "sequence": sequence,
-                                "delivery_status": outcome.delivery_status,
-                                "detail": detail_for_log,
-                                "bcc_total": bcc_count,
-                                "anchor_total": anchor_count,
-                                "is_primary": True,
-                                "bcc_recipients": [record.email for record in group.bcc],
-                                "anchor": list(group.injected),
-                                "anchor_success": anchor_success_count,
-                                "anchor_retry": anchor_retry_count,
-                                "deferred_bcc": group.deferred_bcc,
-                                "rcpt_details": outcome.rcpt_details,
-                            }
-                        )
-                        print(display_line)
-                        if normalized == "naver":
-                            total_increment = group_size_actual + anchor_success_count
-                            register_sent_success(outcome.sent_at, detail_for_log, total_increment)
+
+                    if session_success:
+                        sent_count += db_successful_recipient_count
+                        sequence_total = self._next_sent_sequence(normalized, success_increment)
                     else:
-                        is_block = outcome.delivery_status == "block"
-                        label = "Block" if is_block else "Fail"
-                        current_sequence = max(0, int(self.sent_sequences.get(normalized, 0)))
-                        sequence_for_log = current_sequence + 1
-                        meta_items: List[Tuple[str, object]] = [("primary", 1)]
-                        if bcc_count > 0:
-                            meta_items.append(("bcc", bcc_count))
-                        if anchor_count > 0:
-                            meta_items.append(("anchor", anchor_count))
-                        log_line = self._format_dispatch_log_line(label, sequence_for_log, primary_email, meta_items)
-                        display_line = self._format_dispatch_display_line(
-                            label,
-                            primary_email,
-                            bcc_count,
-                            anchor_count,
-                            True,
-                            self.device_name,
-                            detail=failure_detail,
-                        )
-                        dispatch_logs.append(
-                            {
-                                "log": log_line,
-                                "display": display_line,
-                                "email": primary_email,
-                                "sequence": sequence_for_log,
-                                "delivery_status": "throttle" if throttle_detected else outcome.delivery_status,
-                                "detail": failure_detail,
-                                "bcc_total": bcc_count,
-                                "anchor_total": anchor_count,
-                                "is_primary": True,
-                                "bcc_recipients": [record.email for record in group.bcc],
-                                "anchor": list(group.injected),
-                                "anchor_success": anchor_success_count,
-                                "anchor_retry": anchor_retry_count,
-                                "deferred_bcc": group.deferred_bcc,
-                                "failed_recipients": recipient_emails,
-                                "rcpt_details": outcome.rcpt_details,
-                            }
-                        )
-                        print(display_line)
-                        if is_block:
-                            block_count += group_size_actual
-                            last_error = failure_detail
+                        sequence_total = max(0, int(self.sent_sequences.get(normalized, 0)))
+                        effective_failed = max(0, group_size_actual - db_nouser_count)
+                        if outcome.delivery_status == "block":
+                            block_count += effective_failed
                         else:
-                            failed_count += group_size_actual
-                            last_error = failure_detail
-                        if normalized == "naver":
-                            failure_decrement = group_size_actual + anchor_count
-                            if failure_decrement > 0:
-                                current_sent_counter = self._rollback_sent_counter(
-                                    normalized,
-                                    failure_decrement,
-                                    current_sent_counter,
-                                )
-                    if group.injected:
-                        if outcome.delivery_status == "sent":
+                            failed_count += effective_failed
+                        last_error = failure_detail
+
+                    if session_success and normalized == "naver":
+                        register_sent_success(outcome.sent_at, detail_for_log, success_increment)
+                    elif not session_success and normalized == "naver":
+                        failure_decrement = max(0, (group_size_actual - db_nouser_count) + anchor_count)
+                        if failure_decrement > 0:
+                            current_sent_counter = self._rollback_sent_counter(
+                                normalized,
+                                failure_decrement,
+                                current_sent_counter,
+                            )
+
+                    if anchor_count:
+                        if session_success:
                             anchor_processed += anchor_success_count
                         elif anchor_retry_count > 0:
                             anchor_retry_pending += anchor_retry_count
-                        anchor_log_line = self._format_dispatch_log_line(
-                            "Anchor",
-                            processed,
-                            group.injected[0] if group.injected else None,
-                            [("count", len(group.injected))],
-                        )
-                        dispatch_logs.append(
-                            {
-                                "log": anchor_log_line,
-                                "display": anchor_log_line,
-                                "email": group.injected[0] if group.injected else None,
-                                "sequence": processed,
-                                "delivery_status": outcome.delivery_status,
-                                "detail": detail_for_log,
-                                "bcc_total": 0,
-                                "anchor_total": len(group.injected),
-                                "is_primary": False,
-                                "anchor": list(group.injected),
-                                "anchor_success": anchor_success_count,
-                                "anchor_retry": anchor_retry_count,
-                                "rcpt_details": outcome.rcpt_details,
-                            }
-                        )
+
+                    log_line = self._format_dispatch_log_line(
+                        "Sent" if session_success else "Fail",
+                        session_processed,
+                        sequence_total,
+                        include_anchor=anchor_count > 0,
+                    )
+                    dispatch_logs: List[Dict[str, object]] = [
+                        {
+                            "log": log_line,
+                            "display": log_line,
+                            "email": recipient_emails[0] if recipient_emails else None,
+                            "sequence": sequence_total,
+                            "delivery_status": delivery_status_payload,
+                            "detail": detail_for_log,
+                            "bcc_total": bcc_count,
+                            "anchor_total": anchor_count,
+                            "is_primary": True,
+                            "bcc_recipients": [record.email for record in group.bcc],
+                            "anchor": list(group.injected),
+                            "anchor_success": anchor_success_count,
+                            "anchor_retry": anchor_retry_count,
+                            "deferred_bcc": group.deferred_bcc,
+                            "failed_recipients": [
+                                record.email
+                                for record, is_nouser in zip(recipients, db_nouser_flags)
+                                if not session_success and not is_nouser
+                            ],
+                            "rcpt_details": outcome.rcpt_details,
+                            "nouser_total": db_nouser_count,
+                            "nouser_emails": nouser_emails_display,
+                            "tags": (["nouser"] if db_nouser_count else []),
+                        }
+                    ]
+                    print(log_line)
                     if throttle_detected:
                         throttle_notice = matched_message or "네이버 발송 제한 응답 감지"
                         info_message = f"{throttle_notice} · IP 변경 시도"
@@ -4158,75 +4199,25 @@ class MailClient:
         timestamp = now_iso().replace("T", " ")
         return f"{label} {target} {status_segment} {timestamp}"
 
-    @staticmethod
     def _format_dispatch_log_line(
+        self,
         label: str,
-        sequence: int,
-        email: Optional[str],
-        meta_items: Optional[Iterable[Tuple[str, object]]] = None,
+        batch_index: int,
+        accumulated_total: int,
+        *,
+        include_anchor: bool = False,
     ) -> str:
-        safe_label = (label or "").strip() or "Sent"
-        safe_sequence = max(0, int(sequence or 0))
-        target = (email or "").strip() or "-"
-        timestamp = time.strftime("%m-%d %H:%M:%S", time.localtime())
-        segments = [safe_label, str(safe_sequence), target, timestamp]
-        if meta_items:
-            for key, value in meta_items:
-                key_text = str(key or "").strip()
-                if not key_text:
-                    continue
-                if value is None:
-                    continue
-                segments.append(f"{key_text}={value}")
-        return "|".join(segments)
+        safe_label = "Sent" if (label or "").strip().lower() == "sent" else "Fail"
+        batch_number = max(1, int(batch_index or 1))
+        total_value = max(0, int(accumulated_total or 0))
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        device_label = (self.device_id or self.device_name or "-").strip() or "-"
+        line = f"{safe_label}({batch_number}/{total_value}) | {timestamp} | {device_label}"
+        if include_anchor:
+            line += " | 알박기 포함"
+        return line
 
     @staticmethod
-    def _format_dispatch_display_line(
-        label: str,
-        email: Optional[str],
-        bcc_total: int,
-        anchor_total: int,
-        is_primary: bool,
-        device_name: Optional[str] = None,
-        sequence: Optional[int] = None,
-        detail: Optional[str] = None,
-    ) -> str:
-        safe_label = (label or "").strip() or "Sent"
-        target = (email or "").strip() or "-"
-        label_display = safe_label
-        device_label = (device_name or "").strip()
-        is_failure = safe_label.lower() in {"fail", "block"}
-        detail_segment = (detail or "").strip()
-        if is_failure:
-            display = safe_label
-            if target and target != "-":
-                display += f" - {target}"
-            extra_markers: List[str] = []
-            if is_primary and bcc_total > 0:
-                extra_markers.append(f"외 {bcc_total}건")
-            if is_primary and anchor_total > 0:
-                extra_markers.append(f"알박기 {anchor_total}건")
-            if extra_markers:
-                display += f" ({' + '.join(extra_markers)})"
-            if detail_segment:
-                display += f" · {detail_segment}"
-            if device_label:
-                display += f" | {device_label}"
-            return display
-        if sequence is not None and sequence > 0 and safe_label.lower() == "sent":
-            label_display = f"{safe_label}({sequence})"
-        display = f"{label_display} - {target}"
-        if is_primary:
-            if bcc_total > 0:
-                display += f" 외 {bcc_total}"
-            if anchor_total > 0:
-                display += f" + 알박기 {anchor_total}"
-        if detail_segment and safe_label.lower() != "sent":
-            display += f" · {detail_segment}"
-        if device_label:
-            display += f" | {device_label}"
-        return display
-
     def _build_sqlite_from_emails(self, db_path: Path, emails: List[str], source_name: str) -> None:
         if db_path.exists():
             db_path.unlink()
