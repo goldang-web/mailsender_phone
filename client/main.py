@@ -536,6 +536,11 @@ class MailClient:
             except (TypeError, ValueError):
                 sent_since_last_check = 0
             sent_since_last_check = max(0, sent_since_last_check)
+            try:
+                last_threshold_multiple = int(entry.get("last_threshold_multiple") or 0)
+            except (TypeError, ValueError):
+                last_threshold_multiple = 0
+            last_threshold_multiple = max(0, last_threshold_multiple)
             self.imap_settings[domain] = {
                 "enabled": bool(entry.get("enabled")),
                 "username": normalize_imap_string(entry.get("username")),
@@ -547,8 +552,10 @@ class MailClient:
                 "sent_threshold": sent_threshold,
                 "sent_since_last_check": sent_since_last_check,
                 "sent_last_reset_at": entry.get("sent_last_reset_at"),
+                "last_threshold_multiple": last_threshold_multiple,
             }
         self._imap_sent_counters: Dict[str, int] = {}
+        self._imap_threshold_multiples: Dict[str, int] = {}
         for domain in DOMAINS:
             try:
                 self._imap_sent_counters[domain] = max(
@@ -557,6 +564,13 @@ class MailClient:
                 )
             except (TypeError, ValueError):
                 self._imap_sent_counters[domain] = 0
+            try:
+                self._imap_threshold_multiples[domain] = max(
+                    0,
+                    int(self.imap_settings.get(domain, {}).get("last_threshold_multiple") or 0),
+                )
+            except (TypeError, ValueError):
+                self._imap_threshold_multiples[domain] = 0
         self._imap_settings_dirty: Set[str] = set()
         self._schedule_events: Dict[str, Dict[str, object]] = {}
         self.session = requests.Session()
@@ -812,6 +826,11 @@ class MailClient:
             except (TypeError, ValueError):
                 sent_since = 0
             sent_since = max(0, sent_since)
+            try:
+                last_multiple = int(settings.get("last_threshold_multiple") or 0)
+            except (TypeError, ValueError):
+                last_multiple = 0
+            last_multiple = max(0, last_multiple)
             serialized[domain] = {
                 "enabled": bool(settings.get("enabled")),
                 "username": normalize_imap_string(settings.get("username")),
@@ -830,6 +849,7 @@ class MailClient:
                 "sent_threshold": sent_threshold,
                 "sent_since_last_check": sent_since,
                 "sent_last_reset_at": settings.get("sent_last_reset_at"),
+                "last_threshold_multiple": last_multiple,
             }
         return serialized
 
@@ -1000,7 +1020,7 @@ class MailClient:
                 if probe_success:
                     updated_counter = max(0, base_counter + 1)
                 else:
-                    updated_counter = max(0, threshold_value - 1)
+                    updated_counter = max(0, base_counter)
                 self._set_sent_counter(normalized, updated_counter)
             elif counter_mode == "manual":
                 if probe_success:
@@ -1091,6 +1111,7 @@ class MailClient:
                 "sent_threshold": IMAP_DEFAULT_SENT_THRESHOLD,
                 "sent_since_last_check": 0,
                 "sent_last_reset_at": None,
+                "last_threshold_multiple": 0,
             }
             self.imap_settings[normalized] = settings
         return settings
@@ -1193,6 +1214,19 @@ class MailClient:
             self._set_sent_counter(normalized, new_counter)
         return new_counter
 
+    def _get_last_threshold_multiple(self, domain: str) -> int:
+        normalized = (domain or "").lower()
+        return max(0, int(self._imap_threshold_multiples.get(normalized, 0)))
+
+    def _set_last_threshold_multiple(self, domain: str, multiple: int) -> None:
+        normalized = (domain or "").lower()
+        value = max(0, int(multiple or 0))
+        self._imap_threshold_multiples[normalized] = value
+        settings = self._imap_settings_for_domain(normalized)
+        if settings.get("last_threshold_multiple") != value:
+            settings["last_threshold_multiple"] = value
+            self._imap_settings_dirty.add(normalized)
+
     def _update_imap_settings_from_server(self, domain: str, payload: Dict[str, object]) -> None:
         if not isinstance(payload, dict):
             return
@@ -1231,6 +1265,13 @@ class MailClient:
         settings["sent_since_last_check"] = max(0, sent_since_value)
         settings["sent_last_reset_at"] = payload.get("imap_sent_last_reset_at")
         self._imap_sent_counters[normalized] = settings["sent_since_last_check"]
+        try:
+            last_multiple = int(payload.get("imap_last_threshold_multiple") or settings.get("last_threshold_multiple") or 0)
+        except (TypeError, ValueError):
+            last_multiple = 0
+        last_multiple = max(0, last_multiple)
+        settings["last_threshold_multiple"] = last_multiple
+        self._imap_threshold_multiples[normalized] = last_multiple
         self._imap_settings_dirty.add(normalized)
         settings["last_status"] = payload.get("imap_last_status")
         settings["last_checked_at"] = payload.get("imap_last_checked_at")
@@ -3000,6 +3041,7 @@ class MailClient:
         current_sent_counter = self._get_sent_counter(normalized)
         threshold_check_request: Optional[Dict[str, object]] = None
         threshold_check_future: Optional[Future] = None
+        threshold_pending_multiple: Optional[int] = None
         anchor_email = self._sanitize_anchor_email(config.get("anchor_email"))
         anchor_enabled = bool(anchor_interval and anchor_email)
 
@@ -3470,38 +3512,53 @@ class MailClient:
                     settings_local = self._imap_settings_for_domain(normalized)
                     threshold_value = self._current_sent_threshold(normalized)
                     self._set_sent_counter(normalized, current_sent_counter)
-                    if current_sent_counter >= threshold_value and threshold_check_request is None:
-                        self._log_imap_console(
-                            f"Sent 확인 기준 도달 · 누적 {current_sent_counter}건",
-                            domain=normalized,
-                        )
-                        threshold_check_request = {
-                            "sent_at": sent_at,
-                            "detail": detail_text,
-                            "mail_from": mail_from_value,
-                            "allowed_latency": sanitize_imap_allowed_latency(
-                                settings_local.get("allowed_latency_seconds"),
-                                default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
-                            ),
-                            "single_delay": sanitize_imap_delay(
-                                settings_local.get("single_delay_seconds"),
-                                default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
-                                minimum=0,
-                            ),
-                            "threshold": threshold_value,
-                            "sent_count": current_sent_counter,
-                            "username": normalize_imap_string(settings_local.get("username")),
-                            "header_from": header_from_value,
-                            "smtp": {
-                                "smtp_host": config.get("smtp_host"),
-                                "smtp_port": config.get("smtp_port"),
-                                "helo": config.get("helo"),
-                                "header": config.get("header"),
-                            },
-                        }
+                    if threshold_value <= 0:
+                        return
+                    next_multiple = self._get_last_threshold_multiple(normalized) + 1
+                    target_value = threshold_value * next_multiple
+                    if current_sent_counter < target_value:
+                        return
+                    if threshold_check_request is not None:
+                        return
+                    current_multiple = max(1, current_sent_counter // max(1, threshold_value))
+                    session_success = current_sent_counter
+                    global_success = max(0, int(self.sent_sequences.get(normalized, 0)))
+                    self._emit_imap_section(
+                        "IMAP 임계치 도달",
+                        [f"배수 {next_multiple} 도달 · 현재 성공 {session_success}건"],
+                        domain=normalized,
+                    )
+                    threshold_check_request = {
+                        "sent_at": sent_at,
+                        "detail": detail_text,
+                        "mail_from": mail_from_value,
+                        "allowed_latency": sanitize_imap_allowed_latency(
+                            settings_local.get("allowed_latency_seconds"),
+                            default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
+                        ),
+                        "single_delay": sanitize_imap_delay(
+                            settings_local.get("single_delay_seconds"),
+                            default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                            minimum=0,
+                        ),
+                        "threshold": threshold_value,
+                        "sent_count": session_success,
+                        "sequence_total": global_success,
+                        "username": normalize_imap_string(settings_local.get("username")),
+                        "header_from": header_from_value,
+                        "target_multiple": next_multiple,
+                        "current_multiple": current_multiple,
+                        "reason": f"threshold reached ({target_value})",
+                        "smtp": {
+                            "smtp_host": config.get("smtp_host"),
+                            "smtp_port": config.get("smtp_port"),
+                            "helo": config.get("helo"),
+                            "header": config.get("header"),
+                        },
+                    }
 
                 def ensure_threshold_check() -> None:
-                    nonlocal threshold_check_request, threshold_check_future, current_sent_counter
+                    nonlocal threshold_check_request, threshold_check_future, current_sent_counter, threshold_pending_multiple
                     if threshold_check_future is not None:
                         return
                     if not threshold_check_request:
@@ -3514,6 +3571,61 @@ class MailClient:
                     request = threshold_check_request
                     threshold_check_request = None
                     threshold_value = int(request.get("threshold") or self._current_sent_threshold(normalized))
+                    if threshold_value <= 0:
+                        return
+                    try:
+                        target_multiple = int(request.get("target_multiple") or 1)
+                    except (TypeError, ValueError):
+                        target_multiple = 1
+                    target_multiple = max(1, target_multiple)
+                    try:
+                        session_success = int(request.get("sent_count") or current_sent_counter)
+                    except (TypeError, ValueError):
+                        session_success = current_sent_counter
+                    try:
+                        global_success = int(request.get("sequence_total") or self.sent_sequences.get(normalized, 0))
+                    except (TypeError, ValueError):
+                        global_success = int(self.sent_sequences.get(normalized, 0) or 0)
+                    reason_text = str(request.get("reason") or f"threshold reached ({threshold_value * target_multiple})")
+                    settings_snapshot = self._imap_settings_for_domain(normalized)
+                    allowed_latency_value = sanitize_imap_allowed_latency(
+                        request.get("allowed_latency"),
+                        default=settings_snapshot.get("allowed_latency_seconds"),
+                    )
+                    delay_value = sanitize_imap_delay(
+                        request.get("single_delay"),
+                        default=settings_snapshot.get("single_delay_seconds"),
+                        minimum=0,
+                    )
+                    failure_action_value = sanitize_imap_failure_action(settings_snapshot.get("failure_action"))
+                    failure_label = failure_action_value
+                    if failure_label in {"stop_all", "stop_device"}:
+                        failure_label = f"{failure_label} + ip_change"
+                    username_candidate = normalize_imap_recipient(
+                        normalized,
+                        request.get("username") or settings_snapshot.get("username"),
+                    )
+                    self._emit_imap_section(
+                        "IMAP 설정",
+                        [
+                            f"계정: {username_candidate or '-'}",
+                            f"확인 간격: {threshold_value}건",
+                            f"확인 대기: {delay_value}초",
+                            f"허용 지연: {allowed_latency_value}초",
+                            f"실패 대응: {failure_label}",
+                        ],
+                        domain=normalized,
+                    )
+                    self._emit_imap_section(
+                        "IMAP 확인 대기",
+                        [f"현재 성공: {session_success}건 / 누적 성공: {global_success}건"],
+                        domain=normalized,
+                    )
+                    self._emit_imap_section(
+                        "IMAP 확인 시도",
+                        [f"사유: {reason_text}"],
+                        domain=normalized,
+                    )
                     mail_from_candidate = str(request.get("mail_from") or mail_from_value)
                     raw_header_from = request.get("header_from")
                     if isinstance(raw_header_from, str) and raw_header_from.strip():
@@ -3531,8 +3643,8 @@ class MailClient:
                         header_from=header_from_candidate,
                         has_anchor=False,
                         context_reason=str(request.get("detail") or "Sent 기준 확인"),
-                        delay_before_check=float(request.get("single_delay") or 0),
-                        allowed_delay=int(request.get("allowed_latency") or 0),
+                        delay_before_check=float(delay_value),
+                        allowed_delay=int(allowed_latency_value),
                         smtp_context=smtp_context,
                         force=False,
                         counter_mode="threshold",
@@ -3540,49 +3652,115 @@ class MailClient:
                         counter_threshold=threshold_value,
                         report_probe_failure=True,
                     )
-                    if not outcome.scheduled:
-                        fallback_counter = outcome.sent_window_count if outcome.sent_window_count is not None else max(0, threshold_value - 1)
-                        current_sent_counter = fallback_counter
-                        return
                     current_sent_counter = outcome.sent_window_count if outcome.sent_window_count is not None else current_sent_counter
+                    if not outcome.scheduled:
+                        failure_lines: List[str] = []
+                        probe = outcome.probe
+                        if probe:
+                            if probe.throttle_marker:
+                                marker_line = f"제한 응답: {probe.throttle_marker}"
+                                if probe.throttle_detail and probe.throttle_detail.lower() not in marker_line.lower():
+                                    marker_line = f"{marker_line} ({probe.throttle_detail})"
+                                failure_lines.append(marker_line)
+                            if probe.status_line:
+                                failure_lines.append(probe.status_line)
+                            if probe.detail_line and probe.detail_line not in failure_lines:
+                                failure_lines.append(probe.detail_line)
+                        if not failure_lines:
+                            failure_lines.append("IMAP 확인 작업 예약 실패")
+                        self._emit_imap_section("IMAP 확인 실패", failure_lines, domain=normalized)
+                        next_target = (self._get_last_threshold_multiple(normalized) + 1) * threshold_value
+                        remaining = max(0, next_target - current_sent_counter)
+                        next_line = f"{next_target}까지 {remaining}건 남음" if remaining > 0 else f"{next_target} 도달 · 즉시 재확인 가능"
+                        self._emit_imap_section("IMAP 다음 배수", [next_line], domain=normalized)
+                        return
                     threshold_check_future = outcome.future
+                    threshold_pending_multiple = target_multiple
                     if threshold_check_future is None:
-                        current_sent_counter = 0
-                        self._set_sent_counter(normalized, 0, reset_timestamp=utc_now_iso())
+                        threshold_pending_multiple = None
+                        self._emit_imap_section("IMAP 확인 실패", ["IMAP 확인 작업 예약 실패"], domain=normalized)
                         return
                     report_payload: Optional[Dict[str, object]] = None
                     try:
                         report_payload = threshold_check_future.result()
                     except Exception as exc:  # pylint: disable=broad-except
-                        self._log_imap_console(f"Sent 기준 확인 중 예외 발생: {exc}", domain=normalized)
+                        self._emit_imap_section("IMAP 확인 실패", [f"예외 발생: {exc}"], domain=normalized)
                     finally:
                         threshold_check_future = None
-                    status_value = None
                     if isinstance(report_payload, dict):
-                        status_value = report_payload.get("status")
-                    if status_value == "success":
-                        current_sent_counter = 0
-                        self._set_sent_counter(normalized, 0, reset_timestamp=utc_now_iso())
-                        self._log_imap_console("Sent 누적 확인 성공 · 카운터 초기화", domain=normalized)
-                    else:
-                        threshold_value = self._current_sent_threshold(normalized)
-                        fallback_counter = max(0, threshold_value - 1)
-                        current_sent_counter = fallback_counter
-                        self._set_sent_counter(normalized, fallback_counter)
-                        if status_value:
-                            self._log_imap_console(
-                                f"Sent 누적 확인 실패({status_value}) · 카운터 {fallback_counter}건으로 롤백",
+                        status_value = str(report_payload.get("status") or "")
+                        latency_value = report_payload.get("latency")
+                        def _format_latency(value: Optional[object]) -> str:
+                            if value is None:
+                                return "-"
+                            try:
+                                latency_float = float(value)
+                                if latency_float.is_integer():
+                                    return f"{int(latency_float)}초"
+                                return f"{latency_float:.1f}초"
+                            except (TypeError, ValueError):
+                                return str(value)
+
+                        if status_value == "success":
+                            if threshold_pending_multiple is not None:
+                                self._set_last_threshold_multiple(normalized, threshold_pending_multiple)
+                            self._set_sent_counter(normalized, self._get_sent_counter(normalized), reset_timestamp=utc_now_iso())
+                            self._emit_imap_section(
+                                "IMAP 확인 성공",
+                                [f"IMAP latency: {_format_latency(latency_value)} / 재개"],
                                 domain=normalized,
                             )
                         else:
-                            self._log_imap_console(
-                                f"Sent 누적 확인 결과 없음 · 카운터 {fallback_counter}건으로 롤백",
-                                domain=normalized,
-                            )
+                            failure_lines: List[str] = []
+                            marker = report_payload.get("ip_change_marker")
+                            marker_reason = report_payload.get("ip_change_reason")
+                            if marker:
+                                marker_line = f"제한 응답: {marker}"
+                                if marker_reason and marker_reason.lower() not in marker_line.lower():
+                                    marker_line = f"{marker_line} ({marker_reason})"
+                                failure_lines.append(marker_line)
+                            reason_line = report_payload.get("reason")
+                            if reason_line:
+                                failure_lines.append(str(reason_line))
+                            probe_status = report_payload.get("probe_status_line")
+                            probe_detail = report_payload.get("probe_detail_line")
+                            if probe_status:
+                                failure_lines.append(str(probe_status))
+                            if probe_detail and probe_detail not in failure_lines:
+                                failure_lines.append(str(probe_detail))
+                            failure_action_report = report_payload.get("failure_action")
+                            trigger_stop = bool(report_payload.get("trigger_stop"))
+                            if trigger_stop and failure_action_report and failure_action_report != "none":
+                                failure_lines.append(f"{failure_action_report} 트리거 전송")
+                            if not failure_lines:
+                                failure_lines.append(status_value or "IMAP 확인 실패")
+                            self._emit_imap_section("IMAP 확인 실패", failure_lines, domain=normalized)
+                            if report_payload.get("ip_change_attempted"):
+                                ip_status = "성공" if report_payload.get("ip_change_success") else "실패"
+                                ip_message = report_payload.get("ip_change_message") or "-"
+                                ip_after = report_payload.get("ip_after_change")
+                                ip_line = f"{ip_status} ({ip_message})"
+                                if ip_after:
+                                    ip_line = f"{ip_line} / 새 IP {ip_after}"
+                                self._emit_imap_section("IP 교체 시도", [ip_line], domain=normalized)
+                            if report_payload.get("probe_mail_sent") is False and report_payload.get("probe_mail_error"):
+                                self._emit_imap_section(
+                                    "IMAP 확인 실패",
+                                    [f"확인 메일 실패: {report_payload.get('probe_mail_error')}"],
+                                    domain=normalized,
+                                )
+                    else:
+                        self._emit_imap_section("IMAP 확인 실패", ["IMAP 확인 결과를 수신하지 못했습니다."], domain=normalized)
+                    threshold_pending_multiple = None
+                    current_sent_counter = self._get_sent_counter(normalized)
+                    next_target = (self._get_last_threshold_multiple(normalized) + 1) * threshold_value
+                    remaining = max(0, next_target - current_sent_counter)
+                    next_line = f"{next_target}까지 {remaining}건 남음" if remaining > 0 else f"{next_target} 도달 · 즉시 재확인 가능"
+                    self._emit_imap_section("IMAP 다음 배수", [next_line], domain=normalized)
 
-                
 
-                
+
+
 
                 initial_rows = reserve_candidates(fetch_batch_size)
                 if not initial_rows:
@@ -3973,6 +4151,20 @@ class MailClient:
         if domain and not self._imap_enabled(domain):
             return
         print(f"[IMAP 테스트] {message}", flush=True)
+
+    def _emit_imap_section(
+        self,
+        label: str,
+        lines: Iterable[str],
+        *,
+        domain: Optional[str] = None,
+    ) -> None:
+        if domain and not self._imap_enabled(domain):
+            return
+        for line in lines:
+            if not line:
+                continue
+            print(f"[{label}] {line}", flush=True)
 
     def handle_imap_test(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
         normalized = (domain or "naver").lower()
