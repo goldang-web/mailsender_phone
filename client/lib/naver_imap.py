@@ -388,6 +388,7 @@ def verify_delivery(
     mail_from,
     sent_at,
     allowed_delay,
+    header_from=None,
     *,
     max_messages=15,
     check_delay=None,
@@ -407,9 +408,27 @@ def verify_delivery(
         sent_dt = sent_dt.replace(tzinfo=timezone.utc)
     else:
         sent_dt = sent_dt.astimezone(timezone.utc)
-    _, expected_address = parseaddr(str(mail_from or ""))
-    expected_address = (expected_address or str(mail_from or "")).strip()
-    expected_address_lower = expected_address.lower()
+    def _normalize_from_compare(raw_value: str) -> str:
+        if not raw_value:
+            return ""
+        decoded_value = decode_mime_header_value(raw_value)
+        candidate = decoded_value or str(raw_value)
+        return " ".join(candidate.split()).lower().strip()
+
+    def _parse_address_lower(raw_value: str) -> str:
+        _, address = parseaddr(raw_value or "")
+        return (address or "").strip().lower()
+
+    expected_header_source = header_from or mail_from
+    expected_header_display = decode_mime_header_value(expected_header_source) if expected_header_source else ""
+    if not expected_header_display and mail_from:
+        expected_header_display = decode_mime_header_value(mail_from)
+
+    expected_header_compare = _normalize_from_compare(expected_header_source)
+    if not expected_header_compare and mail_from:
+        expected_header_compare = _normalize_from_compare(mail_from)
+
+    expected_address_lower = _parse_address_lower(header_from) or _parse_address_lower(mail_from)
     try:
         allowed = int(allowed_delay)
     except (TypeError, ValueError):
@@ -474,23 +493,43 @@ def verify_delivery(
             msg = email.message_from_bytes(header_bytes)
             from_header = msg.get("From") or ""
             decoded_from = decode_mime_header_value(from_header)
+            normalized_header = _normalize_from_compare(from_header)
             _, sender_address = parseaddr(from_header)
             normalized_sender = (sender_address or "").strip().lower()
-            if not normalized_sender:
-                sender_mismatch_found = True
-                print(
-                    f"[IMAP 확인] 발신자 주소를 해석하지 못했습니다. 헤더={decoded_from or '-'}",
-                    flush=True,
-                )
-                continue
-            if expected_address_lower and normalized_sender != expected_address_lower:
-                sender_mismatch_found = True
-                print(
-                    "[IMAP 확인] 발신자 불일치:"
-                    f" 수신 {normalized_sender} · 기대 {expected_address_lower}",
-                    flush=True,
-                )
-                continue
+
+            if expected_header_compare:
+                if not normalized_header:
+                    sender_mismatch_found = True
+                    print(
+                        f"[IMAP 확인] 발신자 헤더를 해석하지 못했습니다. 헤더={decoded_from or '-'}",
+                        flush=True,
+                    )
+                    continue
+                if normalized_header != expected_header_compare:
+                    sender_mismatch_found = True
+                    expected_label = expected_header_display or header_from or mail_from or "-"
+                    print(
+                        "[IMAP 확인] 발신자 헤더 불일치:"
+                        f" 수신 {decoded_from or '-'} · 기대 {expected_label}",
+                        flush=True,
+                    )
+                    continue
+            elif expected_address_lower:
+                if not normalized_sender:
+                    sender_mismatch_found = True
+                    print(
+                        f"[IMAP 확인] 발신자 주소를 해석하지 못했습니다. 헤더={decoded_from or '-'}",
+                        flush=True,
+                    )
+                    continue
+                if normalized_sender != expected_address_lower:
+                    sender_mismatch_found = True
+                    print(
+                        "[IMAP 확인] 발신자 불일치:"
+                        f" 수신 {normalized_sender} · 기대 {expected_address_lower}",
+                        flush=True,
+                    )
+                    continue
             date_header = msg.get("Date")
             if not date_header:
                 continue
@@ -531,8 +570,8 @@ def verify_delivery(
         print("[IMAP 확인] 지연: 측정 불가", flush=True)
         print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
         if sender_mismatch_found:
-            reason_text = "발신자 주소가 일치하는 메일을 찾지 못했습니다."
-            print("[IMAP 확인] 판정: 발신자 주소가 일치하는 메일 없음", flush=True)
+            reason_text = "발신자 헤더가 일치하는 메일을 찾지 못했습니다."
+            print("[IMAP 확인] 판정: 발신자 헤더가 일치하는 메일 없음", flush=True)
         else:
             reason_text = "유효한 메일을 찾지 못했습니다."
             print("[IMAP 확인] 판정: 유효한 메일을 찾지 못했습니다.", flush=True)

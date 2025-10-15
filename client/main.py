@@ -13,6 +13,8 @@ import ssl
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
+from email import policy
+from email.parser import Parser
 from email.utils import format_datetime, make_msgid
 from pathlib import Path
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
@@ -846,6 +848,7 @@ class MailClient:
         job_id: Optional[str],
         send_type: str,
         mail_from: str,
+        header_from: Optional[str],
         has_anchor: bool,
         context_reason: Optional[str],
         delay_seconds: float,
@@ -881,6 +884,7 @@ class MailClient:
             "job_id": job_id,
             "send_type": send_type,
             "mail_from": mail_from,
+            "header_from": header_from or "",
             "anchor": has_anchor,
             "trigger_stop": False,
             "checked_at": checked_at_iso,
@@ -911,6 +915,7 @@ class MailClient:
         job_id: Optional[str],
         send_type: str,
         mail_from: str,
+        header_from: Optional[str],
         has_anchor: bool,
         context_reason: Optional[str],
         delay_before_check: Optional[float],
@@ -1003,6 +1008,7 @@ class MailClient:
                     job_id=job_id,
                     send_type=send_type,
                     mail_from=mail_from,
+                    header_from=header_from,
                     has_anchor=has_anchor,
                     context_reason=context_reason,
                     delay_seconds=delay_seconds,
@@ -1027,6 +1033,7 @@ class MailClient:
             job_id=job_id,
             send_type=send_type,
             mail_from=mail_from,
+            header_from=header_from,
             sent_at=sent_at_value,
             has_anchor=has_anchor,
             delay_before_check=delay_seconds,
@@ -1107,6 +1114,39 @@ class MailClient:
         if not candidate and fallback is not None:
             candidate = str(fallback or "").strip()
         return candidate
+
+    def _extract_header_from(
+        self,
+        header_text: Optional[object],
+        fallback: Optional[str] = None,
+    ) -> Optional[str]:
+        if not header_text:
+            return fallback
+        text = str(header_text)
+        try:
+            parser = Parser(policy=policy.default)
+            message = parser.parsestr(text, headersonly=True)
+        except Exception:
+            message = None
+        if message is not None:
+            value = message.get("From")
+            if value:
+                return value.strip()
+        collected: List[str] = []
+        in_from_header = False
+        for line in text.splitlines():
+            if in_from_header:
+                if not line or not line[0].isspace():
+                    break
+                collected.append(line.strip())
+                continue
+            if line.lower().startswith("from:"):
+                in_from_header = True
+                collected.append(line.split(":", 1)[1].strip())
+        if collected:
+            combined = " ".join(part for part in collected if part)
+            return combined.strip() or fallback
+        return fallback
 
     def _current_sent_threshold(self, domain: str) -> int:
         settings = self._imap_settings_for_domain(domain)
@@ -1331,9 +1371,10 @@ class MailClient:
         last_status_line = "발송 실패"
         last_detail_line: Optional[str] = None
         sent_at_value: Optional[datetime] = None
-        max_attempts = 2
+        max_attempts = 1
+        max_retry_limit = 2
 
-        while attempts < max_attempts:
+        while attempts < max_retry_limit:
             attempts += 1
             attempt_label = "" if attempts == 1 else f" (재시도 {attempts})"
             self._log_imap_console(
@@ -1364,9 +1405,7 @@ class MailClient:
                     ip_after_change=ip_after_change,
                     attempts=attempts,
                 )
-            if attempts >= max_attempts:
-                break
-
+            allow_retry = False
             lower_sources = [status_line.lower(), (detail_line or "").lower()]
             detected_marker: Optional[str] = None
             detected_detail: Optional[str] = None
@@ -1395,8 +1434,15 @@ class MailClient:
                 result_label = "성공" if success_change else "실패"
                 self._log_imap_console(f"IP 변경 {result_label} · {message}", domain=normalized)
                 if success_change:
+                    max_attempts = min(max_attempts + 1, max_retry_limit)
+                    allow_retry = True
                     time.sleep(2.0)
-                    continue
+                else:
+                    break
+
+            if allow_retry and attempts < max_attempts:
+                continue
+            if attempts >= max_attempts:
                 break
 
             break
@@ -1427,6 +1473,7 @@ class MailClient:
         job_id: Optional[str],
         send_type: str,
         mail_from: str,
+        header_from: Optional[str],
         sent_at: datetime,
         has_anchor: bool,
         delay_before_check: Optional[float],
@@ -1638,16 +1685,18 @@ class MailClient:
                     elif context_reason:
                         reason_components.append(context_reason)
                     reason_text = " · ".join([component for component in reason_components if component])
-                    report = {
-                        "domain": normalized,
-                        "status": status,
-                        "latency": latency,
-                        "received_at": received_at,
-                        "sent_at": sent_at_iso or sent_at_value.isoformat(),
-                        "reason": reason_text or context_reason or "",
-                        "job_id": job_id,
-                        "send_type": send_type,
-                        "mail_from": mail_from,
+                report = {
+                    "domain": normalized,
+                    "status": status,
+                    "latency": latency,
+                    "received_at": received_at,
+                    "sent_at": sent_at_iso or sent_at_value.isoformat(),
+                    "reason": reason_text or context_reason or "",
+                    "job_id": job_id,
+                    "send_type": send_type,
+                    "mail_from": mail_from,
+                    "header_from": header_from or "",
+                        "header_from": header_from or "",
                         "anchor": has_anchor,
                         "trigger_stop": trigger_stop,
                         "checked_at": checked_at_iso,
@@ -1680,6 +1729,7 @@ class MailClient:
                     mail_from=mail_from,
                     sent_at=sent_at_value,
                     allowed_delay=allowed_delay_value,
+                    header_from=header_from,
                     max_messages=25,
                     check_delay=delay_seconds,
                 )
@@ -2730,6 +2780,7 @@ class MailClient:
         bcc_emails = self._sanitize_email_list(candidate_bcc_entries, limit=30)
         bcc_rows: List[sqlite3.Row] = []
         mail_from_value = self._effective_mail_from(normalized_domain, config)
+        header_from_value = self._extract_header_from(config.get("header"), mail_from_value)
         success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
             smtp_port=int(config.get("smtp_port") or 25),
@@ -2854,6 +2905,7 @@ class MailClient:
                     job_id=job_id,
                     send_type="single",
                     mail_from=mail_from_value,
+                    header_from=header_from_value,
                     has_anchor=False,
                     context_reason=detail_line or status_line,
                     delay_before_check=single_delay,
@@ -2868,6 +2920,7 @@ class MailClient:
                     job_id=job_id,
                     send_type="single",
                     mail_from=mail_from_value,
+                    header_from=header_from_value,
                     sent_at=sent_at,
                     has_anchor=False,
                     delay_before_check=single_delay,
@@ -2926,6 +2979,7 @@ class MailClient:
         group_size = max(1, 1 + bcc_count)
         anchor_interval = self._sanitize_anchor_interval(config.get("anchor_interval"))
         mail_from_value = self._effective_mail_from(normalized, config)
+        header_from_value = self._extract_header_from(config.get("header"), mail_from_value)
         settings = self._imap_settings_for_domain(normalized)
         current_sent_counter = self._get_sent_counter(normalized)
         threshold_check_request: Optional[Dict[str, object]] = None
@@ -3421,6 +3475,7 @@ class MailClient:
                             "threshold": threshold_value,
                             "sent_count": current_sent_counter,
                             "username": normalize_imap_string(settings_local.get("username")),
+                            "header_from": header_from_value,
                             "smtp": {
                                 "smtp_host": config.get("smtp_host"),
                                 "smtp_port": config.get("smtp_port"),
@@ -3444,12 +3499,20 @@ class MailClient:
                     threshold_check_request = None
                     threshold_value = int(request.get("threshold") or self._current_sent_threshold(normalized))
                     mail_from_candidate = str(request.get("mail_from") or mail_from_value)
+                    raw_header_from = request.get("header_from")
+                    if isinstance(raw_header_from, str) and raw_header_from.strip():
+                        header_from_candidate = raw_header_from.strip()
+                    elif header_from_value:
+                        header_from_candidate = str(header_from_value).strip() or None
+                    else:
+                        header_from_candidate = None
                     smtp_context = request.get("smtp")
                     outcome = self._execute_imap_guard_flow(
                         domain=normalized,
                         job_id=job_id,
                         send_type="sent-threshold",
                         mail_from=mail_from_candidate,
+                        header_from=header_from_candidate,
                         has_anchor=False,
                         context_reason=str(request.get("detail") or "Sent 기준 확인"),
                         delay_before_check=float(request.get("single_delay") or 0),
@@ -4097,6 +4160,7 @@ class MailClient:
         mail_from_value = self._effective_mail_from(normalized, config_payload)
         if mail_from_value:
             self._remember_last_mail_from(normalized, mail_from_value)
+        header_from_value = self._extract_header_from(config_payload.get("header"), mail_from_value)
         smtp_context = {
             "smtp_host": config_payload.get("smtp_host"),
             "smtp_port": config_payload.get("smtp_port"),
@@ -4109,6 +4173,7 @@ class MailClient:
             job_id=job_id,
             send_type="manual",
             mail_from=mail_from_value,
+            header_from=header_from_value,
             has_anchor=False,
             context_reason=context_reason,
             delay_before_check=None,
