@@ -1987,6 +1987,8 @@ class MailClient:
             self.sent_sequences[domain] = 0
             self._sequence_dirty.add(domain)
             self._sent_log_bases[domain] = 0
+            self._set_sent_counter(domain, 0, reset_timestamp=utc_now_iso())
+            self._set_last_threshold_multiple(domain, 0)
         self._maybe_flush_sent_sequences(force=True)
 
     @staticmethod
@@ -3039,9 +3041,12 @@ class MailClient:
         header_from_value = self._extract_header_from(config.get("header"), mail_from_value)
         settings = self._imap_settings_for_domain(normalized)
         current_sent_counter = self._get_sent_counter(normalized)
+        if current_sent_counter <= 0 and self._get_last_threshold_multiple(normalized) != 0:
+            self._set_last_threshold_multiple(normalized, 0)
         threshold_check_request: Optional[Dict[str, object]] = None
         threshold_check_future: Optional[Future] = None
         threshold_pending_multiple: Optional[int] = None
+        threshold_deferred_notice = False
         anchor_email = self._sanitize_anchor_email(config.get("anchor_email"))
         anchor_enabled = bool(anchor_interval and anchor_email)
 
@@ -3558,13 +3563,24 @@ class MailClient:
                     }
 
                 def ensure_threshold_check() -> None:
-                    nonlocal threshold_check_request, threshold_check_future, current_sent_counter, threshold_pending_multiple
+                    nonlocal threshold_check_request, threshold_check_future, current_sent_counter, threshold_pending_multiple, threshold_deferred_notice
                     if threshold_check_future is not None:
                         return
                     if not threshold_check_request:
+                        if threshold_deferred_notice:
+                            threshold_deferred_notice = False
                         return
                     if inflight:
+                        if not threshold_deferred_notice:
+                            self._emit_imap_section(
+                                "IMAP 임계 대기",
+                                [f"진행 중 발송 {len(inflight)}건 정리 중"],
+                                domain=normalized,
+                            )
+                            threshold_deferred_notice = True
                         return
+                    if threshold_deferred_notice:
+                        threshold_deferred_notice = False
                     if not self._imap_enabled(normalized):
                         threshold_check_request = None
                         return
@@ -4057,6 +4073,8 @@ class MailClient:
                             if not stop_requested:
                                 while len(inflight) < session_count:
                                     ensure_threshold_check()
+                                    if threshold_check_request is not None or threshold_check_future is not None:
+                                        break
                                     group = next_group()
                                     if not group:
                                         break
