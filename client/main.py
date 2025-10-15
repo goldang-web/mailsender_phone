@@ -1696,29 +1696,28 @@ class MailClient:
                     "send_type": send_type,
                     "mail_from": mail_from,
                     "header_from": header_from or "",
-                        "header_from": header_from or "",
-                        "anchor": has_anchor,
-                        "trigger_stop": trigger_stop,
-                        "checked_at": checked_at_iso,
-                        "delay_seconds": int(delay_seconds),
-                        "allowed_latency_seconds": allowed_delay_value,
-                        "failure_action": failure_action_value,
-                        "sent_window_count": sent_window_count,
-                        "sent_threshold": threshold_value,
-                        "ip_change_attempted": ip_change_attempted,
-                        "ip_change_success": ip_change_success,
-                        "ip_change_message": ip_change_message,
-                        "ip_change_marker": throttle_marker,
-                        "ip_change_reason": throttle_detail,
-                        "ip_after_change": ip_after_change,
-                        "probe_mail_sent": probe_mail_sent,
-                        "probe_mail_error": probe_mail_error,
-                        "probe_status_line": probe_status_line,
-                        "probe_detail_line": probe_detail_line,
-                        "probe_attempts": probe_attempts,
-                    }
-                    self._queue_imap_report(report)
-                    return report
+                    "anchor": has_anchor,
+                    "trigger_stop": trigger_stop,
+                    "checked_at": checked_at_iso,
+                    "delay_seconds": int(delay_seconds),
+                    "allowed_latency_seconds": allowed_delay_value,
+                    "failure_action": failure_action_value,
+                    "sent_window_count": sent_window_count,
+                    "sent_threshold": threshold_value,
+                    "ip_change_attempted": ip_change_attempted,
+                    "ip_change_success": ip_change_success,
+                    "ip_change_message": ip_change_message,
+                    "ip_change_marker": throttle_marker,
+                    "ip_change_reason": throttle_detail,
+                    "ip_after_change": ip_after_change,
+                    "probe_mail_sent": probe_mail_sent,
+                    "probe_mail_error": probe_mail_error,
+                    "probe_status_line": probe_status_line,
+                    "probe_detail_line": probe_detail_line,
+                    "probe_attempts": probe_attempts,
+                }
+                self._queue_imap_report(report)
+                return report
 
             checked_at_iso = utc_now_iso()
             status = "error"
@@ -1801,6 +1800,7 @@ class MailClient:
                 "job_id": job_id,
                 "send_type": send_type,
                 "mail_from": mail_from,
+                "header_from": header_from or "",
                 "anchor": has_anchor,
                 "trigger_stop": trigger_stop,
                 "checked_at": checked_at_iso,
@@ -1816,11 +1816,11 @@ class MailClient:
                 "ip_change_reason": throttle_detail,
                 "ip_after_change": ip_after_change,
                 "probe_mail_sent": probe_mail_sent,
-                        "probe_mail_error": probe_mail_error,
-                        "probe_status_line": probe_status_line,
-                        "probe_detail_line": probe_detail_line,
-                        "probe_attempts": probe_attempts,
-                    }
+                "probe_mail_error": probe_mail_error,
+                "probe_status_line": probe_status_line,
+                "probe_detail_line": probe_detail_line,
+                "probe_attempts": probe_attempts,
+            }
             self._queue_imap_report(report)
             return report
 
