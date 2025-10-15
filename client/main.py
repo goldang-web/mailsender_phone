@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.62"
+APP_VERSION = "0.0.63"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -577,6 +577,8 @@ class MailClient:
         self._cancel_ack_sent: Set[str] = set()
         self._pending_jobs: Deque[Dict[str, object]] = deque()
         self._pending_job_ids: Set[str] = set()
+        self._pending_job_reports: Deque[Tuple[JobResult, List[Dict[str, object]]]] = deque()
+        self._report_flush_in_progress: bool = False
         raw_sequences = config.get("sent_sequences")
         if not isinstance(raw_sequences, dict):
             raw_sequences = {}
@@ -588,6 +590,12 @@ class MailClient:
                 self.sent_sequences[key] = 0
         for domain in DOMAINS:
             self.sent_sequences.setdefault(domain, 0)
+        self._sent_log_bases: Dict[str, int] = {}
+        for domain in DOMAINS:
+            try:
+                self._sent_log_bases[domain] = max(0, int(self.sent_sequences.get(domain, 0)))
+            except (TypeError, ValueError):
+                self._sent_log_bases[domain] = 0
         self.telnet_debug_mode = bool(config.get("telnet_debug_mode"))
         smtp_utils.set_telnet_debug_mode(self.telnet_debug_mode)
         self._sequence_dirty: Set[str] = set()
@@ -1937,6 +1945,7 @@ class MailClient:
                 continue
             self.sent_sequences[domain] = 0
             self._sequence_dirty.add(domain)
+            self._sent_log_bases[domain] = 0
         self._maybe_flush_sent_sequences(force=True)
 
     @staticmethod
@@ -2410,17 +2419,35 @@ class MailClient:
         report: JobResult,
         domain_states: Optional[List[Dict[str, object]]] = None,
     ) -> None:
+        states_snapshot: List[Dict[str, object]] = list(domain_states or [])
+        self._pending_job_reports.append((report, states_snapshot))
+        if self._report_flush_in_progress:
+            return
+        self._report_flush_in_progress = True
         try:
-            data = self.heartbeat(domain_states or [], [report])
-            configs = data.get("configs") if isinstance(data, dict) else None
-            if isinstance(configs, dict) and configs:
-                self.apply_configs(configs)
-            new_jobs = data.get("jobs") if isinstance(data, dict) else None
-            if isinstance(new_jobs, list):
-                self._queue_jobs(new_jobs)
-            self._run_priority_jobs()
-        except Exception as exc:  # pylint: disable=broad-except
-            print(f"[경고] 작업 보고 실패: {exc}")
+            while self._pending_job_reports:
+                batch = list(self._pending_job_reports)
+                reports_payload = [item[0] for item in batch]
+                latest_states = list(batch[-1][1]) if batch and batch[-1][1] else []
+                try:
+                    data = self.heartbeat(latest_states, reports_payload)
+                except Exception as exc:  # pylint: disable=broad-except
+                    print(f"[경고] 작업 보고 실패: {exc}")
+                    return
+                processed_count = len(batch)
+                for _ in range(processed_count):
+                    if not self._pending_job_reports:
+                        break
+                    self._pending_job_reports.popleft()
+                configs = data.get("configs") if isinstance(data, dict) else None
+                if isinstance(configs, dict) and configs:
+                    self.apply_configs(configs)
+                new_jobs = data.get("jobs") if isinstance(data, dict) else None
+                if isinstance(new_jobs, list):
+                    self._queue_jobs(new_jobs)
+                self._run_priority_jobs()
+        finally:
+            self._report_flush_in_progress = False
 
     def _update_job_controls(self, controls: Iterable[Dict[str, object]]) -> None:
         previous_ids = set(self.job_controls.keys())
@@ -2857,7 +2884,7 @@ class MailClient:
             accumulated_total = self._next_sent_sequence(normalized_domain or None, successful_recipient_count)
         else:
             accumulated_total = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
-        current_batch_success = successful_recipient_count if session_success else 0
+        current_batch_success = self._sent_log_progress(sequence_domain, accumulated_total)
         log_line = self._format_dispatch_log_line(
             "Sent" if session_success else "Fail",
             current_batch_success,
@@ -2944,13 +2971,14 @@ class MailClient:
             "data_response": data_response,
         }
         error_message = None if session_success else (detail_line or status_line or "발송 실패")
+        current_sequence_total = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
         primary_log = (
             dispatch_logs[0]["log"]
             if dispatch_logs
             else self._format_dispatch_log_line(
                 "Fail",
-                0,
-                max(0, int(self.sent_sequences.get(sequence_domain, 0))),
+                self._sent_log_progress(sequence_domain, current_sequence_total),
+                current_sequence_total,
                 include_anchor=False,
             )
         )
@@ -3755,7 +3783,7 @@ class MailClient:
                         elif anchor_retry_count > 0:
                             anchor_retry_pending += anchor_retry_count
 
-                    current_batch_success = success_increment
+                    current_batch_success = self._sent_log_progress(normalized, sequence_total)
                     log_line = self._format_dispatch_log_line(
                         "Sent" if session_success else "Fail",
                         current_batch_success,
@@ -4376,6 +4404,20 @@ class MailClient:
         status_segment = status_line or "응답 없음"
         timestamp = now_iso().replace("T", " ")
         return f"{label} {target} {status_segment} {timestamp}"
+
+    def _sent_log_progress(self, domain: Optional[str], sequence_total: int) -> int:
+        normalized = (domain or self.active_domain or "naver").lower()
+        base = self._sent_log_bases.get(normalized)
+        if base is None:
+            try:
+                base = max(0, int(self.sent_sequences.get(normalized, 0)))
+            except (TypeError, ValueError):
+                base = 0
+        sequence_value = max(0, int(sequence_total or 0))
+        if sequence_value < base:
+            base = sequence_value
+        self._sent_log_bases[normalized] = base
+        return max(0, sequence_value - base)
 
     def _format_dispatch_log_line(
         self,
