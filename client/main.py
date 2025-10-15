@@ -1258,20 +1258,66 @@ class MailClient:
             payload.get("imap_sent_threshold"),
             default=settings.get("sent_threshold")
         )
+
+        server_reset_raw = payload.get("imap_sent_last_reset_at")
+        local_reset_raw = settings.get("sent_last_reset_at")
+
+        def _parse_reset(value: Optional[object]) -> Optional[datetime]:
+            if not value:
+                return None
+            if isinstance(value, datetime):
+                return value
+            candidate = str(value).strip()
+            if not candidate:
+                return None
+            try:
+                return datetime.fromisoformat(candidate.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+
+        server_reset_dt = _parse_reset(server_reset_raw)
+        local_reset_dt = _parse_reset(local_reset_raw)
+
+        prefer_local_reset = False
+        if local_reset_dt and (server_reset_dt is None or server_reset_dt < local_reset_dt):
+            prefer_local_reset = True
+
         try:
             sent_since_value = int(payload.get("imap_sent_since_last_check") or 0)
         except (TypeError, ValueError):
             sent_since_value = 0
-        settings["sent_since_last_check"] = max(0, sent_since_value)
-        settings["sent_last_reset_at"] = payload.get("imap_sent_last_reset_at")
-        self._imap_sent_counters[normalized] = settings["sent_since_last_check"]
-        try:
-            last_multiple = int(payload.get("imap_last_threshold_multiple") or settings.get("last_threshold_multiple") or 0)
-        except (TypeError, ValueError):
-            last_multiple = 0
+        sent_since_value = max(0, sent_since_value)
+        if prefer_local_reset:
+            effective_sent_since = max(0, int(settings.get("sent_since_last_check") or 0))
+            effective_reset_at = local_reset_raw
+        else:
+            effective_sent_since = sent_since_value
+            effective_reset_at = server_reset_raw
+            settings["sent_last_reset_at"] = effective_reset_at
+        settings["sent_since_last_check"] = effective_sent_since
+        self._imap_sent_counters[normalized] = effective_sent_since
+
+        def _extract_last_multiple() -> int:
+            source_value: Optional[object]
+            if prefer_local_reset:
+                source_value = settings.get("last_threshold_multiple")
+            else:
+                candidate = payload.get("imap_last_threshold_multiple")
+                source_value = candidate if candidate is not None else settings.get("last_threshold_multiple")
+            try:
+                return int(source_value or 0)
+            except (TypeError, ValueError):
+                return 0
+
+        last_multiple = _extract_last_multiple()
         last_multiple = max(0, last_multiple)
-        settings["last_threshold_multiple"] = last_multiple
-        self._imap_threshold_multiples[normalized] = last_multiple
+        if prefer_local_reset:
+            settings_last_multiple = max(0, int(settings.get("last_threshold_multiple") or 0))
+            settings["last_threshold_multiple"] = settings_last_multiple
+            self._imap_threshold_multiples[normalized] = settings_last_multiple
+        else:
+            settings["last_threshold_multiple"] = last_multiple
+            self._imap_threshold_multiples[normalized] = last_multiple
         self._imap_settings_dirty.add(normalized)
         settings["last_status"] = payload.get("imap_last_status")
         settings["last_checked_at"] = payload.get("imap_last_checked_at")
@@ -3043,6 +3089,35 @@ class MailClient:
         current_sent_counter = self._get_sent_counter(normalized)
         if current_sent_counter <= 0 and self._get_last_threshold_multiple(normalized) != 0:
             self._set_last_threshold_multiple(normalized, 0)
+        if self._imap_enabled(normalized):
+            threshold_snapshot = self._current_sent_threshold(normalized)
+            last_multiple_snapshot = self._get_last_threshold_multiple(normalized)
+            next_target_snapshot: Optional[int]
+            remaining_snapshot: Optional[int]
+            if threshold_snapshot > 0:
+                next_target_snapshot = threshold_snapshot * (last_multiple_snapshot + 1)
+                remaining_snapshot = max(0, next_target_snapshot - current_sent_counter)
+            else:
+                next_target_snapshot = None
+                remaining_snapshot = None
+            last_reset_snapshot = str(settings.get("sent_last_reset_at") or "-")
+            with self._imap_protection_lock:
+                throttle_snapshot = self._imap_throttle_flags.get(normalized)
+            throttle_line = "최근 제한 감지: 없음"
+            if throttle_snapshot:
+                marker = (throttle_snapshot.get("marker") or "-").strip() or "-"
+                detail = (throttle_snapshot.get("detail") or "-").strip() or "-"
+                recorded = throttle_snapshot.get("recorded_at") or "-"
+                throttle_line = f"최근 제한 감지: {marker} / {detail} / {recorded}"
+            summary_lines = [
+                f"임계 간격: {threshold_snapshot}건" if threshold_snapshot > 0 else "임계 간격: 비활성 (0건)",
+                f"현재 누적: {current_sent_counter}건",
+                f"마지막 배수: {last_multiple_snapshot}",
+                f"다음 배수: {next_target_snapshot}건 (잔여 {remaining_snapshot}건)" if next_target_snapshot is not None else "다음 배수: -",
+                f"마지막 리셋: {last_reset_snapshot}",
+                throttle_line,
+            ]
+            self._emit_imap_section("IMAP 시작 상태", summary_lines, domain=normalized)
         threshold_check_request: Optional[Dict[str, object]] = None
         threshold_check_future: Optional[Future] = None
         threshold_pending_multiple: Optional[int] = None
