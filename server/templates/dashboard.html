@@ -5427,72 +5427,178 @@ function renderGlobalConfig(config) {
   }
 }
 
-function parseSendLogPayload(payload) {
+function parseSendLogPayload(payload, entry = null) {
   if (!payload || typeof payload !== "string") {
     return null;
   }
-  const parts = payload.split("|");
-  if (parts.length < 3) {
+  const raw = payload.trim();
+  if (!raw) {
     return null;
   }
-  const rawLabel = parts[0] ?? "";
-  const rawCount = parts[1] ?? "";
-  const rawEmail = parts[2] ?? "";
+
+  const segments = raw
+    .split("|")
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+  if (!segments.length) {
+    return null;
+  }
+
+  const normalizeInt = (value) => {
+    if (value === null || value === undefined) {
+      return null;
+    }
+    const num = parseInt(String(value).trim(), 10);
+    return Number.isNaN(num) ? null : num;
+  };
+
+  const meta = {};
+  let labelSegment = segments.shift() || "";
+  let label = labelSegment;
+  let current = null;
+  let total = null;
   let timestamp = null;
-  let metaStartIndex = 3;
-  if (parts.length >= 4) {
-    const candidate = (parts[3] ?? "").trim();
-    if (candidate && !candidate.includes("=")) {
-      timestamp = candidate;
-      metaStartIndex = 4;
-    } else {
-      metaStartIndex = 3;
+  let email = "";
+  let legacyFormat = false;
+
+  const compositeMatch = labelSegment.match(/^([^()]+)\((\d+)(?:\/(\d+))?\)$/i);
+  if (compositeMatch) {
+    label = (compositeMatch[1] || "").trim();
+    current = normalizeInt(compositeMatch[2]);
+    total = normalizeInt(compositeMatch[3]);
+  } else {
+    legacyFormat = true;
+    label = (labelSegment || "").trim();
+    if (segments.length) {
+      const maybeCount = normalizeInt(segments[0]);
+      if (maybeCount !== null) {
+        current = maybeCount;
+        segments.shift();
+      }
+    }
+    if (segments.length) {
+      const candidateEmail = segments[0];
+      if (candidateEmail && !candidateEmail.includes("=") && candidateEmail.includes("@")) {
+        email = candidateEmail;
+        segments.shift();
+      }
+    }
+    if (segments.length) {
+      const candidateTs = segments[0];
+      if (candidateTs && !candidateTs.includes("=")) {
+        timestamp = candidateTs;
+        segments.shift();
+      }
     }
   }
-  const meta = {};
-  for (let i = metaStartIndex; i < parts.length; i += 1) {
-    const segment = parts[i];
-    if (!segment) continue;
-    const [key, value] = segment.split("=", 2);
-    if (!key) continue;
-    const normalizedKey = key.trim().toLowerCase();
-    if (!normalizedKey) continue;
-    meta[normalizedKey] = (value ?? "").trim();
+
+  segments.forEach((segment) => {
+    if (!segment) {
+      return;
+    }
+    const [rawKey, rawValue] = segment.split("=", 2);
+    if (rawValue === undefined) {
+      if (!timestamp) {
+        timestamp = segment;
+      }
+      return;
+    }
+    const key = (rawKey || "").trim().toLowerCase();
+    if (!key) {
+      return;
+    }
+    const value = (rawValue ?? "").trim();
+    meta[key] = value;
+  });
+
+  const pickFirstInt = (...values) => {
+    for (let i = 0; i < values.length; i += 1) {
+      const parsed = normalizeInt(values[i]);
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
+    return null;
+  };
+
+  if (total === null) {
+    total = pickFirstInt(meta.total, meta.absolute, meta.sent_total, meta.sequence, meta.sent_sequence);
   }
-  const label = (rawLabel || "").trim();
-  const email = (rawEmail || "").trim();
-  const countValue = parseInt((rawCount || "").trim(), 10);
-  const count = Number.isNaN(countValue) ? null : countValue;
+
+  if (!timestamp) {
+    timestamp = meta.ts || meta.time || null;
+  }
+
+  let isPrimary = false;
   const primaryFlag = meta.primary ?? null;
-  const isPrimary = typeof primaryFlag === "string"
-    ? ["1", "true", "yes"].includes(primaryFlag.toLowerCase())
-    : false;
+  if (typeof primaryFlag === "string") {
+    isPrimary = ["1", "true", "yes"].includes(primaryFlag.toLowerCase());
+  }
+
   let bccCount = null;
   if (typeof meta.bcc === "string" && meta.bcc) {
-    const parsedBcc = parseInt(meta.bcc, 10);
-    if (!Number.isNaN(parsedBcc) && parsedBcc > 0) {
+    const parsedBcc = normalizeInt(meta.bcc);
+    if (parsedBcc !== null && parsedBcc > 0) {
       bccCount = parsedBcc;
     }
   }
+
   let anchorCount = null;
   if (typeof meta.anchor === "string" && meta.anchor) {
-    const parsedAnchor = parseInt(meta.anchor, 10);
-    if (!Number.isNaN(parsedAnchor) && parsedAnchor > 0) {
+    const parsedAnchor = normalizeInt(meta.anchor);
+    if (parsedAnchor !== null && parsedAnchor > 0) {
       anchorCount = parsedAnchor;
     }
   }
-  return { label, email, count, timestamp, meta, isPrimary, bccCount, anchorCount };
+
+  if (!email) {
+    if (typeof meta.email === "string" && meta.email.includes("@")) {
+      email = meta.email;
+    } else if (entry?.rcpt_to) {
+      email = entry.rcpt_to;
+    } else if (entry?.email) {
+      email = entry.email;
+    }
+  }
+
+  const count = current !== null ? Math.max(0, current) : null;
+  const normalizedTotal = total !== null ? Math.max(0, total) : null;
+
+  return {
+    label,
+    email,
+    count,
+    current: count,
+    total: normalizedTotal,
+    timestamp,
+    meta,
+    isPrimary,
+    bccCount,
+    anchorCount,
+    legacyFormat,
+  };
 }
 
 function buildLogDisplayText(entry) {
-  const parsed = parseSendLogPayload(entry?.response);
-  if (!parsed || !parsed.label || !parsed.email) {
+  const parsed = parseSendLogPayload(entry?.response, entry);
+  if (!parsed || !parsed.label) {
     return entry?.response || entry?.log || "-";
   }
   const baseLabel = parsed.label.trim();
-  let labelText = baseLabel;
-  if (baseLabel && baseLabel.toLowerCase() === "sent" && typeof parsed.count === "number" && parsed.count > 0) {
-    labelText = `Sent(${formatCount(parsed.count)})`;
+  const lowerLabel = baseLabel.toLowerCase();
+  const hasCurrent = typeof parsed.current === "number" && parsed.current >= 0;
+  const hasTotal = typeof parsed.total === "number" && parsed.total >= 0;
+  let labelText = baseLabel || "-";
+  if ((lowerLabel === "sent" || lowerLabel === "fail") && (hasCurrent || hasTotal)) {
+    const currentText = hasCurrent ? formatCount(parsed.current) : null;
+    const totalText = hasTotal ? formatCount(parsed.total) : null;
+    if (currentText !== null && totalText !== null) {
+      labelText = `${baseLabel}(${currentText}/${totalText})`;
+    } else if (currentText !== null) {
+      labelText = `${baseLabel}(${currentText})`;
+    } else if (totalText !== null) {
+      labelText = `${baseLabel}(${totalText})`;
+    }
   }
   let suffix = "";
   if (parsed.isPrimary) {
@@ -5503,7 +5609,11 @@ function buildLogDisplayText(entry) {
       suffix += ` + 알박기 ${parsed.anchorCount}`;
     }
   }
-  return `${labelText} - ${parsed.email}${suffix}`;
+  const emailTarget = parsed.email || entry?.rcpt_to || "";
+  if (!emailTarget) {
+    return `${labelText}${suffix}`;
+  }
+  return `${labelText} - ${emailTarget}${suffix}`;
 }
 
 function latestChangeIpJob(device) {
@@ -6271,7 +6381,10 @@ function ensureSuccessTracker(deviceId) {
       lastBatchId: null,
       resetCutoff: null,
       value: 0,
+      current: 0,
+      total: 0,
       anchor: 0,
+      forceZero: false,
     };
   }
   return state.successCounters[deviceId];
@@ -6384,6 +6497,9 @@ function updateSuccessCounter(card, device) {
   if (jobId && tracker.lastBatchId !== jobId) {
     tracker.lastBatchId = jobId;
     tracker.value = 0;
+    tracker.current = 0;
+    tracker.total = 0;
+    tracker.forceZero = false;
     const jobCreatedMs = parseTimestampMs(job?.created_at);
     tracker.resetCutoff = Number.isNaN(jobCreatedMs) ? Date.now() : jobCreatedMs;
   } else if (!jobId && tracker.lastBatchId === null && tracker.resetCutoff === undefined) {
@@ -6396,16 +6512,38 @@ function updateSuccessCounter(card, device) {
   }
 
   const summary = latestJobSummary(job);
-  let summarySent = 0;
+  let summaryCurrent = 0;
+  let summaryTotal = 0;
   let summaryAnchor = 0;
   if (summary) {
-    summarySent = parseSummaryNumber(
-      summary.sent_sequence
-      ?? summary.sent_absolute
-      ?? summary.sent_total
-      ?? summary.total_sent
-      ?? summary.sequence
-      ?? summary.sent,
+    const currentCandidates = [
+      summary.sent_visible,
+      summary.sent_current,
+      summary.visible_sent,
+      summary.sent_since_reset,
+      summary.sent,
+    ];
+    summaryCurrent = currentCandidates.reduce(
+      (acc, value) => {
+        const parsed = parseSummaryNumber(value);
+        return parsed > acc ? parsed : acc;
+      },
+      0,
+    );
+    const totalCandidates = [
+      summary.sent_sequence,
+      summary.sent_absolute,
+      summary.sent_total,
+      summary.total_sent,
+      summary.sequence,
+      summary.absolute_sent,
+    ];
+    summaryTotal = totalCandidates.reduce(
+      (acc, value) => {
+        const parsed = parseSummaryNumber(value);
+        return parsed > acc ? parsed : acc;
+      },
+      0,
     );
     summaryAnchor = parseSummaryNumber(summary.anchor);
   }
@@ -6414,42 +6552,91 @@ function updateSuccessCounter(card, device) {
     ? tracker.resetCutoff
     : null;
 
-  let maxCount = 0;
+  let maxCurrent = 0;
+  let maxTotal = 0;
   let anchorFromLogs = 0;
+  let sawSuccessLog = false;
   (device.logs || []).forEach((entry) => {
     if (!entry?.success) {
       return;
     }
+    sawSuccessLog = true;
     if (cutoffMs !== null) {
       const entryMs = parseTimestampMs(entry.created_at);
       if (!Number.isNaN(entryMs) && entryMs < cutoffMs) {
         return;
       }
     }
-    const parsed = parseSendLogPayload(entry.response);
-    if (!parsed || typeof parsed.count !== "number") {
+    const parsed = parseSendLogPayload(entry.response, entry);
+    if (!parsed) {
       return;
     }
-    let candidate = parsed.count;
-    if (parsed.isPrimary && typeof parsed.bccCount === "number" && parsed.bccCount > 0) {
-      candidate = parsed.count + parsed.bccCount;
+    const isLegacy = Boolean(parsed.legacyFormat);
+    const baseCurrent = typeof parsed.current === "number" ? parsed.current : (typeof parsed.count === "number" ? parsed.count : null);
+    if (baseCurrent !== null) {
+      let adjustedCurrent = Math.max(0, baseCurrent);
+      if (isLegacy && parsed.isPrimary && typeof parsed.bccCount === "number" && parsed.bccCount > 0) {
+        adjustedCurrent += parsed.bccCount;
+      }
+      if (adjustedCurrent > maxCurrent) {
+        maxCurrent = adjustedCurrent;
+      }
+    }
+    if (typeof parsed.total === "number" && parsed.total >= 0 && parsed.total > maxTotal) {
+      maxTotal = parsed.total;
     }
     if (parsed.isPrimary && typeof parsed.anchorCount === "number" && parsed.anchorCount > 0) {
       anchorFromLogs += parsed.anchorCount;
     }
-    if (candidate > maxCount) {
-      maxCount = candidate;
-    }
   });
 
-  const sentTotal = Math.max(summarySent, maxCount);
-  const anchorTotal = Math.max(summaryAnchor, anchorFromLogs);
+  const aggregateMax = (values) => values.reduce((acc, value) => {
+    const numeric = Number.isFinite(value) && value >= 0 ? value : 0;
+    return numeric > acc ? numeric : acc;
+  }, 0);
 
+  let sentCurrent = (() => {
+    const candidates = [summaryCurrent, maxCurrent];
+    if (!tracker.forceZero) {
+      candidates.push(tracker.current || 0);
+    }
+    return aggregateMax(candidates);
+  })();
+
+  let sentTotal = (() => {
+    const candidates = [summaryTotal, maxTotal, sentCurrent];
+    if (!tracker.forceZero) {
+      candidates.push(tracker.total || 0);
+    }
+    return aggregateMax(candidates);
+  })();
+
+  if (sentTotal < sentCurrent) {
+    sentTotal = sentCurrent;
+  }
+
+  let anchorTotal = aggregateMax([summaryAnchor, anchorFromLogs]);
+  if (!tracker.forceZero) {
+    anchorTotal = Math.max(anchorTotal, tracker.anchor || 0);
+  }
+
+  if (tracker.forceZero) {
+    if (sawSuccessLog || maxCurrent > 0 || maxTotal > 0) {
+      tracker.forceZero = false;
+    } else {
+      sentCurrent = 0;
+      sentTotal = 0;
+      anchorTotal = 0;
+    }
+  }
+
+  tracker.current = sentCurrent;
+  tracker.total = sentTotal;
   tracker.value = sentTotal;
   tracker.anchor = anchorTotal;
   const counterEl = card.querySelector('[data-role="successCounter"]');
   if (counterEl) {
-    counterEl.textContent = `누적 성공: ${formatCount(sentTotal)}건`;
+    counterEl.textContent = `현재 성공: ${formatCount(sentCurrent)}건 · 누적 성공: ${formatCount(sentTotal)}건`;
   }
   const elapsedEl = card.querySelector('[data-role="elapsedCounter"]');
   if (elapsedEl) {
@@ -7456,6 +7643,19 @@ function attachCardEvents(card) {
         if (card.__deviceData) {
           card.__deviceData.logs = [];
         }
+        const tracker = ensureSuccessTracker(currentDevice.id);
+        if (tracker) {
+          tracker.value = 0;
+          tracker.current = 0;
+          tracker.total = 0;
+          tracker.anchor = 0;
+          tracker.forceZero = true;
+          tracker.resetCutoff = null;
+        }
+        const counterEl = card.querySelector('[data-role="successCounter"]');
+        if (counterEl) {
+          counterEl.textContent = "현재 성공: 0건 · 누적 성공: 0건";
+        }
         setNotice(card, "로그를 삭제했습니다.");
         await loadDevices();
       } catch (err) {
@@ -7594,7 +7794,7 @@ function buildDeviceCard(device) {
       <div class="log-box-header">
         <div class="log-box-heading">
           <h4>로그</h4>
-          <div class="log-stats" data-role="successCounter">누적 성공: 0건</div>
+          <div class="log-stats" data-role="successCounter">현재 성공: 0건 · 누적 성공: 0건</div>
           <div class="log-stats secondary" data-role="elapsedCounter">경과: -</div>
         </div>
         <button class="ghost log-clear-btn" data-action="clear-logs">로그 초기화</button>
