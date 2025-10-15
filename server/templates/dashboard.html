@@ -1997,6 +1997,7 @@ button:not(:disabled):hover {
         <div class="global-section-header">
           <h3 class="global-section-title">발송 제어</h3>
           <div class="global-actions global-section-actions">
+            <button class="secondary" id="globalSaveAllBtn">설정 저장</button>
             <button id="globalApplyBtn">전체 적용</button>
             <button class="secondary" id="globalSendAllBtn">전체 발송</button>
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
@@ -8601,6 +8602,13 @@ initGlobalForm();
 initSubstitutionSection();
 initSinglePreviewModal();
 
+const globalSaveAllBtn = document.getElementById("globalSaveAllBtn");
+if (globalSaveAllBtn) {
+  globalSaveAllBtn.addEventListener("click", () => {
+    handleGlobalSaveAll();
+  });
+}
+
 document.getElementById("globalApplyBtn").addEventListener("click", () => {
   handleGlobalApply();
 });
@@ -8619,6 +8627,72 @@ document.getElementById("globalSendAllBtn").addEventListener("click", () => {
 document.getElementById("globalStopAllBtn").addEventListener("click", () => {
   handleGlobalStopAll();
 });
+
+async function handleGlobalSaveAll() {
+  const saveBtn = document.getElementById("globalSaveAllBtn");
+  if (!saveBtn) return;
+  const originalText = saveBtn.textContent;
+  saveBtn.disabled = true;
+  saveBtn.textContent = "설정 저장 중...";
+
+  let dirtyTargets = 0;
+  let successCount = 0;
+  const failures = [];
+
+  const cards = Object.values(cardRegistry || {});
+
+  for (const card of cards) {
+    if (!card || !card.isConnected) {
+      continue;
+    }
+    const deviceId = card.dataset.deviceId;
+    if (!deviceId) {
+      continue;
+    }
+    const device =
+      card.__deviceData ||
+      state.devices.find((item) => String(item.id) === String(deviceId));
+    if (!device || !device.id) {
+      continue;
+    }
+    const domain = getActiveDomain(card, device.active_domain);
+    const cacheEntry = fieldCache?.[device.id]?.[domain];
+    if (!cacheEntry?.dirty) {
+      continue;
+    }
+    dirtyTargets += 1;
+    try {
+      await saveConfig(card, device, domain);
+      successCount += 1;
+    } catch (err) {
+      failures.push({
+        device: device.name || device.id,
+        message: err?.message || "설정 저장에 실패했습니다.",
+      });
+    }
+  }
+
+  try {
+    if (failures.length) {
+      const sample = failures[0];
+      const prefix = successCount > 0 ? `총 ${successCount}대는 저장했지만, ` : "";
+      const detail = sample.device ? `${sample.device} - ${sample.message}` : sample.message;
+      setGlobalStatus(`${prefix}${failures.length}대의 카드에서 설정 저장이 실패했습니다. 예: ${detail}`, "error");
+    } else if (dirtyTargets === 0) {
+      setGlobalStatus("저장할 변경 사항이 없습니다. 모든 카드가 최신 상태입니다.", "info");
+    } else {
+      setGlobalStatus(`총 ${successCount}대의 카드 설정을 저장했습니다.`, "success");
+      try {
+        await loadDevices({ silent: true });
+      } catch (refreshErr) {
+        console.error("설정 저장 후 장치 목록 갱신에 실패했습니다.", refreshErr);
+      }
+    }
+  } finally {
+    saveBtn.disabled = false;
+    saveBtn.textContent = originalText;
+  }
+}
 
 async function handleGlobalApply(options = {}) {
   const overrides = options?.overrides && typeof options.overrides === "object" ? options.overrides : {};

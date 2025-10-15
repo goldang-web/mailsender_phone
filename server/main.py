@@ -2416,86 +2416,88 @@ def format_local_timestamp() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-def format_auto_stop_origin(origin: str) -> str:
-    normalized = (origin or "").lower()
-    if normalized == "imap":
-        return "IMAP 실패"
-    if normalized == "schedule":
-        return "예약된 자동 중지"
-    return "자동 중지"
-
-
-def format_auto_stop_metadata(metadata: Optional[Dict[str, Any]]) -> List[str]:
-    if not metadata:
-        return []
-    lines: List[str] = []
-    device_id = metadata.get("device_id")
-    if device_id:
-        lines.append(f"디바이스: {device_id}")
-    domain = metadata.get("domain")
-    if domain:
-        lines.append(f"도메인: {DOMAIN_LABELS.get(str(domain), str(domain))}")
-    domains = metadata.get("domains")
-    if isinstance(domains, (list, tuple, set)):
-        domain_labels = [DOMAIN_LABELS.get(str(item), str(item)) for item in domains if item]
-        if domain_labels:
-            lines.append(f"도메인 그룹: {', '.join(domain_labels)}")
-    send_type = metadata.get("send_type")
-    if send_type:
-        lines.append(f"발송 유형: {send_type}")
-    detail = metadata.get("detail")
-    if detail:
-        lines.append(f"세부: {detail}")
-    schedule_time = metadata.get("schedule_time")
-    if schedule_time:
-        lines.append(f"예약 시간: {schedule_time}")
-    job_id = metadata.get("job_id")
-    if job_id:
-        lines.append(f"작업 ID: {job_id}")
-    anchor_flag = metadata.get("anchor")
-    if anchor_flag:
-        lines.append("앵커 메일: 예")
-    return lines
-
-
 def build_pre_stop_message(
     reason: str,
     metadata: Optional[Dict[str, Any]],
 ) -> str:
-    lines = [
-        "[MailSender] 중지 사전 안내",
-        f"사유: {reason}",
-        "동작: 발송 중지 동작을 곧 실행합니다.",
-        f"시각: {format_local_timestamp()}",
-    ]
-    metadata_lines = format_auto_stop_metadata(metadata)
-    if metadata_lines:
-        lines.append("추가 정보:")
-        lines.extend(f"- {entry}" for entry in metadata_lines)
-    return "\n".join(lines)
+    return build_stop_notification_message(reason, metadata)
 
 
 def build_auto_stop_message(
     reason: str,
-    origin: str,
+    _origin: str,
     metadata: Optional[Dict[str, Any]],
-    result: Optional[Dict[str, Any]],
+    _result: Optional[Dict[str, Any]],
 ) -> str:
-    origin_label = format_auto_stop_origin(origin)
-    summary = result or {}
-    cancelled = summary.get("cancelled") or 0
-    cancel_requested = summary.get("cancel_requested") or 0
+    return build_stop_notification_message(reason, metadata)
+
+
+def build_stop_notification_message(
+    reason: str,
+    metadata: Optional[Dict[str, Any]],
+) -> str:
+    def simplify_stop_reason(raw: str) -> str:
+        base = (raw or "").strip()
+        if not base:
+            return "사유 정보 없음"
+        if ":" in base:
+            base = base.split(":", 1)[0].strip()
+        delimiter = " - 디바이스"
+        if delimiter in base:
+            base = base.split(delimiter, 1)[0].strip()
+        return base or "사유 정보 없음"
+
+    def coerce_int(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    def resolve_device_label(data: Optional[Dict[str, Any]]) -> str:
+        if not data:
+            return "알 수 없음"
+        candidates = [
+            data.get("device_name"),
+            data.get("device_label"),
+            data.get("device_id"),
+        ]
+        for candidate in candidates:
+            text = (str(candidate).strip() if candidate is not None else "")
+            if text:
+                return text
+        return "알 수 없음"
+
+    def extract_sent_counts(data: Optional[Dict[str, Any]]) -> Tuple[int, int]:
+        if not data:
+            return 0, 0
+        current_candidates = [
+            data.get("sent_window_count"),
+            data.get("sent_since_last_check"),
+            data.get("imap_sent_since_last_check"),
+        ]
+        total_candidates = [
+            data.get("client_sent"),
+            data.get("sent_total_success"),
+            data.get("sent_sequence_total"),
+        ]
+        current = next((coerce_int(val) for val in current_candidates if val is not None), 0)
+        total = next((coerce_int(val) for val in total_candidates if val is not None), 0)
+        return current, total
+
+    simplified_reason = simplify_stop_reason(reason)
+    device_label = resolve_device_label(metadata)
+    now = datetime.now().astimezone()
+    date_line = now.strftime("%Y-%m-%d")
+    time_line = now.strftime("%H:%M:%S %Z")
+    current_sent, total_sent = extract_sent_counts(metadata)
     lines = [
-        "[MailSender] 자동 중지 알림",
-        f"사유: {reason}",
-        f"발생원: {origin_label}",
-        f"취소 완료: {cancelled}건 · 취소 요청: {cancel_requested}건",
-        f"시각: {format_local_timestamp()}",
+        "[MailSender] 중지안내",
+        f"사유: {simplified_reason}",
+        f"디바이스: {device_label}",
+        f"날짜: {date_line}",
+        f"시각: {time_line}",
+        f"Sent: 현재 성공 {current_sent}건 / 누적 성공 {total_sent}건",
     ]
-    metadata_lines = format_auto_stop_metadata(metadata)
-    if metadata_lines:
-        lines.append("추가 정보:")
-        lines.extend(f"- {entry}" for entry in metadata_lines)
     return "\n".join(lines)
 
 
@@ -4425,6 +4427,9 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
         device = get_device(device_id, conn=conn)
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        existing_device_name = (device["name"] or "").strip()
+        payload_device_name = (payload.device_name or "").strip()
+        device_label = payload_device_name or existing_device_name or device_id
         now = now_ts()
         conn.execute(
             """
@@ -4509,6 +4514,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             schedule_reason = " / ".join(reason_parts) if reason_parts else "예약된 자동 정지 실행"
             schedule_metadata = {
                 "device_id": device_id,
+                "device_name": device_label,
                 "domains": schedule_triggers,
             }
             schedule_auto_stop_payload = handle_auto_stop(
@@ -4741,6 +4747,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 stop_reason = f"IMAP 체크 실패 - 디바이스 {device_id} ({report.send_type or 'unknown'})"
                 meta = {
                     "device_id": device_id,
+                    "device_name": device_label,
                     "domain": normalized_domain,
                     "send_type": report.send_type or "unknown",
                     "job_id": report.job_id,
@@ -4753,6 +4760,8 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     "failure_action": failure_action,
                     "notify_before_stop": notify_before_stop,
                     "sent_window_count": sent_window_count,
+                    "sent_since_last_check": new_sent_since,
+                    "client_sent": config_snapshot.get("client_sent"),
                     "sent_threshold": new_threshold_value,
                     "ip_change_attempted": ip_change_attempted,
                     "ip_change_success": ip_change_success,
