@@ -598,6 +598,8 @@ class MailClient:
         self._imap_throttle_flags: Dict[str, Dict[str, object]] = {}
         self._sent_guard_lock = threading.Lock()
 
+        self._upgrade_domain_schemas()
+
     # ------------------------------------------------------------------ #
     # 설정/환경 관리
     # ------------------------------------------------------------------ #
@@ -1771,6 +1773,77 @@ class MailClient:
         self._sequence_dirty.add(normalized)
         self._maybe_flush_sent_sequences()
         return new_value
+
+    def _upgrade_domain_schemas(self) -> None:
+        for domain, db_path in self.domain_paths.items():
+            self._ensure_emails_table_supports_nouser(domain, db_path)
+
+    def _ensure_emails_table_supports_nouser(self, domain: str, db_path: Path) -> None:
+        if not db_path.exists():
+            return
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                row = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='emails'"
+                ).fetchone()
+                create_sql = ""
+                if row is None:
+                    return
+                if isinstance(row, sqlite3.Row):
+                    create_sql = row["sql"]
+                elif isinstance(row, (list, tuple)):
+                    create_sql = row[0]
+                else:
+                    create_sql = str(row)
+                if create_sql and "nouser" in create_sql:
+                    return
+                if not create_sql:
+                    return
+                print(f"[DB] {domain} emails 테이블을 nouser 상태 지원하도록 갱신합니다.")
+                self._migrate_emails_table_add_nouser(conn)
+        except sqlite3.DatabaseError as exc:
+            print(f"[DB] {domain} 스키마 확인 실패: {exc}")
+
+    def _migrate_emails_table_add_nouser(self, conn: sqlite3.Connection) -> None:
+        columns = (
+            "id, email, source_file, version, status, priority, reserved_by, reserved_at, "
+            "next_retry_at, attempts, last_error, meta, created_at, updated_at"
+        )
+        create_sql = (
+            """
+            CREATE TABLE emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL UNIQUE,
+                source_file TEXT,
+                version INTEGER,
+                status TEXT CHECK(status IN ('pending','reserved','sent','block','failed','nouser','removed')) NOT NULL DEFAULT 'pending',
+                priority INTEGER DEFAULT 100,
+                reserved_by TEXT,
+                reserved_at TEXT,
+                next_retry_at TEXT,
+                attempts INTEGER DEFAULT 0,
+                last_error TEXT,
+                meta TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        try:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("BEGIN")
+            conn.execute("ALTER TABLE emails RENAME TO emails_backup")
+            conn.execute(create_sql)
+            conn.execute(
+                f"INSERT INTO emails ({columns}) SELECT {columns} FROM emails_backup"
+            )
+            conn.execute("DROP TABLE emails_backup")
+            conn.commit()
+        except sqlite3.DatabaseError as exc:
+            conn.rollback()
+            print(f"[DB] emails 테이블 갱신 실패: {exc}")
+            raise
 
     def _reset_sent_sequences(self, domains: Optional[Iterable[str]] = None) -> None:
         if domains is None:
@@ -4211,14 +4284,14 @@ class MailClient:
         batch_number = max(1, int(batch_index or 1))
         total_value = max(0, int(accumulated_total or 0))
         timestamp = time.strftime("%H:%M:%S", time.localtime())
-        device_label = (self.device_id or self.device_name or "-").strip() or "-"
+        device_label = (self.device_name or self.device_id or "-").strip() or "-"
         line = f"{safe_label}({batch_number}/{total_value}) | {timestamp} | {device_label}"
         if include_anchor:
             line += " | 알박기 포함"
         return line
 
     @staticmethod
-    def _build_sqlite_from_emails(self, db_path: Path, emails: List[str], source_name: str) -> None:
+    def _build_sqlite_from_emails(db_path: Path, emails: List[str], source_name: str) -> None:
         if db_path.exists():
             db_path.unlink()
         with sqlite3.connect(db_path) as conn:

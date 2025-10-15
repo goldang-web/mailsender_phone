@@ -20,7 +20,7 @@ spec.loader.exec_module(client_main)
 
 
 def _sent_log_pattern(label: str) -> re.Pattern[str]:
-    return re.compile(rf"^{label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| dev-1(?: \| 알박기 포함)?$")
+    return re.compile(rf"^{label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| TestDevice(?: \| 알박기 포함)?$")
 
 
 class DispatchLoggingTests(unittest.TestCase):
