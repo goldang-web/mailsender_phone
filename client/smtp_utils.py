@@ -5,6 +5,8 @@ from typing import Dict, List, Optional, Tuple
 
 from lib import test as telnet_mailer
 
+TELNET_READ_TIMEOUT_SECONDS = 5
+
 
 def resolve_smtp_host(host: str, port: int) -> str:
     candidate = (host or "").strip()
@@ -32,6 +34,10 @@ def send_via_telnet(
     bcc_emails: Optional[List[str]] = None,
     anchor_emails: Optional[List[str]] = None,
 ) -> Tuple[bool, str, datetime, List[Dict[str, object]]]:
+    try:
+        telnet_mailer.READ_LINE_TIMEOUT = int(TELNET_READ_TIMEOUT_SECONDS)
+    except Exception:
+        telnet_mailer.READ_LINE_TIMEOUT = TELNET_READ_TIMEOUT_SECONDS
     normalized = normalize_newlines(header_text or "")
     payload = normalized.replace("\n", "\r\n")
     attempt_hosts = []

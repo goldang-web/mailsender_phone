@@ -1,0 +1,12 @@
+[project]
+name = "mailsender-client"
+version = "0.0.61"
+description = "모바일 메일 발송 클라이언트"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31.0",
+]
+
+[tool.uv]
+package = "main.py"

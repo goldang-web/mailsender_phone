@@ -7,6 +7,8 @@ import time
 from email.header import Header
 from typing import List, Optional, Tuple
 
+READ_LINE_TIMEOUT = 5
+
 # SMTP 기본 포트
 smtp_port = 25  # SMTP 기본 포트
 
@@ -89,7 +91,7 @@ def send_mail_telnet(
                     response_lines.append(trimmed)
 
             def read_line(label: str, address: Optional[str] = None) -> str:
-                raw = tn.read_until(b"\r\n", timeout=5)
+                raw = tn.read_until(b"\r\n", timeout=READ_LINE_TIMEOUT)
                 text = raw.decode('utf-8', errors='ignore')
                 entry_label = label if address is None else f"{label}:{address}"
                 record(entry_label, text)
