@@ -1291,10 +1291,6 @@ class MailClient:
             f"Sent 누적 확인용 테스트 메일입니다. 발송 시각(UTC): {probe_started.isoformat()}.\n"
         )
         payload_header = header_override or default_header
-        self._log_imap_console(
-            f"IMAP 발송 · 확인 메일 발송 시도 · RCPT {rcpt_to}",
-            domain=normalized,
-        )
         try:
             success, response_text, completed_at, _rcpt_details, _data_response = send_via_telnet(
                 smtp_host=smtp_host,
@@ -1371,7 +1367,6 @@ class MailClient:
         last_status_line = "발송 실패"
         last_detail_line: Optional[str] = None
         sent_at_value: Optional[datetime] = None
-        max_attempts = 1
         max_retry_limit = 2
 
         while attempts < max_retry_limit:
@@ -1405,7 +1400,7 @@ class MailClient:
                     ip_after_change=ip_after_change,
                     attempts=attempts,
                 )
-            allow_retry = False
+            should_retry = False
             lower_sources = [status_line.lower(), (detail_line or "").lower()]
             detected_marker: Optional[str] = None
             detected_detail: Optional[str] = None
@@ -1434,17 +1429,13 @@ class MailClient:
                 result_label = "성공" if success_change else "실패"
                 self._log_imap_console(f"IP 변경 {result_label} · {message}", domain=normalized)
                 if success_change:
-                    max_attempts = min(max_attempts + 1, max_retry_limit)
-                    allow_retry = True
+                    should_retry = True
                     time.sleep(2.0)
                 else:
                     break
 
-            if allow_retry and attempts < max_attempts:
+            if should_retry and attempts < max_retry_limit:
                 continue
-            if attempts >= max_attempts:
-                break
-
             break
 
         if last_status_line:
@@ -1595,6 +1586,10 @@ class MailClient:
             probe_sent_at: Optional[datetime] = None
             if passed_probe_result is None and send_type == "sent-threshold":
                 if smtp_context:
+                    self._log_imap_console(
+                        f"IMAP 발송 · 확인 메일 발송 시도 · RCPT {username}",
+                        domain=normalized,
+                    )
                     probe_success, probe_sent_at, probe_status_line, probe_detail_line = self._send_imap_probe_mail(
                         domain=normalized,
                         smtp_context=smtp_context,
@@ -1736,6 +1731,12 @@ class MailClient:
                 latency = result.get("latency")
                 received_at = result.get("received_at")
                 reason_text = result.get("reason")
+                sent_display = result.get("sent_display")
+                received_display = result.get("received_display")
+                if sent_display:
+                    self._log_imap_console(f"  ↳ 발신 {sent_display}", domain=normalized)
+                if received_display:
+                    self._log_imap_console(f"  ↳ 수신 {received_display}", domain=normalized)
                 latency_label = f"{latency:.1f}s" if isinstance(latency, (int, float)) else "-"
                 self._log_imap_console(
                     "자동 확인 완료 · "

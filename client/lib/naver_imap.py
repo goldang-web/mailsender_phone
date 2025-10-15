@@ -448,6 +448,14 @@ def verify_delivery(
     def _fmt_local(dt: datetime) -> str:
         return dt.astimezone().strftime("%H:%M:%S%z")
 
+    sent_address_display = expected_header_display or header_from or mail_from or "-"
+    sent_line = f"{sent_address_display or '-'} {_fmt_local(sent_dt)}"
+    default_received_line = "- -"
+
+    def _log_sent_received(received_line: str) -> None:
+        print(f"[IMAP 확인] 발신 {sent_line}", flush=True)
+        print(f"[IMAP 확인] 수신 {received_line}", flush=True)
+
     mail = None
     try:
         mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=30)
@@ -455,6 +463,7 @@ def verify_delivery(
         mail.select("Junk", readonly=True)
         status, messages = mail.search(None, "ALL")
         if status != "OK":
+            _log_sent_received(default_received_line)
             return {
                 "status": "error",
                 "latency": None,
@@ -463,11 +472,12 @@ def verify_delivery(
                 "allowed_latency": allowed,
                 "sent_at": sent_dt.isoformat(),
                 "delay_before_check": delay_before_check,
+                "sent_display": sent_line,
+                "received_display": default_received_line,
             }
         mail_ids = messages[0].split()
         if not mail_ids:
-            print("[IMAP 확인] 발송시각:", _fmt_local(sent_dt), flush=True)
-            print("[IMAP 확인] 수신시각: -", flush=True)
+            _log_sent_received(default_received_line)
             print("[IMAP 확인] 지연: 측정 불가", flush=True)
             print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
             print("[IMAP 확인] 판정: 메일함이 비어 있습니다.", flush=True)
@@ -479,6 +489,8 @@ def verify_delivery(
                 "allowed_latency": allowed,
                 "sent_at": sent_dt.isoformat(),
                 "delay_before_check": delay_before_check,
+                "sent_display": sent_line,
+                "received_display": default_received_line,
             }
 
         candidates = list(reversed(mail_ids[-search_limit:]))
@@ -542,8 +554,9 @@ def verify_delivery(
             else:
                 received_at = received_at.astimezone(timezone.utc)
             latency_raw = (received_at - sent_dt).total_seconds()
-            print(f"[IMAP 확인] 발송시각: {_fmt_local(sent_dt)}", flush=True)
-            print(f"[IMAP 확인] 수신시각: {_fmt_local(received_at)}", flush=True)
+            received_address_display = decoded_from or sender_address or "-"
+            received_line = f"{received_address_display or '-'} {_fmt_local(received_at)}"
+            _log_sent_received(received_line)
             print(f"[IMAP 확인] 지연: {latency_raw:.1f}초", flush=True)
             latency = abs(latency_raw)
             print(f"[IMAP 확인] 지연(절대값): {latency:.1f}초", flush=True)
@@ -554,6 +567,8 @@ def verify_delivery(
                 "allowed_latency": allowed,
                 "delay_before_check": delay_before_check,
                 "sent_at": sent_dt.isoformat(),
+                "sent_display": sent_line,
+                "received_display": received_line,
             }
             if latency <= allowed:
                 print("[IMAP 확인] 판정: 성공", flush=True)
@@ -565,8 +580,7 @@ def verify_delivery(
             result_payload["status"] = "failure"
             return result_payload
 
-        print(f"[IMAP 확인] 발송시각: {_fmt_local(sent_dt)}", flush=True)
-        print("[IMAP 확인] 수신시각: -", flush=True)
+        _log_sent_received(default_received_line)
         print("[IMAP 확인] 지연: 측정 불가", flush=True)
         print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
         if sender_mismatch_found:
@@ -583,6 +597,8 @@ def verify_delivery(
             "allowed_latency": allowed,
             "sent_at": sent_dt.isoformat(),
             "delay_before_check": delay_before_check,
+            "sent_display": sent_line,
+            "received_display": default_received_line,
         }
     except imaplib.IMAP4.abort as exc:
         raise IMAPNetworkError(f"IMAP 세션이 예기치 않게 종료되었습니다: {exc}", original=exc) from exc
