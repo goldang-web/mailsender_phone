@@ -23,7 +23,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
 import smtp_utils
-from smtp_utils import send_via_telnet
+from smtp_utils import send_via_telnet, set_telnet_debug_mode
 from urllib.parse import urlparse, urlunparse
 from lib.change_ip import change_mobile_ip_at_phone, get_public_ipv4
 from lib.naver_imap import (
@@ -34,9 +34,9 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.61"
+APP_VERSION = "0.0.62"
 
-smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 30
+smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -96,6 +96,7 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "domain_cycles": {},
     "stop_schedule": {},
     "imap_settings": {},
+    "telnet_debug_mode": False,
 }
 
 IMAP_ALLOWED_LATENCY_MIN_SECONDS = 5
@@ -283,6 +284,27 @@ def configure_device_name(config: Dict[str, object]) -> Dict[str, object]:
                 print("디바이스 ID를 재발급하도록 설정했습니다. 다음 연결 시 새로운 ID가 생성됩니다.")
             save_config(config)
     return config
+
+
+def configure_settings_menu(config: Dict[str, object]) -> Dict[str, object]:
+    while True:
+        current = bool(config.get("telnet_debug_mode"))
+        state_label = "ON" if current else "OFF"
+        print("\n--- 설정 ---")
+        print(f"1. 텔넷 디버그 모드 {state_label} (토글)")
+        print("0. 뒤로")
+        choice = input("선택> ").strip()
+        if choice == "1":
+            new_state = not current
+            config["telnet_debug_mode"] = new_state
+            save_config(config)
+            set_telnet_debug_mode(new_state)
+            print(f"텔넷 디버그 모드를 {'ON' if new_state else 'OFF'}로 설정했습니다.")
+        elif choice in {"0", "q", "Q"}:
+            break
+        else:
+            print("알 수 없는 선택입니다. 다시 입력하세요.")
+    return load_config()
 
 
 def ensure_required_config(config: Dict[str, object]) -> Dict[str, object]:
@@ -562,6 +584,8 @@ class MailClient:
                 self.sent_sequences[key] = 0
         for domain in DOMAINS:
             self.sent_sequences.setdefault(domain, 0)
+        self.telnet_debug_mode = bool(config.get("telnet_debug_mode"))
+        smtp_utils.set_telnet_debug_mode(self.telnet_debug_mode)
         self._sequence_dirty: Set[str] = set()
         self._last_sequence_flush: float = 0.0
         self._imap_executor = ThreadPoolExecutor(max_workers=2)
@@ -717,6 +741,7 @@ class MailClient:
         snapshot["stop_schedule"] = self._serialize_stop_schedule()
         snapshot["sent_sequences"] = self.sent_sequences
         snapshot["imap_settings"] = self._serialize_imap_settings()
+        snapshot["telnet_debug_mode"] = self.telnet_debug_mode
         save_config(snapshot)
         self.config["sent_sequences"] = self.sent_sequences
         self.config["imap_settings"] = snapshot["imap_settings"]
@@ -1183,6 +1208,7 @@ class MailClient:
                 rcpt_to=rcpt_to,
                 header_text=payload_header,
                 bcc_emails=None,
+                debug=self.telnet_debug_mode,
             )
         except Exception as exc:  # pylint: disable=broad-except
             status_line = "테스트 메일 발송 예외"
@@ -2542,6 +2568,7 @@ class MailClient:
             rcpt_to=rcpt_to,
             header_text=config.get("header", ""),
             bcc_emails=bcc_emails,
+            debug=self.telnet_debug_mode,
         )
         sent_at = completed_at if isinstance(completed_at, datetime) else utc_now()
         response_text = response_text or ""
@@ -3115,6 +3142,7 @@ class MailClient:
                         header_text=config.get("header", ""),
                         bcc_emails=payload_bcc,
                         anchor_emails=injected_emails,
+                        debug=self.telnet_debug_mode,
                     )
                     response_text = response_text or ""
                     sent_at = completed_at if isinstance(completed_at, datetime) else utc_now()
@@ -4412,6 +4440,7 @@ DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
 
 def main() -> None:
     config = load_config()
+    set_telnet_debug_mode(bool(config.get("telnet_debug_mode")))
     wake_acquired = acquire_wake_lock()
     try:
         while True:
@@ -4421,6 +4450,7 @@ def main() -> None:
             print(f"1. 서버 연결 (현재: {config.get('server_url') or '미설정'})")
             print(f"2. 서버 주소 설정")
             print(f"3. 디바이스 이름 설정 (현재: {config.get('device_name') or '미설정'})")
+            print(f"4. 설정 (텔넷 디버그 모드: {'ON' if config.get('telnet_debug_mode') else 'OFF'})")
             print("0. 종료")
             choice = input("선택> ").strip()
 
@@ -4435,10 +4465,14 @@ def main() -> None:
                 except KeyboardInterrupt:
                     print("\n연결을 종료했습니다.")
                 config = load_config()
+                set_telnet_debug_mode(bool(config.get("telnet_debug_mode")))
             elif choice == "2":
                 config = configure_server_url(config)
             elif choice == "3":
                 config = configure_device_name(config)
+            elif choice == "4":
+                config = configure_settings_menu(config)
+                set_telnet_debug_mode(bool(config.get("telnet_debug_mode")))
             elif choice in {"0", "q", "Q"}:
                 print("종료합니다.")
                 break

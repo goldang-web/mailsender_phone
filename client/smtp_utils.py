@@ -6,6 +6,13 @@ from typing import Dict, List, Optional, Tuple
 from lib import test as telnet_mailer
 
 TELNET_READ_TIMEOUT_SECONDS = 5
+TELNET_DEBUG_MODE = False
+
+
+def set_telnet_debug_mode(enabled: bool) -> None:
+    """텔넷 요청/응답 전체 출력 여부를 설정합니다."""
+    global TELNET_DEBUG_MODE
+    TELNET_DEBUG_MODE = bool(enabled)
 
 
 def resolve_smtp_host(host: str, port: int) -> str:
@@ -33,6 +40,8 @@ def send_via_telnet(
     header_text: str,
     bcc_emails: Optional[List[str]] = None,
     anchor_emails: Optional[List[str]] = None,
+    *,
+    debug: Optional[bool] = None,
 ) -> Tuple[bool, str, datetime, List[Dict[str, object]]]:
     try:
         telnet_mailer.READ_LINE_TIMEOUT = int(TELNET_READ_TIMEOUT_SECONDS)
@@ -56,6 +65,8 @@ def send_via_telnet(
     completed_at = datetime.now(timezone.utc)
     rcpt_details: List[Dict[str, object]] = []
 
+    debug_enabled = TELNET_DEBUG_MODE if debug is None else bool(debug)
+
     for index, host_candidate in enumerate(attempt_hosts):
         if index > 0:
             print("지정 호스트 실패. MX 레코드로 대체 시도합니다.")
@@ -67,6 +78,7 @@ def send_via_telnet(
             header=payload,
             bcc_emails=bcc_targets or None,
             smtp_port_override=smtp_port or None,
+            debug=debug_enabled,
         )
         completed_at = datetime.now(timezone.utc)
         if isinstance(raw_response, tuple) and len(raw_response) == 2:

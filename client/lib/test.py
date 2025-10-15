@@ -70,6 +70,8 @@ def send_mail_telnet(
     header,
     bcc_emails=None,
     smtp_port_override=None,
+    *,
+    debug: bool = False,
 ):
     if smtp_server is None:
         smtp_server = get_mx_server_for_email(recipient_email)
@@ -77,9 +79,18 @@ def send_mail_telnet(
     response_lines: List[str] = []
     response_entries: List[Tuple[str, str]] = []
 
+    debug_enabled = bool(debug)
+
+    def debug_log(message: str) -> None:
+        if debug_enabled:
+            print(f"[텔넷 디버그] {message}")
+
     try:
         port_value = smtp_port_override or smtp_port
+        debug_log(f"텔넷 연결 시도 → {smtp_server}:{port_value}")
         with telnetlib.Telnet(smtp_server, port_value) as tn:
+            debug_log("텔넷 연결 성공")
+
             def record(label: str, text: str) -> None:
                 trimmed = (text or "").strip()
                 response_entries.append((label, trimmed))
@@ -89,6 +100,12 @@ def send_mail_telnet(
                     response_lines.append(label)
                 elif trimmed:
                     response_lines.append(trimmed)
+                if debug_enabled:
+                    entry_label = label if label else "RESP"
+                    if trimmed:
+                        debug_log(f"<< {entry_label}: {trimmed}")
+                    else:
+                        debug_log(f"<< {entry_label}")
 
             def read_line(label: str, address: Optional[str] = None) -> str:
                 raw = tn.read_until(b"\r\n", timeout=READ_LINE_TIMEOUT)
@@ -97,26 +114,36 @@ def send_mail_telnet(
                 record(entry_label, text)
                 return text
 
+            def write_line(text: str) -> None:
+                debug_log(f">> {text}")
+                tn.write(f"{text}\r\n".encode('utf-8'))
+
             read_line("CONNECT")
-            tn.write(f"HELO {helo_name}\r\n".encode('utf-8'))
+            write_line(f"HELO {helo_name}")
             read_line("HELO")
 
-            tn.write(f"MAIL FROM:<{sender_email}>\r\n".encode('utf-8'))
+            write_line(f"MAIL FROM:<{sender_email}>")
             read_line("MAIL FROM")
 
-            tn.write(f"RCPT TO:<{recipient_email}>\r\n".encode('utf-8'))
+            write_line(f"RCPT TO:<{recipient_email}>")
             read_line("RCPT", recipient_email)
 
             if bcc_emails:
                 for bcc_email in bcc_emails:
-                    tn.write(f"RCPT TO:<{bcc_email}>\r\n".encode('utf-8'))
+                    write_line(f"RCPT TO:<{bcc_email}>")
                     read_line("RCPT", bcc_email)
 
-            tn.write(b"DATA\r\n")
+            write_line("DATA")
             read_line("DATA")
 
             payload = f"{header}\r\n.\r\n"
             try:
+                if debug_enabled:
+                    for line in payload.split("\r\n"):
+                        if line == "":
+                            debug_log(">> ")
+                        else:
+                            debug_log(f">> {line}")
                 tn.write(payload.encode('euc-kr'))
             except UnicodeEncodeError as exc:
                 fallback_lines = []
@@ -128,10 +155,12 @@ def send_mail_telnet(
                         fallback_lines.append(f"&#{ord(char)};")
                 alt_payload = ''.join(fallback_lines)
                 record("EUC-KR 변환 실패", str(exc))
+                if debug_enabled:
+                    debug_log(f">> [EUC-KR 변환 실패, 대체 전송] {alt_payload}")
                 tn.write(alt_payload.encode('euc-kr', errors='ignore'))
 
             read_line("DATA END")
-            tn.write(b"QUIT\r\n")
+            write_line("QUIT")
             read_line("QUIT")
 
         return "\n".join(response_lines), response_entries
@@ -139,4 +168,5 @@ def send_mail_telnet(
         message = f"ERROR: {exc}"
         response_lines.append(message)
         response_entries.append(("ERROR", str(exc)))
+        debug_log(f"<< ERROR: {exc}")
         return "\n".join(response_lines), response_entries
