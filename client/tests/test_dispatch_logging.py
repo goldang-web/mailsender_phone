@@ -165,6 +165,49 @@ class DispatchLoggingTests(unittest.TestCase):
         line = self.client._format_dispatch_log_line("Sent", current_batch_success=3, accumulated_total=15, include_anchor=True)
         self.assertIn("알박기 포함", line)
 
+    def test_single_send_passes_effective_mail_from_to_imap(self) -> None:
+        captured_mail_from: list[str] = []
+
+        def fake_send_success(*, smtp_host, smtp_port, helo, mail_from, rcpt_to, header_text, bcc_emails=None, anchor_emails=None, debug=None):
+            rcpt_details = [
+                {
+                    "address": rcpt_to,
+                    "code": "250",
+                    "message": "250 2.1.5 OK",
+                    "is_primary": True,
+                    "is_bcc": False,
+                    "is_anchor": False,
+                    "success": True,
+                }
+            ]
+            data_response = {"code": "250", "message": "250 2.0.0 OK"}
+            return True, "250 2.0.0 OK", datetime.now(timezone.utc), rcpt_details, data_response
+
+        def fake_submit(self, *, domain, job_id, send_type, mail_from, **kwargs):  # type: ignore[override]
+            captured_mail_from.append(mail_from)
+            return None
+
+        payload = {
+            "config": {"smtp_host": "", "smtp_port": 25, "helo": "", "mail_from": "resolved@example.com"},
+            "rcpt_to": "user@example.com",
+        }
+
+        with patch.object(client_main, "send_via_telnet", fake_send_success), \
+             patch.object(client_main.MailClient, "_imap_enabled", lambda self, domain: True), \
+             patch.object(client_main.MailClient, "_submit_imap_check", fake_submit):
+            result = self.client.handle_single_send("naver", payload, "job-mailfrom")
+
+        self.assertEqual(result.status, "success")
+        self.assertEqual(captured_mail_from[-1] if captured_mail_from else None, "resolved@example.com")
+        settings = self.client._imap_settings_for_domain("naver")
+        self.assertEqual(settings.get("last_mail_from"), "resolved@example.com")
+
+    def test_effective_mail_from_falls_back_to_last_value(self) -> None:
+        settings = self.client._imap_settings_for_domain("naver")
+        settings["last_mail_from"] = "stored@example.com"
+        value = self.client._effective_mail_from("naver", {}, fallback=None)
+        self.assertEqual(value, "stored@example.com")
+
 
 if __name__ == "__main__":
     unittest.main()

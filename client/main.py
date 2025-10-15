@@ -1080,6 +1080,34 @@ class MailClient:
             self.imap_settings[normalized] = settings
         return settings
 
+    def _remember_last_mail_from(self, domain: str, value: str) -> None:
+        normalized = (domain or "").lower()
+        candidate = (value or "").strip()
+        if not normalized or not candidate:
+            return
+        settings = self._imap_settings_for_domain(normalized)
+        if settings.get("last_mail_from") == candidate:
+            return
+        settings["last_mail_from"] = candidate
+        self._imap_settings_dirty.add(normalized)
+
+    def _effective_mail_from(
+        self,
+        domain: str,
+        config: Optional[Dict[str, object]],
+        fallback: Optional[str] = None,
+    ) -> str:
+        normalized = (domain or "").lower()
+        candidate = ""
+        if isinstance(config, dict):
+            candidate = str(config.get("mail_from") or "").strip()
+        if not candidate:
+            settings = self._imap_settings_for_domain(normalized)
+            candidate = str(settings.get("last_mail_from") or "").strip()
+        if not candidate and fallback is not None:
+            candidate = str(fallback or "").strip()
+        return candidate
+
     def _current_sent_threshold(self, domain: str) -> int:
         settings = self._imap_settings_for_domain(domain)
         threshold = sanitize_imap_sent_threshold(
@@ -1190,6 +1218,7 @@ class MailClient:
         mail_from: str,
         rcpt_to: str,
     ) -> Tuple[bool, Optional[datetime], str, Optional[str]]:
+        normalized = (domain or "").lower()
         if not smtp_context:
             return False, None, "SMTP 설정 없음", "테스트 메일 발송을 위한 SMTP 설정이 비어 있습니다."
         smtp_host = str(smtp_context.get("smtp_host") or "").strip()
@@ -2700,11 +2729,12 @@ class MailClient:
             candidate_bcc_entries = []
         bcc_emails = self._sanitize_email_list(candidate_bcc_entries, limit=30)
         bcc_rows: List[sqlite3.Row] = []
+        mail_from_value = self._effective_mail_from(normalized_domain, config)
         success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
             smtp_port=int(config.get("smtp_port") or 25),
             helo=config.get("helo", ""),
-            mail_from=config.get("mail_from", ""),
+            mail_from=mail_from_value,
             rcpt_to=rcpt_to,
             header_text=config.get("header", ""),
             bcc_emails=bcc_emails,
@@ -2803,7 +2833,8 @@ class MailClient:
         print(log_line)
         status = "success" if session_success else "failed"
         if delivery_status == "sent" and normalized_domain and self._imap_enabled(normalized_domain):
-            mail_from_value = config.get("mail_from", "")
+            if mail_from_value:
+                self._remember_last_mail_from(normalized_domain, mail_from_value)
             settings = self._imap_settings_for_domain(normalized_domain)
             allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
             single_delay = sanitize_imap_delay(
@@ -2894,8 +2925,8 @@ class MailClient:
         bcc_count = self._sanitize_bcc_count(config.get("bcc_count"))
         group_size = max(1, 1 + bcc_count)
         anchor_interval = self._sanitize_anchor_interval(config.get("anchor_interval"))
+        mail_from_value = self._effective_mail_from(normalized, config)
         settings = self._imap_settings_for_domain(normalized)
-        mail_from_value = config.get("mail_from", "")
         current_sent_counter = self._get_sent_counter(normalized)
         threshold_check_request: Optional[Dict[str, object]] = None
         threshold_check_future: Optional[Future] = None
@@ -3280,7 +3311,7 @@ class MailClient:
                         smtp_host=config.get("smtp_host", ""),
                         smtp_port=int(config.get("smtp_port") or 25),
                         helo=config.get("helo", ""),
-                        mail_from=config.get("mail_from", ""),
+                        mail_from=mail_from_value,
                         rcpt_to=rcpt_to,
                         header_text=config.get("header", ""),
                         bcc_emails=payload_bcc,
@@ -3363,6 +3394,8 @@ class MailClient:
                         return
                     if not self._imap_enabled(normalized):
                         return
+                    if mail_from_value:
+                        self._remember_last_mail_from(normalized, mail_from_value)
                     current_sent_counter = max(0, current_sent_counter + increment)
                     settings_local = self._imap_settings_for_domain(normalized)
                     threshold_value = self._current_sent_threshold(normalized)
@@ -4061,7 +4094,9 @@ class MailClient:
         if not self._imap_enabled(normalized):
             message = "IMAP 확인이 비활성화되어 있어 수동 도착 확인을 실행하지 않습니다."
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
-        mail_from_value = str(config_payload.get("mail_from") or "").strip()
+        mail_from_value = self._effective_mail_from(normalized, config_payload)
+        if mail_from_value:
+            self._remember_last_mail_from(normalized, mail_from_value)
         smtp_context = {
             "smtp_host": config_payload.get("smtp_host"),
             "smtp_port": config_payload.get("smtp_port"),
