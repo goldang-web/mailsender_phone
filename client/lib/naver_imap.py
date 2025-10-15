@@ -407,6 +407,9 @@ def verify_delivery(
         sent_dt = sent_dt.replace(tzinfo=timezone.utc)
     else:
         sent_dt = sent_dt.astimezone(timezone.utc)
+    _, expected_address = parseaddr(str(mail_from or ""))
+    expected_address = (expected_address or str(mail_from or "")).strip()
+    expected_address_lower = expected_address.lower()
     try:
         allowed = int(allowed_delay)
     except (TypeError, ValueError):
@@ -460,6 +463,7 @@ def verify_delivery(
             }
 
         candidates = list(reversed(mail_ids[-search_limit:]))
+        sender_mismatch_found = False
         for num in candidates:
             status, data = mail.fetch(num, "(RFC822.HEADER)")
             if status != "OK" or not data or data[0] is None:
@@ -468,6 +472,25 @@ def verify_delivery(
             if not header_bytes:
                 continue
             msg = email.message_from_bytes(header_bytes)
+            from_header = msg.get("From") or ""
+            decoded_from = decode_mime_header_value(from_header)
+            _, sender_address = parseaddr(from_header)
+            normalized_sender = (sender_address or "").strip().lower()
+            if not normalized_sender:
+                sender_mismatch_found = True
+                print(
+                    f"[IMAP 확인] 발신자 주소를 해석하지 못했습니다. 헤더={decoded_from or '-'}",
+                    flush=True,
+                )
+                continue
+            if expected_address_lower and normalized_sender != expected_address_lower:
+                sender_mismatch_found = True
+                print(
+                    "[IMAP 확인] 발신자 불일치:"
+                    f" 수신 {normalized_sender} · 기대 {expected_address_lower}",
+                    flush=True,
+                )
+                continue
             date_header = msg.get("Date")
             if not date_header:
                 continue
@@ -507,12 +530,17 @@ def verify_delivery(
         print("[IMAP 확인] 수신시각: -", flush=True)
         print("[IMAP 확인] 지연: 측정 불가", flush=True)
         print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
-        print("[IMAP 확인] 판정: 유효한 메일을 찾지 못했습니다.", flush=True)
+        if sender_mismatch_found:
+            reason_text = "발신자 주소가 일치하는 메일을 찾지 못했습니다."
+            print("[IMAP 확인] 판정: 발신자 주소가 일치하는 메일 없음", flush=True)
+        else:
+            reason_text = "유효한 메일을 찾지 못했습니다."
+            print("[IMAP 확인] 판정: 유효한 메일을 찾지 못했습니다.", flush=True)
         return {
             "status": "failure",
             "latency": None,
             "received_at": None,
-            "reason": "유효한 메일을 찾지 못했습니다.",
+            "reason": reason_text,
             "allowed_latency": allowed,
             "sent_at": sent_dt.isoformat(),
             "delay_before_check": delay_before_check,

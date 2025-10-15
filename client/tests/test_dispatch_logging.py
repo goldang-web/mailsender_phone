@@ -22,6 +22,12 @@ spec.loader.exec_module(client_main)
 def _sent_log_pattern(label: str) -> re.Pattern[str]:
     return re.compile(rf"^{label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| TestDevice(?: \| 알박기 포함)?$")
 
+def _extract_counts(entry: str) -> tuple[int, int]:
+    match = re.match(r"^(Sent|Fail)\((\d+)/(\d+)\)", entry)
+    if not match:
+        raise AssertionError(f"로그 포맷이 예상과 다릅니다: {entry}")
+    return int(match.group(2)), int(match.group(3))
+
 
 class DispatchLoggingTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -76,6 +82,9 @@ class DispatchLoggingTests(unittest.TestCase):
 
         log_entry = result.result["logs"][0]["log"]
         self.assertRegex(log_entry, _sent_log_pattern("Sent"))
+        current_batch, cumulative = _extract_counts(log_entry)
+        self.assertEqual(current_batch, 1)
+        self.assertEqual(cumulative, 1)
         self.assertEqual(result.result["logs"][0]["tags"], [])
 
     def test_single_send_with_nouser_excludes_from_counts(self) -> None:
@@ -115,6 +124,9 @@ class DispatchLoggingTests(unittest.TestCase):
 
         log_entry = result.result["logs"][0]
         self.assertRegex(log_entry["log"], _sent_log_pattern("Sent"))
+        current_batch, cumulative = _extract_counts(log_entry["log"])
+        self.assertEqual(current_batch, 1)
+        self.assertEqual(cumulative, 1)
         self.assertEqual(log_entry["nouser_total"], 1)
         self.assertEqual(log_entry["tags"], ["nouser"])
 
@@ -143,10 +155,14 @@ class DispatchLoggingTests(unittest.TestCase):
 
         self.assertEqual(result.status, "failed")
         self.assertEqual(self.client.sent_sequences["naver"], 0)
-        self.assertRegex(result.result["logs"][0]["log"], _sent_log_pattern("Fail"))
+        fail_entry = result.result["logs"][0]["log"]
+        self.assertRegex(fail_entry, _sent_log_pattern("Fail"))
+        current_batch, cumulative = _extract_counts(fail_entry)
+        self.assertEqual(current_batch, 0)
+        self.assertEqual(cumulative, 0)
 
     def test_log_line_appends_anchor_tag(self) -> None:
-        line = self.client._format_dispatch_log_line("Sent", batch_index=3, accumulated_total=15, include_anchor=True)
+        line = self.client._format_dispatch_log_line("Sent", current_batch_success=3, accumulated_total=15, include_anchor=True)
         self.assertIn("알박기 포함", line)
 
 

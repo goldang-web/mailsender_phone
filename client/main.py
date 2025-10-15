@@ -2759,7 +2759,6 @@ class MailClient:
             (data_response or {}).get("message"),
         )
         sequence_domain = (normalized_domain or (self.active_domain or "naver")).lower()
-        session_index = 1
         recipient_keys: List[str] = []
         primary_key = self._normalize_email_key(rcpt_to)
         if primary_key:
@@ -2776,9 +2775,10 @@ class MailClient:
             accumulated_total = self._next_sent_sequence(normalized_domain or None, successful_recipient_count)
         else:
             accumulated_total = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
+        current_batch_success = successful_recipient_count if session_success else 0
         log_line = self._format_dispatch_log_line(
             "Sent" if session_success else "Fail",
-            session_index,
+            current_batch_success,
             accumulated_total,
             include_anchor=False,
         )
@@ -2862,7 +2862,12 @@ class MailClient:
         primary_log = (
             dispatch_logs[0]["log"]
             if dispatch_logs
-            else self._format_dispatch_log_line("Fail", 1, max(0, int(self.sent_sequences.get(sequence_domain, 0))), include_anchor=False)
+            else self._format_dispatch_log_line(
+                "Fail",
+                0,
+                max(0, int(self.sent_sequences.get(sequence_domain, 0))),
+                include_anchor=False,
+            )
         )
         job_result = JobResult(
             job_id=job_id,
@@ -2906,7 +2911,6 @@ class MailClient:
         bcc_processed = 0
         anchor_processed = 0
         anchor_retry_pending = 0
-        session_processed = 0
         nouser_count = 0
         dispatched_db_total = 0
         progress_interval = min(3.0, max(1.0, float(self.interval or 3)))
@@ -3484,7 +3488,7 @@ class MailClient:
                 def process_future(future: Future, group: DispatchGroup) -> None:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
                     nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
-                    nonlocal anchor_retry_pending, current_sent_counter, session_processed, nouser_count
+                    nonlocal anchor_retry_pending, current_sent_counter, nouser_count
                     try:
                         outcome = future.result()
                     except Exception as exc:  # pylint: disable=broad-except
@@ -3554,7 +3558,6 @@ class MailClient:
                         throttle_detected = False
                         matched_message = recipient_limit_message
                     error_text = None if outcome.delivery_status == "sent" else (detail_for_log or outcome.status_line or "")[-500:]
-                    session_processed += 1
                     group_size_actual = len(recipients)
                     recipient_emails = [record.email for record in recipients]
                     bcc_count = len(group.bcc)
@@ -3655,9 +3658,10 @@ class MailClient:
                         elif anchor_retry_count > 0:
                             anchor_retry_pending += anchor_retry_count
 
+                    current_batch_success = success_increment
                     log_line = self._format_dispatch_log_line(
                         "Sent" if session_success else "Fail",
-                        session_processed,
+                        current_batch_success,
                         sequence_total,
                         include_anchor=anchor_count > 0,
                     )
@@ -4275,17 +4279,17 @@ class MailClient:
     def _format_dispatch_log_line(
         self,
         label: str,
-        batch_index: int,
+        current_batch_success: int,
         accumulated_total: int,
         *,
         include_anchor: bool = False,
     ) -> str:
         safe_label = "Sent" if (label or "").strip().lower() == "sent" else "Fail"
-        batch_number = max(1, int(batch_index or 1))
+        batch_success = max(0, int(current_batch_success or 0))
         total_value = max(0, int(accumulated_total or 0))
         timestamp = time.strftime("%H:%M:%S", time.localtime())
         device_label = (self.device_name or self.device_id or "-").strip() or "-"
-        line = f"{safe_label}({batch_number}/{total_value}) | {timestamp} | {device_label}"
+        line = f"{safe_label}({batch_success}/{total_value}) | {timestamp} | {device_label}"
         if include_anchor:
             line += " | 알박기 포함"
         return line
