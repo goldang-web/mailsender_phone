@@ -9,4 +9,4 @@ dependencies = [
 ]
 
 [tool.uv]
-package = "main.py"
+package = false
