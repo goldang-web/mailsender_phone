@@ -183,8 +183,11 @@ class DispatchLoggingTests(unittest.TestCase):
             data_response = {"code": "250", "message": "250 2.0.0 OK"}
             return True, "250 2.0.0 OK", datetime.now(timezone.utc), rcpt_details, data_response
 
+        called_submit = False
+
         def fake_submit(self, *, domain, job_id, send_type, mail_from, **kwargs):  # type: ignore[override]
-            captured_mail_from.append(mail_from)
+            nonlocal called_submit
+            called_submit = True
             return None
 
         payload = {
@@ -198,7 +201,7 @@ class DispatchLoggingTests(unittest.TestCase):
             result = self.client.handle_single_send("naver", payload, "job-mailfrom")
 
         self.assertEqual(result.status, "success")
-        self.assertEqual(captured_mail_from[-1] if captured_mail_from else None, "resolved@example.com")
+        self.assertFalse(called_submit)
         settings = self.client._imap_settings_for_domain("naver")
         self.assertEqual(settings.get("last_mail_from"), "resolved@example.com")
 

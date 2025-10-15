@@ -7335,7 +7335,7 @@ function attachCardEvents(card) {
         return;
       }
       const currentDevice = getDevice();
-      const jobId = card.dataset.currentImapJobId || card.dataset.currentSingleJobId || "";
+      const jobId = card.dataset.currentImapJobId || "";
       if (!jobId) {
         const block = card.querySelector('[data-role="imapBlock"]');
         if (block) {

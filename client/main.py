@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.63"
+APP_VERSION = "0.0.64"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -2914,20 +2914,20 @@ class MailClient:
         if delivery_status == "sent" and normalized_domain and self._imap_enabled(normalized_domain):
             if mail_from_value:
                 self._remember_last_mail_from(normalized_domain, mail_from_value)
-            settings = self._imap_settings_for_domain(normalized_domain)
-            allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
-            single_delay = sanitize_imap_delay(
-                settings.get("single_delay_seconds"),
-                default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
-                minimum=0,
-            )
-            smtp_context_payload = {
-                "smtp_host": config.get("smtp_host"),
-                "smtp_port": config.get("smtp_port"),
-                "helo": config.get("helo"),
-                "header": config.get("header"),
-            }
             if force_imap_check:
+                settings = self._imap_settings_for_domain(normalized_domain)
+                allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
+                single_delay = sanitize_imap_delay(
+                    settings.get("single_delay_seconds"),
+                    default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                    minimum=0,
+                )
+                smtp_context_payload = {
+                    "smtp_host": config.get("smtp_host"),
+                    "smtp_port": config.get("smtp_port"),
+                    "helo": config.get("helo"),
+                    "header": config.get("header"),
+                }
                 self._execute_imap_guard_flow(
                     domain=normalized_domain,
                     job_id=job_id,
@@ -2941,22 +2941,6 @@ class MailClient:
                     smtp_context=smtp_context_payload,
                     force=True,
                     report_probe_failure=True,
-                )
-            else:
-                self._submit_imap_check(
-                    domain=normalized_domain,
-                    job_id=job_id,
-                    send_type="single",
-                    mail_from=mail_from_value,
-                    header_from=header_from_value,
-                    sent_at=sent_at,
-                    has_anchor=False,
-                    delay_before_check=single_delay,
-                    allowed_delay=allowed_latency,
-                    context_reason=detail_line or status_line,
-                    force=False,
-                    smtp_context=smtp_context_payload,
-                    probe_result=None,
                 )
         result_payload = {
             "rcpt_to": rcpt_to,
