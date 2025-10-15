@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.64"
+APP_VERSION = "0.0.65"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -2796,6 +2796,7 @@ class MailClient:
         if not rcpt_to:
             return JobResult(job_id=job_id, status="failed", message="RCPT TO 정보가 없습니다.")
         normalized_domain = (domain or "").lower()
+        self._initialize_sent_log_base(normalized_domain)
         raw_bcc_entries = payload.get("bcc")
         if isinstance(raw_bcc_entries, str):
             candidate_bcc_entries: Iterable[str] = [raw_bcc_entries]
@@ -2985,6 +2986,8 @@ class MailClient:
         db_path = self.domain_paths.get(normalized)
         if not db_path or not db_path.exists():
             return JobResult(job_id=job_id, status="failed", message="로컬 DB가 없습니다.")
+
+        self._initialize_sent_log_base(normalized)
 
         config = payload.get("config") or {}
         session_count = max(1, self._sanitize_session_count(config.get("session_count")))
@@ -4388,6 +4391,17 @@ class MailClient:
         status_segment = status_line or "응답 없음"
         timestamp = now_iso().replace("T", " ")
         return f"{label} {target} {status_segment} {timestamp}"
+
+    def _initialize_sent_log_base(self, domain: Optional[str]) -> None:
+        candidate = (domain or self.active_domain or "naver")
+        if not candidate:
+            return
+        normalized = candidate.lower()
+        try:
+            current_total = max(0, int(self.sent_sequences.get(normalized, 0)))
+        except (TypeError, ValueError):
+            current_total = 0
+        self._sent_log_bases[normalized] = current_total
 
     def _sent_log_progress(self, domain: Optional[str], sequence_total: int) -> int:
         normalized = (domain or self.active_domain or "naver").lower()
