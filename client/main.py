@@ -1515,14 +1515,14 @@ class MailClient:
                 throttle_detail = detected_detail
                 self._record_imap_throttle(normalized, detected_marker, detected_detail)
                 ip_change_attempted = True
-                self._log_imap_console("IMAP 발송 · SMTP 제한 응답 감지 → IP 변경 시도", domain=normalized)
+                self._log_imap_protection("IMAP 발송 · SMTP 제한 응답 감지 → IP 변경 시도")
                 success_change, message, new_ip = self._perform_ip_change()
                 ip_change_success = success_change
                 ip_change_message = message
                 if new_ip:
                     ip_after_change = new_ip
                 result_label = "성공" if success_change else "실패"
-                self._log_imap_console(f"IP 변경 {result_label} · {message}", domain=normalized)
+                self._log_imap_protection(f"IP 변경 {result_label} · {message}")
                 if success_change:
                     should_retry = True
                     time.sleep(2.0)
@@ -1665,16 +1665,18 @@ class MailClient:
                 throttle_marker = throttle_context.get("marker") or None
                 throttle_detail = throttle_context.get("detail") or None
                 ip_change_attempted = True
-                self._log_imap_console("Sent 제한 응답 감지 · IP 변경 후 IMAP 재확인 절차 시작", domain=normalized)
+                self._log_imap_protection(
+                    f"Sent 제한 응답 감지 · {normalized} · IP 변경 후 IMAP 재확인 절차 시작"
+                )
                 if throttle_detail:
-                    self._log_imap_console(f"  ↳ 제한 사유: {throttle_detail}", domain=normalized)
+                    self._log_imap_protection(f"  ↳ 제한 사유: {throttle_detail}")
                 success, message, new_ip = self._perform_ip_change()
                 ip_change_success = success
                 ip_change_message = message
                 if new_ip:
                     ip_after_change = new_ip
                 result_label = "성공" if success else "실패"
-                self._log_imap_console(f"IP 변경 {result_label} · {message}", domain=normalized)
+                self._log_imap_protection(f"IP 변경 {result_label} · {message}")
                 if success:
                     time.sleep(2.0)
 
@@ -2940,7 +2942,7 @@ class MailClient:
                     if throttle_label:
                         break
             if throttle_label and marker_code and self._imap_enabled(normalized_domain):
-                self._log_imap_console(f"SMTP 제한 응답 감지 · {throttle_label}", domain=normalized_domain)
+                self._log_imap_protection(f"SMTP 제한 응답 감지 · {normalized_domain} · {throttle_label}")
                 self._record_imap_throttle(normalized_domain, marker_code, throttle_label or detail_line)
         if bcc_rows and normalized_domain:
             self._update_email_rows(normalized_domain, bcc_rows, delivery_status, detail_line or status_line)
@@ -3928,10 +3930,7 @@ class MailClient:
                                 break
                     if throttle_detected and self._imap_enabled(normalized):
                         throttle_label = matched_message or f"SMTP 제한 응답 {matched_marker}"
-                        self._log_imap_console(
-                            f"SMTP 제한 응답 감지 · {throttle_label}",
-                            domain=normalized,
-                        )
+                        self._log_imap_protection(f"SMTP 제한 응답 감지 · {normalized} · {throttle_label}")
                         self._record_imap_throttle(normalized, matched_marker, throttle_label or detail_for_log)
                     if recipient_limit_detected:
                         recipient_limit_message = detail_for_log or outcome.status_line or "수신자 수 초과 응답 감지"
@@ -4244,6 +4243,10 @@ class MailClient:
         if domain and not self._imap_enabled(domain):
             return
         print(f"[IMAP 테스트] {message}", flush=True)
+
+    def _log_imap_protection(self, message: str) -> None:
+        # 보호 전용 로그는 콘솔에 노출하지 않습니다.
+        return
 
     def _emit_imap_section(
         self,
