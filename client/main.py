@@ -36,7 +36,7 @@ from lib.naver_imap import (
 
 APP_VERSION = "0.0.61"
 
-smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 10
+smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 30
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
