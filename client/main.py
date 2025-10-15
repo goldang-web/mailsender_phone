@@ -33,7 +33,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.60"
+APP_VERSION = "0.0.61"
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "settings.json"
@@ -54,6 +54,15 @@ THROTTLE_MARKER_MESSAGES = {
 FATAL_STOP_MARKER_MESSAGES = {
     "421 4.7.1 this email has been temporarily blocked": "네이버 '421 4.7.1 This email has been temporarily blocked' 응답 감지",
 }
+
+RECIPIENT_LIMIT_MARKERS = (
+    "too many recipients",
+    "too many rcpt",
+    "recipient limit",
+    "rcpt limit",
+    "too many recipients on this connection",
+    "수신자 수 초과",
+)
 
 
 def utc_now() -> datetime:
@@ -893,9 +902,8 @@ class MailClient:
         else:
             base_counter = counter_current if counter_current is not None else self._get_sent_counter(normalized)
         updated_counter: Optional[int] = base_counter
-        if not bool(settings.get("enabled")):
+        if not self._imap_enabled(normalized):
             detail_message = "IMAP 도착 확인이 비활성화되어 있어 확인 메일을 발송하지 않습니다."
-            self._log_imap_console(f"IMAP 확인 비활성화 상태 · 가드 플로우 생략 ({normalized or '-'})")
             probe_payload: Optional[SentProbeResult] = None
             if report_probe_failure:
                 probe_payload = SentProbeResult(
@@ -1160,7 +1168,8 @@ class MailClient:
         )
         payload_header = header_override or default_header
         self._log_imap_console(
-            f"IMAP 발송 · 확인 메일 발송 시도 · RCPT {rcpt_to}"
+            f"IMAP 발송 · 확인 메일 발송 시도 · RCPT {rcpt_to}",
+            domain=normalized,
         )
         try:
             success, response_text, completed_at, _rcpt_details = send_via_telnet(
@@ -1175,19 +1184,21 @@ class MailClient:
         except Exception as exc:  # pylint: disable=broad-except
             status_line = "테스트 메일 발송 예외"
             detail_line = str(exc)
-            self._log_imap_console(f"IMAP 발송 · 확인 메일 발송 실패 · {detail_line}")
+            self._log_imap_console(f"IMAP 발송 · 확인 메일 발송 실패 · {detail_line}", domain=normalized)
             return False, None, status_line, detail_line
         status_line, detail_line = self._smtp_status_and_detail(response_text)
         if success:
             self._log_imap_console(
-                f"IMAP 발송 · 확인 메일 발송 성공 · 응답 {status_line or '-'}"
+                f"IMAP 발송 · 확인 메일 발송 성공 · 응답 {status_line or '-'}",
+                domain=normalized,
             )
             return True, completed_at, status_line, detail_line
         self._log_imap_console(
-            f"IMAP 발송 · 확인 메일 발송 실패 · 응답 {status_line or '-'}"
+            f"IMAP 발송 · 확인 메일 발송 실패 · 응답 {status_line or '-'}",
+            domain=normalized,
         )
         if detail_line:
-            self._log_imap_console(f"  ↳ {detail_line}")
+            self._log_imap_console(f"  ↳ {detail_line}", domain=normalized)
         return False, completed_at, status_line, detail_line
 
     def _run_sent_probe_mail(
@@ -1200,7 +1211,7 @@ class MailClient:
     ) -> SentProbeResult:
         normalized = (domain or "").lower()
         if not smtp_context:
-            self._log_imap_console("IMAP 발송 · SMTP 설정 없음")
+            self._log_imap_console("IMAP 발송 · SMTP 설정 없음", domain=normalized)
             return SentProbeResult(
                 success=False,
                 sent_at=None,
@@ -1208,7 +1219,7 @@ class MailClient:
                 detail_line="확인 메일 발송을 위한 SMTP 설정이 비어 있습니다.",
             )
         if not mail_from:
-            self._log_imap_console("IMAP 발송 · MAIL FROM 누락")
+            self._log_imap_console("IMAP 발송 · MAIL FROM 누락", domain=normalized)
             return SentProbeResult(
                 success=False,
                 sent_at=None,
@@ -1217,7 +1228,7 @@ class MailClient:
             )
         rcpt_value = normalize_imap_recipient(domain, rcpt_to)
         if not rcpt_value or "@" not in rcpt_value:
-            self._log_imap_console("IMAP 발송 · RCPT TO 형식 오류")
+            self._log_imap_console("IMAP 발송 · RCPT TO 형식 오류", domain=normalized)
             return SentProbeResult(
                 success=False,
                 sent_at=None,
@@ -1241,7 +1252,8 @@ class MailClient:
             attempts += 1
             attempt_label = "" if attempts == 1 else f" (재시도 {attempts})"
             self._log_imap_console(
-                f"IMAP 발송 · 확인 메일 발송 시도{attempt_label} · RCPT {rcpt_value}"
+                f"IMAP 발송 · 확인 메일 발송 시도{attempt_label} · RCPT {rcpt_value}",
+                domain=normalized,
             )
             success, sent_at_candidate, status_line, detail_line = self._send_imap_probe_mail(
                 domain=normalized,
@@ -1289,14 +1301,14 @@ class MailClient:
                 throttle_detail = detected_detail
                 self._record_imap_throttle(normalized, detected_marker, detected_detail)
                 ip_change_attempted = True
-                self._log_imap_console("IMAP 발송 · SMTP 제한 응답 감지 → IP 변경 시도")
+                self._log_imap_console("IMAP 발송 · SMTP 제한 응답 감지 → IP 변경 시도", domain=normalized)
                 success_change, message, new_ip = self._perform_ip_change()
                 ip_change_success = success_change
                 ip_change_message = message
                 if new_ip:
                     ip_after_change = new_ip
                 result_label = "성공" if success_change else "실패"
-                self._log_imap_console(f"IP 변경 {result_label} · {message}")
+                self._log_imap_console(f"IP 변경 {result_label} · {message}", domain=normalized)
                 if success_change:
                     time.sleep(2.0)
                     continue
@@ -1305,10 +1317,10 @@ class MailClient:
             break
 
         if last_status_line:
-            self._log_imap_console(f"  ↳ 최종 응답 {last_status_line}")
+            self._log_imap_console(f"  ↳ 최종 응답 {last_status_line}", domain=normalized)
         if last_detail_line:
-            self._log_imap_console(f"  ↳ 상세 {last_detail_line}")
-        self._log_imap_console("IMAP 발송 · 확인 메일 발송 실패 → IMAP 확인 생략")
+            self._log_imap_console(f"  ↳ 상세 {last_detail_line}", domain=normalized)
+        self._log_imap_console("IMAP 발송 · 확인 메일 발송 실패 → IMAP 확인 생략", domain=normalized)
         return SentProbeResult(
             success=False,
             sent_at=sent_at_value,
@@ -1400,7 +1412,7 @@ class MailClient:
             ]
             if extra_parts:
                 message_parts.extend(extra_parts)
-            self._log_imap_console(" · ".join(message_parts))
+            self._log_imap_console(" · ".join(message_parts), domain=normalized)
 
             ip_change_attempted = False
             ip_change_success = False
@@ -1435,16 +1447,16 @@ class MailClient:
                 throttle_marker = throttle_context.get("marker") or None
                 throttle_detail = throttle_context.get("detail") or None
                 ip_change_attempted = True
-                self._log_imap_console("Sent 제한 응답 감지 · IP 변경 후 IMAP 재확인 절차 시작")
+                self._log_imap_console("Sent 제한 응답 감지 · IP 변경 후 IMAP 재확인 절차 시작", domain=normalized)
                 if throttle_detail:
-                    self._log_imap_console(f"  ↳ 제한 사유: {throttle_detail}")
+                    self._log_imap_console(f"  ↳ 제한 사유: {throttle_detail}", domain=normalized)
                 success, message, new_ip = self._perform_ip_change()
                 ip_change_success = success
                 ip_change_message = message
                 if new_ip:
                     ip_after_change = new_ip
                 result_label = "성공" if success else "실패"
-                self._log_imap_console(f"IP 변경 {result_label} · {message}")
+                self._log_imap_console(f"IP 변경 {result_label} · {message}", domain=normalized)
                 if success:
                     time.sleep(2.0)
 
@@ -1467,7 +1479,10 @@ class MailClient:
                 else:
                     probe_mail_error = "테스트 메일 발송용 SMTP 설정이 없습니다."
                     probe_status_line = "SMTP 설정 없음"
-                    self._log_imap_console("Sent 기준 확인용 테스트 메일 발송 불가 · SMTP 설정 없음")
+                    self._log_imap_console(
+                        "Sent 기준 확인용 테스트 메일 발송 불가 · SMTP 설정 없음",
+                        domain=normalized,
+                    )
 
             def has_network() -> bool:
                 try:
@@ -1492,19 +1507,23 @@ class MailClient:
                 wait_started_at = time.monotonic()
                 deadline = wait_started_at + 60.0
                 last_log_time = wait_started_at
-                self._log_imap_console("  ↳ 네트워크 복구 대기 중… (0초 경과)")
+                self._log_imap_console("  ↳ 네트워크 복구 대기 중… (0초 경과)", domain=normalized)
                 while not network_ready and time.monotonic() < deadline:
                     time.sleep(1.0)
                     now_point = time.monotonic()
                     elapsed = now_point - wait_started_at
                     if now_point - last_log_time >= 5.0:
                         self._log_imap_console(
-                            f"  ↳ 네트워크 복구 대기 중… ({int(elapsed)}초 경과)"
+                            f"  ↳ 네트워크 복구 대기 중… ({int(elapsed)}초 경과)",
+                            domain=normalized,
                         )
                         last_log_time = now_point
                     network_ready = has_network()
                     if network_ready:
-                        self._log_imap_console(f"  ↳ 네트워크 복구됨 · 대기 {elapsed:.1f}s")
+                        self._log_imap_console(
+                            f"  ↳ 네트워크 복구됨 · 대기 {elapsed:.1f}s",
+                            domain=normalized,
+                        )
                         break
                 if not network_ready:
                     elapsed_total = int(time.monotonic() - wait_started_at)
@@ -1514,7 +1533,7 @@ class MailClient:
                     received_at = None
                     reason_text = f"네트워크 복구 타임아웃 ({min(elapsed_total, 60)}초)"
                     message = "네트워크 오류로 IMAP 확인을 종료합니다. 전체 중지는 발생하지 않습니다."
-                    self._log_imap_console(message)
+                    self._log_imap_console(message, domain=normalized)
                     print(message, flush=True)
                     trigger_stop = False
                     reason_components = []
@@ -1588,23 +1607,24 @@ class MailClient:
                     "자동 확인 완료 · "
                     f"상태 {status} · "
                     f"지연 {latency_label} · "
-                    f"허용 {allowed_delay_value}s"
+                    f"허용 {allowed_delay_value}s",
+                    domain=normalized,
                 )
                 if status != "success" and reason_text:
-                    self._log_imap_console(f"  ↳ 사유: {reason_text}")
+                    self._log_imap_console(f"  ↳ 사유: {reason_text}", domain=normalized)
             except IMAPNetworkError as exc:
                 status = "network_error"
                 latency = None
                 received_at = None
                 reason_text = str(exc)
-                self._log_imap_console("네트워크 오류로 IMAP 확인 중단")
+                self._log_imap_console("네트워크 오류로 IMAP 확인 중단", domain=normalized)
                 print("네트워크 오류로 IMAP 확인 중단", flush=True)
             except (socket.timeout, OSError, ssl.SSLError) as exc:
                 status = "network_error"
                 latency = None
                 received_at = None
                 reason_text = f"네트워크 예외: {exc}"
-                self._log_imap_console("네트워크 오류로 IMAP 확인 중단")
+                self._log_imap_console("네트워크 오류로 IMAP 확인 중단", domain=normalized)
                 print("네트워크 오류로 IMAP 확인 중단", flush=True)
             except Exception as exc:  # pylint: disable=broad-except
                 status = "error"
@@ -1965,61 +1985,6 @@ class MailClient:
             if not success_flag:
                 summary["failed"].append(label)
         return summary
-
-    def _analyze_anchor_delivery(
-        self,
-        expected: Iterable[str],
-        rcpt_details: Optional[List[Dict[str, object]]],
-    ) -> Tuple[int, int, List[str]]:
-        expected_counts: Dict[str, int] = {}
-        total_expected = 0
-        for address in expected:
-            normalized = (address or "").strip().lower()
-            if not normalized:
-                continue
-            expected_counts[normalized] = expected_counts.get(normalized, 0) + 1
-            total_expected += 1
-        if total_expected == 0:
-            return 0, 0, []
-        failure_descriptions: List[str] = []
-        failure_count = 0
-        anchor_entries_seen = False
-        if not rcpt_details:
-            return total_expected, 0, failure_descriptions
-        if rcpt_details:
-            for entry in rcpt_details:
-                if not entry.get("is_anchor"):
-                    continue
-                anchor_entries_seen = True
-                address_text = str(entry.get("address") or "").strip()
-                lowered = address_text.lower()
-                success_flag = bool(entry.get("success"))
-                code_text = str(entry.get("code") or "").strip()
-                message_text = str(entry.get("message") or "").strip()
-                if success_flag:
-                    if lowered in expected_counts and expected_counts[lowered] > 0:
-                        expected_counts[lowered] -= 1
-                    continue
-                failure_count += 1
-                description = f"{address_text or '-'}→{code_text or '-'}"
-                if message_text and message_text != code_text:
-                    trimmed = message_text if len(message_text) <= 60 else f"{message_text[:57]}..."
-                    description = f"{description} ({trimmed})"
-                failure_descriptions.append(description)
-                if lowered in expected_counts and expected_counts[lowered] > 0:
-                    expected_counts[lowered] -= 1
-        missing_count = sum(expected_counts.values())
-        if missing_count > 0:
-            failure_count += missing_count
-            if anchor_entries_seen:
-                failure_descriptions.append(f"응답 누락 {missing_count}건")
-        success_count = max(0, total_expected - failure_count)
-        if failure_count == 0 and not anchor_entries_seen and rcpt_details:
-            # RCPT 응답은 있었지만 알박기 주소가 확인되지 않은 경우
-            failure_count = total_expected
-            success_count = 0
-            failure_descriptions.append("알박기 RCPT 응답 누락")
-        return success_count, failure_count, failure_descriptions
 
     def _select_bcc_candidates(
         self,
@@ -2605,14 +2570,15 @@ class MailClient:
                             break
                     if throttle_label:
                         break
-            if throttle_label and marker_code:
-                self._log_imap_console(f"SMTP 제한 응답 감지 · {throttle_label}")
+            if throttle_label and marker_code and self._imap_enabled(normalized_domain):
+                self._log_imap_console(f"SMTP 제한 응답 감지 · {throttle_label}", domain=normalized_domain)
                 self._record_imap_throttle(normalized_domain, marker_code, throttle_label or detail_line)
         if bcc_rows and normalized_domain:
             self._update_email_rows(normalized_domain, bcc_rows, delivery_status, detail_line or status_line)
         recipients = [rcpt_to] + bcc_emails
         dispatch_logs: List[Dict[str, object]] = []
         bcc_total = len(bcc_emails)
+        failure_reason = detail_line or status_line or "응답 없음"
         if delivery_status == "sent":
             total_increment = 1 + bcc_total
             sequence_value = self._next_sent_sequence(normalized_domain or None, total_increment)
@@ -2660,6 +2626,7 @@ class MailClient:
                 0,
                 True,
                 self.device_name,
+                detail=failure_reason,
             )
             dispatch_logs.append(
                 {
@@ -2676,62 +2643,51 @@ class MailClient:
                     "rcpt_details": rcpt_details,
                 }
             )
-        if delivery_status != "sent":
-            for entry in dispatch_logs:
-                print(entry.get("display") or entry["log"])
-        if bcc_emails:
-            print(f"  ↳ BCC 대상 {len(bcc_emails)}건 포함")
-        if delivery_status == "sent" and normalized_domain:
-            imap_enabled_for_domain = self._imap_enabled(normalized_domain)
-            if not imap_enabled_for_domain:
-                if force_imap_check:
-                    self._log_imap_console(
-                        f"IMAP 확인 비활성화 상태 · 가드 플로우 생략 ({normalized_domain or '-'})"
-                    )
-            else:
-                mail_from_value = config.get("mail_from", "")
-                settings = self._imap_settings_for_domain(normalized_domain)
-                allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
-                single_delay = sanitize_imap_delay(
-                    settings.get("single_delay_seconds"),
-                    default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
-                    minimum=0,
+            print(display_line)
+        if delivery_status == "sent" and normalized_domain and self._imap_enabled(normalized_domain):
+            mail_from_value = config.get("mail_from", "")
+            settings = self._imap_settings_for_domain(normalized_domain)
+            allowed_latency = sanitize_imap_allowed_latency(settings.get("allowed_latency_seconds"))
+            single_delay = sanitize_imap_delay(
+                settings.get("single_delay_seconds"),
+                default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+                minimum=0,
+            )
+            smtp_context_payload = {
+                "smtp_host": config.get("smtp_host"),
+                "smtp_port": config.get("smtp_port"),
+                "helo": config.get("helo"),
+                "header": config.get("header"),
+            }
+            if force_imap_check:
+                self._execute_imap_guard_flow(
+                    domain=normalized_domain,
+                    job_id=job_id,
+                    send_type="single",
+                    mail_from=mail_from_value,
+                    has_anchor=False,
+                    context_reason=detail_line or status_line,
+                    delay_before_check=single_delay,
+                    allowed_delay=allowed_latency,
+                    smtp_context=smtp_context_payload,
+                    force=True,
+                    report_probe_failure=True,
                 )
-                smtp_context_payload = {
-                    "smtp_host": config.get("smtp_host"),
-                    "smtp_port": config.get("smtp_port"),
-                    "helo": config.get("helo"),
-                    "header": config.get("header"),
-                }
-                if force_imap_check:
-                    self._execute_imap_guard_flow(
-                        domain=normalized_domain,
-                        job_id=job_id,
-                        send_type="single",
-                        mail_from=mail_from_value,
-                        has_anchor=False,
-                        context_reason=detail_line or status_line,
-                        delay_before_check=single_delay,
-                        allowed_delay=allowed_latency,
-                        smtp_context=smtp_context_payload,
-                        force=True,
-                        report_probe_failure=True,
-                    )
-                else:
-                    self._submit_imap_check(
-                        domain=normalized_domain,
-                        job_id=job_id,
-                        send_type="single",
-                        mail_from=mail_from_value,
-                        sent_at=sent_at,
-                        has_anchor=False,
-                        delay_before_check=single_delay,
-                        allowed_delay=allowed_latency,
-                        context_reason=detail_line or status_line,
-                        force=False,
-                        smtp_context=smtp_context_payload,
-                        probe_result=None,
-                    )
+            else:
+                self._submit_imap_check(
+                    domain=normalized_domain,
+                    job_id=job_id,
+                    send_type="single",
+                    mail_from=mail_from_value,
+                    sent_at=sent_at,
+                    has_anchor=False,
+                    delay_before_check=single_delay,
+                    allowed_delay=allowed_latency,
+                    context_reason=detail_line or status_line,
+                    force=False,
+                    smtp_context=smtp_context_payload,
+                    probe_result=None,
+                )
         result_payload = {
             "rcpt_to": rcpt_to,
             "domain": domain,
@@ -3229,15 +3185,16 @@ class MailClient:
                     nonlocal current_sent_counter, threshold_check_request
                     if increment <= 0:
                         return
+                    if not self._imap_enabled(normalized):
+                        return
                     current_sent_counter = max(0, current_sent_counter + increment)
                     settings_local = self._imap_settings_for_domain(normalized)
                     threshold_value = self._current_sent_threshold(normalized)
                     self._set_sent_counter(normalized, current_sent_counter)
-                    if not self._imap_enabled(normalized):
-                        return
                     if current_sent_counter >= threshold_value and threshold_check_request is None:
                         self._log_imap_console(
-                            f"Sent 확인 기준 도달 · 누적 {current_sent_counter}건"
+                            f"Sent 확인 기준 도달 · 누적 {current_sent_counter}건",
+                            domain=normalized,
                         )
                         threshold_check_request = {
                             "sent_at": sent_at,
@@ -3309,7 +3266,7 @@ class MailClient:
                     try:
                         report_payload = threshold_check_future.result()
                     except Exception as exc:  # pylint: disable=broad-except
-                        self._log_imap_console(f"Sent 기준 확인 중 예외 발생: {exc}")
+                        self._log_imap_console(f"Sent 기준 확인 중 예외 발생: {exc}", domain=normalized)
                     finally:
                         threshold_check_future = None
                     status_value = None
@@ -3318,7 +3275,7 @@ class MailClient:
                     if status_value == "success":
                         current_sent_counter = 0
                         self._set_sent_counter(normalized, 0, reset_timestamp=utc_now_iso())
-                        self._log_imap_console("Sent 누적 확인 성공 · 카운터 초기화")
+                        self._log_imap_console("Sent 누적 확인 성공 · 카운터 초기화", domain=normalized)
                     else:
                         threshold_value = self._current_sent_threshold(normalized)
                         fallback_counter = max(0, threshold_value - 1)
@@ -3326,11 +3283,13 @@ class MailClient:
                         self._set_sent_counter(normalized, fallback_counter)
                         if status_value:
                             self._log_imap_console(
-                                f"Sent 누적 확인 실패({status_value}) · 카운터 {fallback_counter}건으로 롤백"
+                                f"Sent 누적 확인 실패({status_value}) · 카운터 {fallback_counter}건으로 롤백",
+                                domain=normalized,
                             )
                         else:
                             self._log_imap_console(
-                                f"Sent 누적 확인 결과 없음 · 카운터 {fallback_counter}건으로 롤백"
+                                f"Sent 누적 확인 결과 없음 · 카운터 {fallback_counter}건으로 롤백",
+                                domain=normalized,
                             )
 
                 
@@ -3373,9 +3332,10 @@ class MailClient:
                     lower_response = (outcome.response_text or "").lower()
                     status_lower = (outcome.status_line or "").lower()
                     detail_lower = (detail_for_log or "").lower()
+                    text_sources = (lower_response, status_lower, detail_lower)
                     matched_marker: Optional[str] = None
                     matched_message: Optional[str] = None
-                    for text in (lower_response, status_lower, detail_lower):
+                    for text in text_sources:
                         if not text:
                             continue
                         for marker, message in THROTTLE_MARKER_MESSAGES.items():
@@ -3386,7 +3346,7 @@ class MailClient:
                         if matched_marker:
                             break
                     if matched_marker is None:
-                        for text in (lower_response, status_lower, detail_lower):
+                        for text in text_sources:
                             if not text:
                                 continue
                             for marker, message in FATAL_STOP_MARKER_MESSAGES.items():
@@ -3397,10 +3357,30 @@ class MailClient:
                             if matched_marker:
                                 break
                     throttle_detected = matched_marker in THROTTLE_MARKER_MESSAGES if matched_marker else False
-                    if throttle_detected:
+                    recipient_limit_detected = False
+                    recipient_limit_message: Optional[str] = None
+                    for text in text_sources:
+                        if text and any(marker in text for marker in RECIPIENT_LIMIT_MARKERS):
+                            recipient_limit_detected = True
+                            break
+                    if not recipient_limit_detected and outcome.rcpt_details:
+                        for entry in outcome.rcpt_details:
+                            message_text = str(entry.get("message") or "").lower()
+                            if message_text and any(marker in message_text for marker in RECIPIENT_LIMIT_MARKERS):
+                                recipient_limit_detected = True
+                                break
+                    if throttle_detected and self._imap_enabled(normalized):
                         throttle_label = matched_message or f"SMTP 제한 응답 {matched_marker}"
-                        self._log_imap_console(f"SMTP 제한 응답 감지 · {throttle_label}")
+                        self._log_imap_console(
+                            f"SMTP 제한 응답 감지 · {throttle_label}",
+                            domain=normalized,
+                        )
                         self._record_imap_throttle(normalized, matched_marker, throttle_label or detail_for_log)
+                    if recipient_limit_detected:
+                        recipient_limit_message = detail_for_log or outcome.status_line or "수신자 수 초과 응답 감지"
+                        outcome.delivery_status = "failed"
+                        throttle_detected = False
+                        matched_message = recipient_limit_message
                     error_text = None if outcome.delivery_status == "sent" else (detail_for_log or outcome.status_line or "")[-500:]
                     for prev_status in previous_statuses:
                         status_key = (prev_status or "pending").lower()
@@ -3436,20 +3416,12 @@ class MailClient:
                     recipient_emails = [record.email for record in recipients]
                     bcc_count = len(group.bcc)
                     anchor_count = len(group.injected)
-                    anchor_success_count = 0
-                    anchor_retry_count = 0
-                    anchor_failure_notes: List[str] = []
-                    if anchor_count > 0:
-                        if outcome.delivery_status == "sent":
-                            anchor_success_count, anchor_retry_count, anchor_failure_notes = self._analyze_anchor_delivery(
-                                group.injected,
-                                outcome.rcpt_details,
-                            )
-                        else:
-                            anchor_retry_count = anchor_count
+                    anchor_success_count = anchor_count if outcome.delivery_status == "sent" else 0
+                    anchor_retry_count = 0 if outcome.delivery_status == "sent" else anchor_count
+                    primary_email = recipient_emails[0] if recipient_emails else "-"
+                    failure_detail = detail_for_log or outcome.status_line or "응답 없음"
                     if outcome.delivery_status == "sent":
                         sent_count += group_size_actual
-                        primary_email = recipient_emails[0] if recipient_emails else "-"
                         sequence = self._next_sent_sequence(normalized, group_size_actual)
                         meta_items: List[Tuple[str, object]] = [("primary", 1)]
                         if bcc_count > 0:
@@ -3489,12 +3461,9 @@ class MailClient:
                         if normalized == "naver":
                             total_increment = group_size_actual + anchor_success_count
                             register_sent_success(outcome.sent_at, detail_for_log, total_increment)
-                        if anchor_retry_count > 0:
-                            anchor_retry_pending += anchor_retry_count
                     else:
                         is_block = outcome.delivery_status == "block"
                         label = "Block" if is_block else "Fail"
-                        primary_email = recipient_emails[0] if recipient_emails else "-"
                         current_sequence = max(0, int(self.sent_sequences.get(normalized, 0)))
                         sequence_for_log = current_sequence + 1
                         meta_items: List[Tuple[str, object]] = [("primary", 1)]
@@ -3510,6 +3479,7 @@ class MailClient:
                             anchor_count,
                             True,
                             self.device_name,
+                            detail=failure_detail,
                         )
                         dispatch_logs.append(
                             {
@@ -3518,7 +3488,7 @@ class MailClient:
                                 "email": primary_email,
                                 "sequence": sequence_for_log,
                                 "delivery_status": "throttle" if throttle_detected else outcome.delivery_status,
-                                "detail": detail_for_log,
+                                "detail": failure_detail,
                                 "bcc_total": bcc_count,
                                 "anchor_total": anchor_count,
                                 "is_primary": True,
@@ -3534,10 +3504,10 @@ class MailClient:
                         print(display_line)
                         if is_block:
                             block_count += group_size_actual
-                            last_error = detail_for_log
+                            last_error = failure_detail
                         else:
                             failed_count += group_size_actual
-                            last_error = detail_for_log
+                            last_error = failure_detail
                         if normalized == "naver":
                             failure_decrement = group_size_actual + anchor_count
                             if failure_decrement > 0:
@@ -3546,21 +3516,11 @@ class MailClient:
                                     failure_decrement,
                                     current_sent_counter,
                                 )
-                    if group.bcc:
-                        print(f"  ↳ BCC 대상 {len(group.bcc)}건 포함")
-                        if group.deferred_bcc > 0:
-                            print(f"    · BCC {group.deferred_bcc}건은 다음 순번으로 이월")
                     if group.injected:
                         if outcome.delivery_status == "sent":
                             anchor_processed += anchor_success_count
                         elif anchor_retry_count > 0:
                             anchor_retry_pending += anchor_retry_count
-                        anchor_display = f"  ↳ 알박기 대상 {len(group.injected)}건 포함"
-                        print(anchor_display)
-                        if anchor_retry_count > 0:
-                            print(f"    · 알박기 {anchor_retry_count}건 재시도 예약")
-                            for note in anchor_failure_notes[:3]:
-                                print(f"      · {note}")
                         anchor_log_line = self._format_dispatch_log_line(
                             "Anchor",
                             processed,
@@ -3570,7 +3530,7 @@ class MailClient:
                         dispatch_logs.append(
                             {
                                 "log": anchor_log_line,
-                                "display": anchor_display,
+                                "display": anchor_log_line,
                                 "email": group.injected[0] if group.injected else None,
                                 "sequence": processed,
                                 "delivery_status": outcome.delivery_status,
@@ -3748,23 +3708,28 @@ class MailClient:
             error=error_message,
         )
 
-    def _log_imap_console(self, message: str) -> None:
+    def _log_imap_console(self, message: str, domain: Optional[str] = None) -> None:
+        if domain and not self._imap_enabled(domain):
+            return
         print(f"[IMAP 테스트] {message}", flush=True)
 
     def handle_imap_test(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
         normalized = (domain or "naver").lower()
         if normalized != "naver":
             message = "네이버 도메인에서만 IMAP 테스트를 지원합니다."
-            self._log_imap_console(message)
+            self._log_imap_console(message, domain=normalized)
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         payload = payload or {}
         username = normalize_imap_string(payload.get("username"))
         settings = self._imap_settings_for_domain(normalized)
+        if not bool(settings.get("enabled")):
+            message = "IMAP 확인이 비활성화되어 있어 테스트를 실행하지 않습니다."
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
         if not username:
             username = normalize_imap_string(settings.get("username"))
         if not username:
             message = "IMAP 계정 ID가 설정되지 않았습니다."
-            self._log_imap_console(message)
+            self._log_imap_console(message, domain=normalized)
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         use_saved_password = bool(payload.get("use_saved_password"))
         password = str(payload.get("password") or "")
@@ -3774,10 +3739,10 @@ class MailClient:
             used_saved_password = bool(password)
         if not password:
             message = "IMAP 비밀번호를 확인할 수 없습니다."
-            self._log_imap_console(message)
+            self._log_imap_console(message, domain=normalized)
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         folder = str(payload.get("folder") or "Junk").strip() or "Junk"
-        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 연결 시도")
+        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 연결 시도", domain=normalized)
         diagnostics = probe_imap_connection(username, password, folder=folder)
         success = bool(diagnostics.get("success"))
         latency = diagnostics.get("latency")
@@ -3796,10 +3761,10 @@ class MailClient:
         if success:
             latency_text = f"{latency:.1f}s" if isinstance(latency, (int, float)) else "-"
             message = f"IMAP 연결 성공 · {folder} 접근 · 지연 {latency_text}"
-            self._log_imap_console(f"성공 - {message}")
+            self._log_imap_console(f"성공 - {message}", domain=normalized)
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
         error_message = reason or "IMAP 연결 실패"
-        self._log_imap_console(f"실패 - {error_message}")
+        self._log_imap_console(f"실패 - {error_message}", domain=normalized)
         return JobResult(
             job_id=job_id,
             status="failed",
@@ -3817,16 +3782,19 @@ class MailClient:
         normalized = (domain or "naver").lower()
         if normalized != "naver":
             message = "네이버 도메인에서만 최신 메일 확인을 지원합니다."
-            self._log_imap_console(message)
+            self._log_imap_console(message, domain=normalized)
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         payload = payload or {}
         settings = self._imap_settings_for_domain(normalized)
+        if not bool(settings.get("enabled")):
+            message = "IMAP 확인이 비활성화되어 있어 최신 메일 확인을 실행하지 않습니다."
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
         username = normalize_imap_string(payload.get("username")) or normalize_imap_string(
             settings.get("username")
         )
         if not username:
             message = "IMAP 계정 ID가 설정되지 않았습니다."
-            self._log_imap_console(message)
+            self._log_imap_console(message, domain=normalized)
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         use_saved_password = bool(payload.get("use_saved_password"))
         password = str(payload.get("password") or "")
@@ -3836,7 +3804,7 @@ class MailClient:
             used_saved_password = bool(password)
         if not password:
             message = "IMAP 비밀번호를 확인할 수 없습니다."
-            self._log_imap_console(message)
+            self._log_imap_console(message, domain=normalized)
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         folder = str(payload.get("folder") or "Junk").strip() or "Junk"
         try:
@@ -3845,7 +3813,7 @@ class MailClient:
         except (TypeError, ValueError):
             limit_value = 1
         limit_value = max(1, min(10, limit_value))
-        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 최신 메일 확인")
+        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 최신 메일 확인", domain=normalized)
         summary = fetch_latest_message_summary(username, password, folder=folder, limit=limit_value)
         success = bool(summary.get("success"))
         mail_info = summary.get("mail") or {}
@@ -3857,17 +3825,19 @@ class MailClient:
             f"성공 {success} · "
             f"총 {total}건 · "
             f"ID {mail_info.get('sequence','-')} · "
-            f"저장비번 {used_saved}"
+            f"저장비번 {used_saved}",
+            domain=normalized,
         )
         if mail_info:
             self._log_imap_console(
                 "  ↳ 헤더 비교 · "
                 f"From {mail_info.get('from') or mail_info.get('from_address') or '-'} · "
                 f"Subject {mail_info.get('subject') or '-'} · "
-                f"수신 {mail_info.get('received_at_iso') or mail_info.get('date_header') or '-'}"
+                f"수신 {mail_info.get('received_at_iso') or mail_info.get('date_header') or '-'}",
+                domain=normalized,
             )
         if reason:
-            self._log_imap_console(f"  ↳ 실패 사유: {reason}")
+            self._log_imap_console(f"  ↳ 실패 사유: {reason}", domain=normalized)
 
         def _shorten(value: Optional[str], *, length: int = 60) -> str:
             if not value:
@@ -3917,11 +3887,11 @@ class MailClient:
             message = "최신 메일 확인 성공"
             if detail_parts:
                 message = f"{message} · {' · '.join(detail_parts)}"
-            self._log_imap_console(f"성공 - {message}")
+            self._log_imap_console(f"성공 - {message}", domain=normalized)
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
 
         error_message = reason or "최신 메일을 가져오지 못했습니다."
-        self._log_imap_console(f"실패 - {error_message}")
+        self._log_imap_console(f"실패 - {error_message}", domain=normalized)
         return JobResult(
             job_id=job_id,
             status="failed",
@@ -3938,6 +3908,9 @@ class MailClient:
         config_payload = payload.get("config") or {}
         if not isinstance(config_payload, dict):
             message = "SMTP 설정이 비어 있어 수동 도착 확인을 실행할 수 없습니다."
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        if not self._imap_enabled(normalized):
+            message = "IMAP 확인이 비활성화되어 있어 수동 도착 확인을 실행하지 않습니다."
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         mail_from_value = str(config_payload.get("mail_from") or "").strip()
         smtp_context = {
@@ -4185,14 +4158,18 @@ class MailClient:
         is_primary: bool,
         device_name: Optional[str] = None,
         sequence: Optional[int] = None,
+        detail: Optional[str] = None,
     ) -> str:
         safe_label = (label or "").strip() or "Sent"
         target = (email or "").strip() or "-"
         label_display = safe_label
         device_label = (device_name or "").strip()
         is_failure = safe_label.lower() in {"fail", "block"}
+        detail_segment = (detail or "").strip()
         if is_failure:
             display = safe_label
+            if target and target != "-":
+                display += f" - {target}"
             extra_markers: List[str] = []
             if is_primary and bcc_total > 0:
                 extra_markers.append(f"외 {bcc_total}건")
@@ -4200,6 +4177,8 @@ class MailClient:
                 extra_markers.append(f"알박기 {anchor_total}건")
             if extra_markers:
                 display += f" ({' + '.join(extra_markers)})"
+            if detail_segment:
+                display += f" · {detail_segment}"
             if device_label:
                 display += f" | {device_label}"
             return display
@@ -4211,6 +4190,8 @@ class MailClient:
                 display += f" 외 {bcc_total}"
             if anchor_total > 0:
                 display += f" + 알박기 {anchor_total}"
+        if detail_segment and safe_label.lower() != "sent":
+            display += f" · {detail_segment}"
         if device_label:
             display += f" | {device_label}"
         return display
