@@ -129,7 +129,7 @@ TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 5.0
 SUBSTITUTION_LOCK_MODES = {"auto", "lock"}
 SNAPSHOT_FIELD_KEYS = ("helo", "mail_from", "header", "anchor_email", "rcpt_to")
-EMPTY_SUBSTITUTION_SNAPSHOT: Dict[str, Any] = {"fields": {}, "missing_tokens": []}
+EMPTY_SUBSTITUTION_SNAPSHOT: Dict[str, Any] = {"fields": {}, "missing_tokens": [], "source_device_id": None}
 
 
 def ensure_storage_root() -> None:
@@ -272,6 +272,13 @@ def sanitize_substitution_snapshot(raw: Any) -> Dict[str, Any]:
         snapshot["device_id"] = str(device_id)
     if domain_value:
         snapshot["domain"] = domain_value
+    if "source_device_id" in raw:
+        source_device_id = raw.get("source_device_id")
+        if source_device_id is None:
+            snapshot["source_device_id"] = None
+        else:
+            candidate = str(source_device_id).strip()
+            snapshot["source_device_id"] = candidate or None
     return snapshot
 
 
@@ -3291,6 +3298,7 @@ def set_device_lock(device_id: str, domain: str, payload: DeviceLockRequest) -> 
         "generated_at": now_ts(),
         "device_id": device_id,
         "domain": normalized,
+        "source_device_id": device_id,
     }
     with db_lock, get_conn() as conn:
         device = get_device(device_id, conn=conn)
@@ -3389,6 +3397,7 @@ def refresh_device_lock(device_id: str, domain: str, payload: DeviceLockRefreshR
             "generated_at": now_ts(),
             "device_id": device_id,
             "domain": normalized,
+            "source_device_id": device_id,
         }
         snapshot_json = encode_substitution_snapshot(snapshot_payload)
         now = now_ts()
@@ -3447,6 +3456,7 @@ def reset_device_lock(device_id: str, domain: str) -> Dict[str, Any]:
         "generated_at": None,
         "device_id": device_id,
         "domain": normalized,
+        "source_device_id": None,
     }
     return {
         "device_id": device_id,
@@ -3498,6 +3508,7 @@ def copy_device_lock(payload: DeviceLockCopyRequest) -> Dict[str, Any]:
                 "generated_at": now,
                 "device_id": target_id,
                 "domain": normalized_domain,
+                "source_device_id": source_device_id,
             }
             snapshot_json = encode_substitution_snapshot(snapshot_payload)
             conn.execute(
