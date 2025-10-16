@@ -1122,11 +1122,14 @@ header {
   align-items: stretch;
 }
 .card {
-  background: linear-gradient(135deg, var(--color-surface) 0%, var(--color-surface-subtle) 100%);
-  border: 1px solid var(--color-border-strong);
-  border-radius: 12px;
-  padding: 14px;
-  box-shadow: 0 8px 18px var(--shadow-elevated);
+  --card-accent-start: rgba(37, 99, 235, 0.08);
+  --card-accent-end: rgba(37, 99, 235, 0.18);
+  --card-accent-border: rgba(37, 99, 235, 0.35);
+  background: linear-gradient(135deg, var(--card-accent-start), var(--card-accent-end));
+  border: 2px solid var(--card-accent-border);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 10px 20px rgba(15, 23, 42, 0.16);
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -1135,7 +1138,7 @@ header {
 }
 .card.offline {
   opacity: 0.6;
-  border-color: var(--color-border);
+  --card-accent-border: rgba(148, 163, 184, 0.45);
 }
 .card.online-hidden {
   display: none;
@@ -1144,6 +1147,41 @@ header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
+}
+@media (prefers-color-scheme: dark) {
+  .card {
+    box-shadow: 0 12px 24px rgba(2, 6, 23, 0.45);
+  }
+}
+.device-grid .card:nth-child(6n + 1) {
+  --card-accent-start: rgba(37, 99, 235, 0.1);
+  --card-accent-end: rgba(37, 99, 235, 0.22);
+  --card-accent-border: rgba(37, 99, 235, 0.45);
+}
+.device-grid .card:nth-child(6n + 2) {
+  --card-accent-start: rgba(16, 185, 129, 0.09);
+  --card-accent-end: rgba(5, 150, 105, 0.2);
+  --card-accent-border: rgba(5, 150, 105, 0.42);
+}
+.device-grid .card:nth-child(6n + 3) {
+  --card-accent-start: rgba(245, 158, 11, 0.1);
+  --card-accent-end: rgba(217, 119, 6, 0.22);
+  --card-accent-border: rgba(217, 119, 6, 0.45);
+}
+.device-grid .card:nth-child(6n + 4) {
+  --card-accent-start: rgba(244, 63, 94, 0.12);
+  --card-accent-end: rgba(225, 29, 72, 0.24);
+  --card-accent-border: rgba(225, 29, 72, 0.48);
+}
+.device-grid .card:nth-child(6n + 5) {
+  --card-accent-start: rgba(129, 140, 248, 0.12);
+  --card-accent-end: rgba(99, 102, 241, 0.24);
+  --card-accent-border: rgba(99, 102, 241, 0.48);
+}
+.device-grid .card:nth-child(6n) {
+  --card-accent-start: rgba(13, 148, 136, 0.12);
+  --card-accent-end: rgba(15, 118, 110, 0.24);
+  --card-accent-border: rgba(15, 118, 110, 0.46);
 }
 .card-header-actions {
   display: flex;
