@@ -147,7 +147,15 @@ class HeartbeatAccessFilter(logging.Filter):
             message = record.getMessage()
         except Exception:
             return True
-        if any(fragment in message for fragment in ("/api/devices/register", "/heartbeat", "/health")):
+        suppressed_paths = (
+            "/api/devices/register",
+            "/api/devices",
+            "/heartbeat",
+            "/health",
+            "/favicon.ico",
+            '"GET / HTTP/1.1"',
+        )
+        if any(fragment in message for fragment in suppressed_paths):
             return False
         return True
 
