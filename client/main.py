@@ -1696,10 +1696,60 @@ class MailClient:
                 detail_line="IMAP 계정 주소가 올바르지 않아 확인 메일을 발송할 수 없습니다.",
             )
 
+        header_template: Optional[str] = None
+        newline_hint = "\n"
+        raw_header_value = smtp_context.get("header") if smtp_context else None
+        if isinstance(raw_header_value, bytes):
+            try:
+                decoded_header = raw_header_value.decode("utf-8")
+            except UnicodeDecodeError:
+                decoded_header = raw_header_value.decode("latin-1", errors="ignore")
+        elif raw_header_value is not None:
+            decoded_header = str(raw_header_value)
+        else:
+            decoded_header = ""
+        if decoded_header and decoded_header.strip():
+            header_template = decoded_header
+            newline_hint = "\r\n" if "\r\n" in decoded_header else "\n"
+
         probe_reference = utc_now()
         message_id_value = make_msgid(domain=mail_from.split("@")[-1] if "@" in mail_from else "mailsender")
+        message_id_pattern = re.compile(r"(?im)^(?P<indent>[ \t]*)Message-ID\s*:(?P<value>.*(?:\n[ \t].*)*)")
 
         def build_probe_header(msg_id: str) -> str:
+            if header_template:
+                normalized_template = header_template.replace("\r\n", "\n").replace("\r", "\n")
+                has_terminal_newline = normalized_template.endswith("\n")
+                separator_block = ""
+                body_section: Optional[str]
+                separator_index = normalized_template.find("\n\n")
+                if separator_index >= 0:
+                    separator_end = separator_index + 2
+                    while separator_end < len(normalized_template) and normalized_template[separator_end] == "\n":
+                        separator_end += 1
+                    header_section = normalized_template[:separator_index]
+                    separator_block = normalized_template[separator_index:separator_end]
+                    body_section = normalized_template[separator_end:]
+                else:
+                    header_section = normalized_template
+                    body_section = None
+                match = message_id_pattern.search(header_section)
+                if match:
+                    indent = match.group("indent") or ""
+                    start, end = match.span()
+                    header_section = f"{header_section[:start]}{indent}Message-ID: {msg_id}{header_section[end:]}"
+                else:
+                    header_lines = header_section.split("\n") if header_section else []
+                    header_lines.append(f"Message-ID: {msg_id}")
+                    header_section = "\n".join(header_lines)
+                if body_section is not None:
+                    normalized_result = f"{header_section}{separator_block}{body_section}"
+                else:
+                    normalized_result = header_section
+                final_message = normalized_result.replace("\n", newline_hint)
+                if has_terminal_newline and not final_message.endswith(newline_hint):
+                    final_message = f"{final_message}{newline_hint}"
+                return final_message
             date_header = format_datetime(probe_reference.astimezone(timezone.utc))
             subject = f"[IMAP 체크] Sent 누적 확인 {probe_reference.astimezone().strftime('%H:%M:%S')}"
             return (
