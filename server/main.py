@@ -147,7 +147,7 @@ class HeartbeatAccessFilter(logging.Filter):
             message = record.getMessage()
         except Exception:
             return True
-        if any(fragment in message for fragment in ("/api/devices/register", "/heartbeat")):
+        if any(fragment in message for fragment in ("/api/devices/register", "/heartbeat", "/health")):
             return False
         return True
 
@@ -3073,6 +3073,14 @@ class TelegramTestRequest(BaseModel):
     bot_token: Optional[str] = None
     chat_id: Optional[str] = None
     message: Optional[str] = None
+
+
+@app.get("/health")
+def health_check() -> Dict[str, str]:
+    return {
+        "status": "ok",
+        "timestamp": now_ts(),
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
