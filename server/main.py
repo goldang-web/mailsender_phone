@@ -2544,6 +2544,172 @@ def format_local_timestamp() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
+STOP_NOTIFICATION_SUPPRESSION_WINDOW = timedelta(seconds=90)
+STOP_NOTIFICATION_CACHE: Dict[str, datetime] = {}
+STOP_NOTIFICATION_LOCK = threading.RLock()
+
+
+def _coerce_non_negative_int(value: Any) -> int:
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _simplify_stop_reason(raw: str) -> str:
+    base = (raw or "").strip()
+    if not base:
+        return "사유 정보 없음"
+    if ":" in base:
+        base = base.split(":", 1)[0].strip()
+    delimiter = " - 디바이스"
+    if delimiter in base:
+        base = base.split(delimiter, 1)[0].strip()
+    return base or "사유 정보 없음"
+
+
+def _collect_target_domains(raw: Any) -> List[str]:
+    domains: List[str] = []
+    if isinstance(raw, str):
+        candidate = raw.strip().lower()
+        if candidate:
+            domains.append(candidate)
+    elif isinstance(raw, Iterable):
+        for item in raw:
+            if not isinstance(item, str):
+                continue
+            candidate = item.strip().lower()
+            if candidate:
+                domains.append(candidate)
+    return sorted({domain for domain in domains if domain})
+
+
+def enrich_stop_metadata_with_sent_stats(
+    conn: sqlite3.Connection,
+    metadata: Optional[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    if metadata is None:
+        metadata_obj: Dict[str, Any] = {}
+    else:
+        metadata_obj = dict(metadata)
+    device_id = str(metadata_obj.get("device_id") or "").strip()
+    if not device_id:
+        return metadata_obj
+    domain_key = metadata_obj.get("domain")
+    domains_key = metadata_obj.get("domains")
+    target_domains = _collect_target_domains(domain_key if domain_key is not None else domains_key)
+    query_params: List[Any] = [device_id]
+    if target_domains:
+        placeholders = ",".join(["?"] * len(target_domains))
+        domain_clause = f"AND domain IN ({placeholders})"
+        query_params.extend(target_domains)
+    else:
+        domain_clause = ""
+    rows = conn.execute(
+        f"""
+        SELECT domain, client_sent, imap_sent_since_last_check
+        FROM device_configs
+        WHERE device_id=?
+        {domain_clause}
+        """,
+        tuple(query_params),
+    ).fetchall()
+    if not rows:
+        return metadata_obj
+    if target_domains and len(rows) == 1:
+        row = rows[0]
+        current_value = _coerce_non_negative_int(row["imap_sent_since_last_check"])
+        total_value = _coerce_non_negative_int(row["client_sent"])
+    else:
+        current_value = sum(_coerce_non_negative_int(row["imap_sent_since_last_check"]) for row in rows)
+        total_value = sum(_coerce_non_negative_int(row["client_sent"]) for row in rows)
+    existing_current = max(
+        _coerce_non_negative_int(metadata_obj.get("sent_window_count")),
+        _coerce_non_negative_int(metadata_obj.get("sent_since_last_check")),
+        _coerce_non_negative_int(metadata_obj.get("imap_sent_since_last_check")),
+    )
+    existing_total = max(
+        _coerce_non_negative_int(metadata_obj.get("client_sent")),
+        _coerce_non_negative_int(metadata_obj.get("sent_total_success")),
+        _coerce_non_negative_int(metadata_obj.get("sent_sequence_total")),
+    )
+    if current_value > 0 or existing_current == 0:
+        metadata_obj["sent_window_count"] = current_value
+        metadata_obj["sent_since_last_check"] = current_value
+        metadata_obj["imap_sent_since_last_check"] = current_value
+    if total_value > 0 or existing_total == 0:
+        metadata_obj["client_sent"] = total_value
+        metadata_obj["sent_total_success"] = total_value
+        metadata_obj["sent_sequence_total"] = total_value
+    if target_domains and not metadata_obj.get("domains"):
+        metadata_obj["domains"] = target_domains
+    if not metadata_obj.get("stop_event_marker"):
+        metadata_obj["stop_event_marker"] = f"{device_id}:{uuid.uuid4().hex}"
+    return metadata_obj
+
+
+def _build_stop_notification_signature(
+    reason: str,
+    metadata: Optional[Dict[str, Any]],
+) -> Optional[str]:
+    if metadata is None:
+        metadata = {}
+    simplified_reason = _simplify_stop_reason(reason)
+    device_id = str(metadata.get("device_id") or "").strip()
+    event_marker = str(metadata.get("stop_event_marker") or "").strip()
+    domain = ""
+    if isinstance(metadata.get("domain"), str):
+        domain = metadata["domain"].strip().lower()
+    elif isinstance(metadata.get("domains"), Iterable):
+        domains = _collect_target_domains(metadata.get("domains"))
+        if domains:
+            domain = ",".join(domains)
+    current = max(
+        _coerce_non_negative_int(metadata.get("sent_window_count")),
+        _coerce_non_negative_int(metadata.get("sent_since_last_check")),
+        _coerce_non_negative_int(metadata.get("imap_sent_since_last_check")),
+    )
+    total = max(
+        _coerce_non_negative_int(metadata.get("client_sent")),
+        _coerce_non_negative_int(metadata.get("sent_total_success")),
+        _coerce_non_negative_int(metadata.get("sent_sequence_total")),
+    )
+    if not device_id:
+        return None
+    base_key = event_marker or f"{device_id or '-'}:{simplified_reason or '-'}"
+    signature_parts = [
+        base_key,
+        device_id or "-",
+        domain or "-",
+        simplified_reason or "-",
+        str(current),
+        str(total),
+    ]
+    return "|".join(signature_parts)
+
+
+def _should_suppress_stop_notification(signature: Optional[str]) -> bool:
+    if not signature:
+        return False
+    now = datetime.now(timezone.utc)
+    with STOP_NOTIFICATION_LOCK:
+        last_sent = STOP_NOTIFICATION_CACHE.get(signature)
+        if last_sent is None:
+            return False
+        if now - last_sent <= STOP_NOTIFICATION_SUPPRESSION_WINDOW:
+            return True
+        STOP_NOTIFICATION_CACHE.pop(signature, None)
+        return False
+
+
+def _mark_stop_notification_sent(signature: Optional[str]) -> None:
+    if not signature:
+        return
+    now = datetime.now(timezone.utc)
+    with STOP_NOTIFICATION_LOCK:
+        STOP_NOTIFICATION_CACHE[signature] = now
+
+
 def build_pre_stop_message(
     reason: str,
     metadata: Optional[Dict[str, Any]],
@@ -2564,23 +2730,6 @@ def build_stop_notification_message(
     reason: str,
     metadata: Optional[Dict[str, Any]],
 ) -> str:
-    def simplify_stop_reason(raw: str) -> str:
-        base = (raw or "").strip()
-        if not base:
-            return "사유 정보 없음"
-        if ":" in base:
-            base = base.split(":", 1)[0].strip()
-        delimiter = " - 디바이스"
-        if delimiter in base:
-            base = base.split(delimiter, 1)[0].strip()
-        return base or "사유 정보 없음"
-
-    def coerce_int(value: Any) -> int:
-        try:
-            return max(0, int(value))
-        except (TypeError, ValueError):
-            return 0
-
     def resolve_device_label(data: Optional[Dict[str, Any]]) -> str:
         if not data:
             return "알 수 없음"
@@ -2608,11 +2757,11 @@ def build_stop_notification_message(
             data.get("sent_total_success"),
             data.get("sent_sequence_total"),
         ]
-        current = next((coerce_int(val) for val in current_candidates if val is not None), 0)
-        total = next((coerce_int(val) for val in total_candidates if val is not None), 0)
+        current = next((_coerce_non_negative_int(val) for val in current_candidates if val is not None), 0)
+        total = next((_coerce_non_negative_int(val) for val in total_candidates if val is not None), 0)
         return current, total
 
-    simplified_reason = simplify_stop_reason(reason)
+    simplified_reason = _simplify_stop_reason(reason)
     device_label = resolve_device_label(metadata)
     now = datetime.now().astimezone()
     date_line = now.strftime("%Y-%m-%d")
@@ -2644,14 +2793,21 @@ def maybe_dispatch_telegram_pre_stop(
     chat_id = sanitize_telegram_chat_id(config.get("telegram_chat_id"))
     if not bot_token or not chat_id:
         return None
-    message = build_pre_stop_message(reason, metadata)
+    enriched_metadata = enrich_stop_metadata_with_sent_stats(conn, metadata)
+    signature = _build_stop_notification_signature(reason, enriched_metadata)
+    if _should_suppress_stop_notification(signature):
+        device_marker = (enriched_metadata or {}).get("device_id") or "unknown"
+        print(f"[TELEGRAM] 중지 사전 알림 중복으로 생략 (device={device_marker})")
+        return {"sent": False, "suppressed": True, "metadata": enriched_metadata}
+    message = build_pre_stop_message(reason, enriched_metadata)
     try:
         response = send_telegram_message(bot_token, chat_id, message)
     except Exception as exc:
         print(f"[TELEGRAM] 중지 사전 알림 발송 실패: {exc}")
-        return {"sent": False, "error": str(exc)}
+        return {"sent": False, "error": str(exc), "metadata": enriched_metadata}
+    _mark_stop_notification_sent(signature)
     print("[TELEGRAM] 중지 사전 알림 발송 성공")
-    return {"sent": True, "response": response}
+    return {"sent": True, "response": response, "metadata": enriched_metadata}
 
 
 def maybe_dispatch_telegram_auto_stop(
@@ -2671,14 +2827,21 @@ def maybe_dispatch_telegram_auto_stop(
     chat_id = sanitize_telegram_chat_id(config.get("telegram_chat_id"))
     if not bot_token or not chat_id:
         return None
-    message = build_auto_stop_message(reason, origin, metadata, result)
+    enriched_metadata = enrich_stop_metadata_with_sent_stats(conn, metadata)
+    signature = _build_stop_notification_signature(reason, enriched_metadata)
+    if _should_suppress_stop_notification(signature):
+        device_marker = (enriched_metadata or {}).get("device_id") or "unknown"
+        print(f"[TELEGRAM] 자동 중지 알림 중복으로 생략 (device={device_marker}, origin={origin})")
+        return {"sent": False, "suppressed": True, "metadata": enriched_metadata}
+    message = build_auto_stop_message(reason, origin, enriched_metadata, result)
     try:
         response = send_telegram_message(bot_token, chat_id, message)
     except Exception as exc:
         print(f"[TELEGRAM] 자동 중지 알림 발송 실패: {exc}")
-        return {"sent": False, "error": str(exc)}
+        return {"sent": False, "error": str(exc), "metadata": enriched_metadata}
+    _mark_stop_notification_sent(signature)
     print(f"[TELEGRAM] 자동 중지 알림 발송 성공 (origin={origin})")
-    return {"sent": True, "response": response}
+    return {"sent": True, "response": response, "metadata": enriched_metadata}
 
 
 def handle_auto_stop(
@@ -2691,6 +2854,7 @@ def handle_auto_stop(
     job_types: Optional[Iterable[str]] = None,
     suppress_notification: bool = False,
 ) -> Dict[str, Any]:
+    enriched_metadata = enrich_stop_metadata_with_sent_stats(conn, metadata)
     result = cancel_active_sends(
         conn,
         reason,
@@ -2703,14 +2867,14 @@ def handle_auto_stop(
             conn,
             reason=reason,
             origin=origin,
-            metadata=metadata,
+            metadata=enriched_metadata,
             result=result,
         )
     payload = {
         "reason": reason,
         "origin": origin,
         "result": result,
-        "metadata": metadata or {},
+        "metadata": enriched_metadata or {},
     }
     if device_id:
         payload["device_id"] = device_id
@@ -4806,6 +4970,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 "device_name": device_label,
                 "domains": schedule_triggers,
             }
+            schedule_metadata = enrich_stop_metadata_with_sent_stats(conn, schedule_metadata)
             schedule_auto_stop_payload = handle_auto_stop(
                 conn,
                 schedule_reason,
@@ -5060,6 +5225,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     "probe_mail_error": probe_mail_error,
                     "probe_status_line": probe_status_line,
                 }
+                meta = enrich_stop_metadata_with_sent_stats(conn, meta)
                 if detail_text:
                     stop_reason = f"{stop_reason}: {detail_text}"
                 if failure_action == "stop_device" and device_stop_context is None:
