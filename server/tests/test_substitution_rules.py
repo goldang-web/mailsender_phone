@@ -218,7 +218,8 @@ class RandomLockModeTests(unittest.TestCase):
         resolved_config, rcpt_value, missing_tokens, snapshot_meta = resolve_substitution_outputs(
             dict(config_snapshot),
             rules,
-            {"random_substitution_mode": "auto", "substitution_snapshot": {}},
+            "auto",
+            {},
             random_generator=rng,
         )
         self.assertIsNone(rcpt_value)
@@ -254,7 +255,8 @@ class RandomLockModeTests(unittest.TestCase):
         resolved_config, rcpt_value, missing_tokens, snapshot_meta = resolve_substitution_outputs(
             dict(config_snapshot),
             [],
-            {"random_substitution_mode": "lock", "substitution_snapshot": snapshot},
+            "lock",
+            snapshot,
         )
         self.assertEqual(resolved_config["helo"], "LOCKED-HEL")
         self.assertEqual(resolved_config["header"], "LOCKED-HDR")
@@ -271,7 +273,8 @@ class RandomLockModeTests(unittest.TestCase):
             resolve_substitution_outputs(
                 dict(config_snapshot),
                 [],
-                {"random_substitution_mode": "lock", "substitution_snapshot": {"fields": {}, "missing_tokens": []}},
+                "lock",
+                {"fields": {}, "missing_tokens": []},
             )
 
     def test_lock_mode_allows_plain_rcpt_override(self) -> None:
@@ -279,7 +282,8 @@ class RandomLockModeTests(unittest.TestCase):
         resolved_config, rcpt_value, missing_tokens, snapshot_meta = resolve_substitution_outputs(
             {"helo": "HEL-${랜덤:영소:2}"},
             [],
-            {"random_substitution_mode": "lock", "substitution_snapshot": snapshot},
+            "lock",
+            snapshot,
             rcpt_source="user@example.com",
             rcpt_override=True,
         )
@@ -294,7 +298,8 @@ class RandomLockModeTests(unittest.TestCase):
             resolve_substitution_outputs(
                 {"helo": "HEL-${랜덤:영소:2}"},
                 [],
-                {"random_substitution_mode": "lock", "substitution_snapshot": snapshot},
+                "lock",
+                snapshot,
                 rcpt_source="${랜덤:영소:3}",
                 rcpt_override=True,
             )

@@ -415,7 +415,7 @@ header {
   gap: 6px;
 }
 
-.random-lock-badge {
+.lock-badge {
   font-size: 12px;
   line-height: 1.2;
   padding: 2px 8px;
@@ -428,7 +428,7 @@ header {
   gap: 4px;
 }
 
-.random-lock-badge.hidden {
+.lock-badge.hidden {
   display: none;
 }
 .header-field textarea {
@@ -1920,6 +1920,32 @@ button:not(:disabled):hover {
   gap: 8px;
   flex-wrap: wrap;
 }
+.lock-copy-targets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px;
+  background: var(--color-surface-subtle);
+}
+.lock-copy-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.lock-copy-item .label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.lock-copy-empty {
+  font-size: 13px;
+  color: var(--color-muted);
+}
 .preview-box {
   border: 1px solid var(--color-border);
   border-radius: 12px;
@@ -2067,6 +2093,8 @@ button:not(:disabled):hover {
     <div class="summary-nav" role="group" aria-label="요약 액션">
       <button type="button" class="summary-nav-btn substitution-manage-btn" id="substitutionManageBtn" title="치환 변수 목록을 관리합니다.">치환 변수</button>
       <button type="button" class="summary-nav-btn" id="editDevicesBtn" title="디바이스 카드 삭제 모드를 켭니다." disabled>편집</button>
+      <button type="button" class="summary-nav-btn" id="lockCopyBtn" title="고정된 값을 다른 카드로 복사합니다." disabled>고정값 복사</button>
+      <button type="button" class="summary-nav-btn" id="lockResetAllBtn" title="모든 카드의 고정을 해제합니다." disabled>전체 고정 해제</button>
     </div>
     <label class="summary-toggle">
       <input type="checkbox" id="onlineOnlyToggle">
@@ -2102,6 +2130,34 @@ button:not(:disabled):hover {
         <h4 style="margin:16px 0 8px 0;font-size:13px;font-weight:600;">미리보기</h4>
         <div id="previewBox" class="preview-box">파일을 선택하면 미리보기가 표시됩니다.</div>
       </div>
+</div>
+</div>
+</div>
+
+<div id="lockCopyModal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="lockCopyModalTitle">
+  <div class="modal-card">
+    <div class="modal-header">
+      <div>
+        <h2 id="lockCopyModalTitle">고정값 복사</h2>
+        <div class="meta" id="lockCopyModalSubtitle">원본 카드의 고정 값을 선택한 카드에 복사합니다.</div>
+      </div>
+      <button type="button" class="ghost" data-action="lock-copy-cancel">닫기</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-message" id="lockCopyModalMessage"></div>
+      <label class="field">
+        <span>원본 카드</span>
+        <select id="lockCopySourceSelect"></select>
+      </label>
+      <div class="field">
+        <span>대상 카드</span>
+        <div class="lock-copy-targets" id="lockCopyTargets"></div>
+      </div>
+      <p class="field-hint">대상 카드는 원본과 동일한 도메인의 고정 모드를 활성화하며 현재 값으로 대체됩니다.</p>
+    </div>
+    <div class="modal-footer">
+      <button type="button" class="ghost" data-action="lock-copy-cancel">취소</button>
+      <button type="button" id="lockCopyApplyBtn" disabled>복사 적용</button>
     </div>
   </div>
 </div>
@@ -2149,7 +2205,7 @@ button:not(:disabled):hover {
         <h2 id="singlePreviewTitle">단일 발송 헤더 미리보기</h2>
         <div class="meta single-preview-meta">
           <span id="singlePreviewSubtitle"></span>
-          <span class="random-lock-badge hidden" id="singlePreviewLockBadge">🔒 RAND 고정</span>
+          <span class="lock-badge hidden" id="singlePreviewLockBadge">🔒 고정</span>
         </div>
       </div>
       <button type="button" class="ghost" data-action="close-single-preview">닫기</button>
@@ -2273,8 +2329,6 @@ const GLOBAL_DEFAULTS = {
   substitution_rules: [],
   telegram_bot_token: "",
   telegram_chat_id: "",
-  random_substitution_mode: "auto",
-  substitution_snapshot: { fields: {}, generated_at: null, device_id: null, domain: null, missing_tokens: [] },
 };
 const GLOBAL_INPUT_IDS = {
   active_domain: "globalActiveDomainGroup",
@@ -2288,7 +2342,6 @@ const GLOBAL_INPUT_IDS = {
   telegram_bot_token: "globalTelegramBotToken",
   telegram_chat_id: "globalTelegramChatId",
 };
-const SNAPSHOT_FIELD_KEYS = ["helo", "mail_from", "header", "anchor_email", "rcpt_to"];
 
 const IMAP_DEFAULT_ALLOWED_LATENCY = 20;
 const IMAP_ALLOWED_MIN = 5;
@@ -2324,14 +2377,12 @@ const state = {
   successCounters: {},
   globalConfig: {
     ...GLOBAL_DEFAULTS,
-    substitution_snapshot: JSON.parse(JSON.stringify(GLOBAL_DEFAULTS.substitution_snapshot)),
     updated_at: null,
     stop_schedule_last_run: null,
     stop_schedule_next_run: null,
   },
   globalDraft: {
     ...GLOBAL_DEFAULTS,
-    substitution_snapshot: JSON.parse(JSON.stringify(GLOBAL_DEFAULTS.substitution_snapshot)),
   },
   globalDirty: {
     active_domain: false,
@@ -2357,6 +2408,12 @@ const state = {
     tokens: new Map(),
     pending: new Set(),
     globalPending: false,
+  },
+  lockCopy: {
+    open: false,
+    sourceDeviceId: null,
+    domain: "naver",
+    targets: new Set(),
   },
   pendingSubstitutionRules: null,
   substitutionFeedbackTimer: null,
@@ -2905,8 +2962,8 @@ function collectConfigPayload(card, currentDevice, domain) {
       bcc_count: parseBccInput(bccValue),
       anchor_interval: parseAnchorInput(anchorIntervalValue),
       anchor_email: anchorEmailValue,
-    rcpt_to: card.querySelector('[data-field="rcpt_to"]').value.trim(),
-  },
+      rcpt_to: card.querySelector('[data-field="rcpt_to"]').value.trim(),
+    },
   };
 }
 
@@ -2919,9 +2976,10 @@ function containsSubstitutionToken(value) {
 
 function prepareSinglePreviewRequest(card, currentDevice, domain) {
   const { payload } = collectConfigPayload(card, currentDevice, domain);
-  const lockActive = isRandomLockActive();
-  const snapshot = lockActive ? currentRandomSnapshot() : null;
-  const snapshotFields = snapshot?.fields || {};
+  const baseConfig = bestConfig(currentDevice, domain) || {};
+  const lockActive = isConfigLocked(baseConfig);
+  const snapshot = resolveLockSnapshot(baseConfig) || {};
+  const snapshotFields = snapshot.fields || {};
   const rawOverrides = {
     helo: payload.helo,
     mail_from: payload.mail_from,
@@ -2929,7 +2987,6 @@ function prepareSinglePreviewRequest(card, currentDevice, domain) {
     anchor_email: payload.anchor_email,
   };
   const overrides = lockActive ? {} : rawOverrides;
-  const baseConfig = bestConfig(currentDevice, domain) || {};
   const rawRcpt = (payload.rcpt_to || "").trim();
   const snapshotRcpt = typeof snapshotFields.rcpt_to === "string" ? snapshotFields.rcpt_to.trim() : "";
   let rcpt = rawRcpt;
@@ -2974,25 +3031,21 @@ function prepareSinglePreviewRequest(card, currentDevice, domain) {
   };
 }
 
-async function refreshRandomSnapshot(deviceId, domain, options = {}) {
+async function refreshDeviceLockSnapshot(deviceId, domain, options = {}) {
   if (!deviceId) {
     throw new Error("디바이스 ID가 필요합니다.");
   }
-  const payload = { device_id: deviceId, domain };
+  const payload = {};
   if (options.rcpt_to) {
     payload.rcpt_to = options.rcpt_to;
   }
   if (options.header_override) {
     payload.header_override = options.header_override;
   }
-  const result = await fetchJSON("/api/global/substitution-lock/refresh", {
+  return fetchJSON(`/api/devices/${deviceId}/domains/${domain}/lock/refresh`, {
     method: "POST",
     body: JSON.stringify(payload),
   });
-  if (result?.config) {
-    renderGlobalConfig(result.config);
-  }
-  return result;
 }
 
 function resetSinglePreviewState() {
@@ -3036,13 +3089,153 @@ function setSinglePreviewSubtitle(device, domain, generatedAt) {
   subtitle.textContent = text;
   const lockBadge = document.getElementById("singlePreviewLockBadge");
   if (lockBadge) {
-    if (isRandomLockActive()) {
+    const config = device ? bestConfig(device, domain) : {};
+    const locked = isConfigLocked(config);
+    if (locked) {
       lockBadge.classList.remove("hidden");
-      lockBadge.title = buildRandomLockTooltip();
+      lockBadge.title = buildLockTooltip(resolveLockSnapshot(config), domain);
     } else {
       lockBadge.classList.add("hidden");
       lockBadge.removeAttribute("title");
     }
+  }
+}
+
+function buildLockCopyOptions() {
+  const options = [];
+  (state.devices || []).forEach((device) => {
+    const configs = device.configs || {};
+    Object.entries(configs).forEach(([domain, config]) => {
+      if (isConfigLocked(config)) {
+        const domainLabel = DOMAIN_LABELS[domain] || domain;
+        options.push({
+          deviceId: device.id,
+          deviceName: device.name || device.id,
+          domain,
+          label: `${device.name || device.id} · ${domainLabel}`,
+        });
+      }
+    });
+  });
+  return options;
+}
+
+function updateLockCopyApplyState() {
+  const applyBtn = document.getElementById("lockCopyApplyBtn");
+  if (!applyBtn) return;
+  const hasTargets = state.lockCopy.targets.size > 0;
+  applyBtn.disabled = !hasTargets;
+}
+
+function renderLockCopyTargets() {
+  const container = document.getElementById("lockCopyTargets");
+  if (!container) return;
+  container.innerHTML = "";
+  const { sourceDeviceId, domain } = state.lockCopy;
+  const candidates = (state.devices || []).filter((device) => device.id !== sourceDeviceId);
+  if (!candidates.length) {
+    container.innerHTML = '<div class="lock-copy-empty">복사할 대상 카드가 없습니다.</div>';
+    state.lockCopy.targets = new Set();
+    updateLockCopyApplyState();
+    return;
+  }
+  candidates.forEach((device) => {
+    const config = bestConfig(device, domain);
+    const locked = isConfigLocked(config);
+    const item = document.createElement("label");
+    item.className = "lock-copy-item";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.value = device.id;
+    checkbox.checked = state.lockCopy.targets.has(device.id);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        state.lockCopy.targets.add(device.id);
+      } else {
+        state.lockCopy.targets.delete(device.id);
+      }
+      updateLockCopyApplyState();
+    });
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "label";
+    labelSpan.textContent = `${device.name || device.id}`;
+    if (locked) {
+      const badge = document.createElement("span");
+      badge.className = "lock-badge";
+      badge.textContent = "🔒";
+      badge.title = "이미 고정 모드 활성";
+      labelSpan.appendChild(badge);
+    }
+    item.appendChild(checkbox);
+    item.appendChild(labelSpan);
+    container.appendChild(item);
+  });
+  updateLockCopyApplyState();
+}
+
+function renderLockCopyModal() {
+  const sourceSelect = document.getElementById("lockCopySourceSelect");
+  const messageBox = document.getElementById("lockCopyModalMessage");
+  if (!sourceSelect) return;
+  const options = buildLockCopyOptions();
+  sourceSelect.innerHTML = "";
+  if (!options.length) {
+    const option = document.createElement("option");
+    option.textContent = "고정된 카드가 없습니다.";
+    option.value = "";
+    sourceSelect.appendChild(option);
+    sourceSelect.disabled = true;
+    state.lockCopy.sourceDeviceId = null;
+    state.lockCopy.domain = "naver";
+    if (messageBox) {
+      messageBox.textContent = "고정 모드를 켠 카드가 없습니다.";
+      messageBox.className = "modal-message info";
+    }
+    renderLockCopyTargets();
+    return;
+  }
+  sourceSelect.disabled = false;
+  options.forEach((opt) => {
+    const option = document.createElement("option");
+    option.value = `${opt.deviceId}::${opt.domain}`;
+    option.textContent = opt.label;
+    sourceSelect.appendChild(option);
+  });
+  const currentValue = `${state.lockCopy.sourceDeviceId || ""}::${state.lockCopy.domain || ""}`;
+  const match = options.find((opt) => `${opt.deviceId}::${opt.domain}` === currentValue);
+  const selected = match ? currentValue : `${options[0].deviceId}::${options[0].domain}`;
+  sourceSelect.value = selected;
+  const [deviceId, domain] = selected.split("::");
+  state.lockCopy.sourceDeviceId = deviceId;
+  state.lockCopy.domain = domain || "naver";
+  state.lockCopy.targets = new Set();
+  if (messageBox) {
+    messageBox.textContent = "";
+    messageBox.className = "modal-message";
+  }
+  renderLockCopyTargets();
+}
+
+function openLockCopyModal() {
+  const modal = document.getElementById("lockCopyModal");
+  if (!modal) return;
+  state.lockCopy.open = true;
+  state.lockCopy.targets = new Set();
+  renderLockCopyModal();
+  modal.classList.remove("hidden");
+}
+
+function closeLockCopyModal() {
+  const modal = document.getElementById("lockCopyModal");
+  if (!modal) return;
+  modal.classList.add("hidden");
+  state.lockCopy.open = false;
+  state.lockCopy.sourceDeviceId = null;
+  state.lockCopy.targets = new Set();
+  const messageBox = document.getElementById("lockCopyModalMessage");
+  if (messageBox) {
+    messageBox.textContent = "";
+    messageBox.className = "modal-message";
   }
 }
 
@@ -3127,7 +3320,7 @@ async function openSinglePreviewModal(card, currentDevice, domain) {
     setSinglePreviewMessage("");
     setSinglePreviewSubtitle(currentDevice, domain, result?.generated_at || null);
     updateSinglePreviewFields(result, fallback);
-    updateRandomLockIndicators();
+    refreshLockIndicators();
   } catch (err) {
     state.singlePreview.pending = false;
     setSinglePreviewMessage(err?.message || "미리보기를 불러오지 못했습니다.", "error");
@@ -3145,55 +3338,39 @@ async function refreshSinglePreview() {
   if (!deviceId || !domain) {
     return;
   }
-  const lockActive = isRandomLockActive();
-  const snapshot = lockActive ? currentRandomSnapshot() : null;
-  const snapshotFields = snapshot?.fields || {};
-  const overrides = lockActive ? {} : { ...(state.singlePreview.overrides || {}) };
-  const payload = { config_override: overrides };
-  const snapshotRcpt = typeof snapshotFields.rcpt_to === "string" ? snapshotFields.rcpt_to.trim() : "";
+  const card = state.singlePreview.card;
+  const device =
+    (card && card.__deviceData) ||
+    state.devices.find((item) => String(item.id) === String(deviceId)) ||
+    { id: deviceId, configs: {} };
+  const config = bestConfig(device, domain);
+  const lockActive = isConfigLocked(config);
+  const payload = { config_override: lockActive ? {} : { ...(state.singlePreview.overrides || {}) } };
   let rcptValue = String(state.singlePreview.rcpt || "").trim();
   if (lockActive) {
+    const snapshot = resolveLockSnapshot(config) || {};
+    const snapshotRcpt = typeof snapshot?.fields?.rcpt_to === "string" ? snapshot.fields.rcpt_to.trim() : "";
     if (snapshotRcpt) {
       rcptValue = snapshotRcpt;
     } else if (containsSubstitutionToken(rcptValue)) {
       rcptValue = "";
     }
   }
-  const shouldSendRcpt =
-    (!lockActive && rcptValue) ||
-    (lockActive && !snapshotRcpt && rcptValue && !containsSubstitutionToken(rcptValue));
-  if (shouldSendRcpt) {
+  if (rcptValue && !containsSubstitutionToken(rcptValue)) {
     payload.rcpt_to = rcptValue;
   }
   state.singlePreview.pending = true;
   setSinglePreviewLoading(true);
   setSinglePreviewMessage("새로운 미리보기를 계산 중입니다...", "info");
   try {
-    if (lockActive) {
-      try {
-        await refreshRandomSnapshot(deviceId, domain, {
-          rcpt_to: shouldSendRcpt ? rcptValue : undefined,
-          header_override: (state.singlePreview.overrides || {}).header,
-        });
-        // 최신 글로벌 설정을 반영하도록 상태 갱신
-      } catch (refreshErr) {
-        state.singlePreview.pending = false;
-        setSinglePreviewMessage(refreshErr?.message || "랜덤 값을 다시 뽑지 못했습니다.", "error");
-        return;
-      }
-    }
     const result = await requestSinglePreview(deviceId, domain, payload);
     state.singlePreview.pending = false;
     state.singlePreview.lastResult = result;
     state.singlePreview.rcpt = String(result?.rcpt_to ?? "");
-    const device =
-      state.devices.find((item) => item.id === deviceId) ||
-      state.singlePreview.card?.__deviceData ||
-      { id: deviceId };
     setSinglePreviewMessage("");
     setSinglePreviewSubtitle(device, domain, result?.generated_at || null);
     updateSinglePreviewFields(result, state.singlePreview.fallback || {});
-    updateRandomLockIndicators();
+    refreshLockIndicators();
   } catch (err) {
     state.singlePreview.pending = false;
     setSinglePreviewMessage(err?.message || "미리보기 새로고침에 실패했습니다.", "error");
@@ -3342,83 +3519,89 @@ function formatScheduleInputValue(raw) {
   return minutes ? `${hours}:${minutes}` : hours;
 }
 
-function isRandomLockActive() {
-  return (state.globalConfig?.random_substitution_mode || "auto") === "lock";
+function isConfigLocked(config) {
+  if (!config) return false;
+  const mode = typeof config.substitution_lock_mode === "string" ? config.substitution_lock_mode.trim().toLowerCase() : "auto";
+  if (mode === "lock") {
+    return true;
+  }
+  return Boolean(config.substitution_lock_active);
 }
 
-function currentRandomSnapshot() {
-  const snapshot = state.globalConfig?.substitution_snapshot;
+function resolveLockSnapshot(config) {
+  if (!config || typeof config !== "object") {
+    return null;
+  }
+  const snapshot = config.substitution_snapshot;
   if (snapshot && typeof snapshot === "object") {
     return snapshot;
   }
-  return GLOBAL_DEFAULTS.substitution_snapshot;
+  return null;
 }
 
-function buildRandomLockTooltip(snapshot = currentRandomSnapshot()) {
+function buildLockTooltip(snapshot, fallbackDomain) {
   if (!snapshot) {
-    return "랜덤 치환 값을 고정한 상태입니다.";
+    return "고정 모드가 활성화되었습니다.";
   }
   const pieces = [];
   if (snapshot.generated_at) {
-    pieces.push(`고정 ${formatDate(snapshot.generated_at)}`);
+    pieces.push(`생성 ${formatDate(snapshot.generated_at)}`);
   }
   if (snapshot.device_id) {
     pieces.push(`디바이스 ${snapshot.device_id}`);
   }
-  if (snapshot.domain) {
-    const label = DOMAIN_LABELS[snapshot.domain] || snapshot.domain;
+  const domainValue = snapshot.domain || fallbackDomain;
+  if (domainValue) {
+    const label = DOMAIN_LABELS[domainValue] || domainValue;
     pieces.push(`도메인 ${label}`);
   }
-  return pieces.length
-    ? `랜덤 치환 고정 · ${pieces.join(" · ")}`
-    : "랜덤 치환 값을 고정한 상태입니다.";
+  return pieces.length ? `고정 · ${pieces.join(" · ")}` : "고정 모드가 활성화되었습니다.";
 }
 
-function updateRandomLockIndicators() {
-  const locked = isRandomLockActive();
-  const snapshot = currentRandomSnapshot();
-  const tooltip = locked ? buildRandomLockTooltip(snapshot) : "";
-  Object.values(cardRegistry).forEach((card) => {
-    if (!card) return;
-    const toggleBtn = card.querySelector('button[data-action="random-lock-toggle"]');
-    if (toggleBtn) {
-      if (!toggleBtn.dataset.lockLabel) {
-        toggleBtn.dataset.lockLabel = "락 설정";
-      }
-      if (!toggleBtn.dataset.unlockLabel) {
-        toggleBtn.dataset.unlockLabel = "락 해제";
-      }
-      const loading = Boolean(toggleBtn.dataset.loading);
-      if (!loading) {
-        toggleBtn.disabled = false;
-        toggleBtn.textContent = locked
-          ? toggleBtn.dataset.unlockLabel || "락 해제"
-          : toggleBtn.dataset.lockLabel || "락 설정";
-        toggleBtn.dataset.mode = locked ? "unlock" : "lock";
-        toggleBtn.classList.toggle("danger", locked);
-      }
-    }
-    const badge = card.querySelector('[data-role="randomLockBadge"]');
-    if (badge) {
-      if (locked) {
-        badge.classList.remove("hidden");
-        badge.title = tooltip;
-      } else {
-        badge.classList.add("hidden");
-        badge.removeAttribute("title");
-      }
-    }
-  });
-  const previewBadge = document.getElementById("singlePreviewLockBadge");
-  if (previewBadge) {
-    if (locked) {
-      previewBadge.classList.remove("hidden");
-      previewBadge.title = tooltip;
-    } else {
-      previewBadge.classList.add("hidden");
-      previewBadge.removeAttribute("title");
+function updateCardLockUI(card, config, domain) {
+  const locked = isConfigLocked(config);
+  const snapshot = resolveLockSnapshot(config);
+  const toggleBtn = card.querySelector('button[data-action="lock-toggle"]');
+  if (toggleBtn) {
+    const loading = Boolean(toggleBtn.dataset.loading);
+    if (!loading) {
+      toggleBtn.dataset.mode = locked ? "unlock" : "lock";
+      toggleBtn.textContent = locked ? "고정 해제" : "고정 모드";
+      toggleBtn.classList.toggle("danger", locked);
+      toggleBtn.disabled = false;
     }
   }
+  const refreshBtn = card.querySelector('button[data-action="lock-refresh"]');
+  if (refreshBtn) {
+    if (!refreshBtn.dataset.defaultLabel) {
+      refreshBtn.dataset.defaultLabel = refreshBtn.textContent;
+    }
+    if (!refreshBtn.dataset.loading) {
+      refreshBtn.disabled = !locked;
+    }
+    refreshBtn.title = locked ? "" : "고정 모드를 먼저 켜세요.";
+  }
+  const badge = card.querySelector('[data-role="lockBadge"]');
+  if (badge) {
+    if (locked) {
+      badge.classList.remove("hidden");
+      badge.title = buildLockTooltip(snapshot, domain);
+    } else {
+      badge.classList.add("hidden");
+      badge.removeAttribute("title");
+    }
+  }
+}
+
+function refreshLockIndicators() {
+  Object.entries(cardRegistry).forEach(([deviceId, card]) => {
+    if (!card) return;
+    const device = card.__deviceData || state.devices.find((item) => item.id === deviceId);
+    if (!device) return;
+    const domain = normalizeDeviceDomain(getActiveDomain(card, device.active_domain));
+    const config = bestConfig(device, domain);
+    updateCardLockUI(card, config, domain);
+  });
 }
 
 async function requestDeviceScheduleUpdate(card, device, domain, payload) {
@@ -3651,37 +3834,6 @@ function normalizeGlobalFieldValue(field, value) {
   return String(value);
 }
 
-function normalizeSubstitutionSnapshot(snapshot) {
-  const source = snapshot && typeof snapshot === "object" ? snapshot : {};
-  const fieldSource = source.fields && typeof source.fields === "object" ? source.fields : source;
-  const fields = {};
-  SNAPSHOT_FIELD_KEYS.forEach((key) => {
-    if (fieldSource && typeof fieldSource[key] === "string") {
-      fields[key] = fieldSource[key];
-    }
-  });
-  const generatedAt =
-    typeof source.generated_at === "string" && source.generated_at.trim() ? source.generated_at : null;
-  const deviceId =
-    source.device_id !== undefined && source.device_id !== null
-      ? String(source.device_id).trim() || null
-      : null;
-  const domain =
-    typeof source.domain === "string" && source.domain.trim()
-      ? source.domain.trim().toLowerCase()
-      : null;
-  const missingTokens = Array.isArray(source.missing_tokens)
-    ? source.missing_tokens.map((token) => String(token).trim()).filter(Boolean)
-    : [];
-  return {
-    fields,
-    generated_at: generatedAt,
-    device_id: deviceId,
-    domain,
-    missing_tokens: missingTokens,
-  };
-}
-
 function normalizeGlobalConfig(config) {
   const normalized = {};
   GLOBAL_FIELD_LIST.forEach((field) => {
@@ -3691,9 +3843,6 @@ function normalizeGlobalConfig(config) {
   normalized.stop_schedule_last_run = config?.stop_schedule_last_run || null;
   normalized.stop_schedule_next_run = config?.stop_schedule_next_run || null;
   normalized.substitution_rules = normalizeSubstitutionRules(config?.substitution_rules || []);
-  const modeRaw = typeof config?.random_substitution_mode === "string" ? config.random_substitution_mode.trim().toLowerCase() : "auto";
-  normalized.random_substitution_mode = modeRaw === "lock" ? "lock" : "auto";
-  normalized.substitution_snapshot = normalizeSubstitutionSnapshot(config?.substitution_snapshot);
   return normalized;
 }
 
@@ -5255,8 +5404,12 @@ function initSubstitutionSection() {
     saveBtn.addEventListener("click", submitSubstitutionModal);
   }
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape" && state.substitutionModal.open) {
-      closeSubstitutionModal({ discard: true });
+    if (event.key === "Escape") {
+      if (state.substitutionModal.open) {
+        closeSubstitutionModal({ discard: true });
+      } else if (state.lockCopy.open) {
+        closeLockCopyModal();
+      }
     }
   });
   updateSubstitutionTabUI();
@@ -5411,7 +5564,7 @@ function renderGlobalConfig(config) {
   state.telegramLastSavedToken = normalized.telegram_bot_token || "";
   state.telegramLastSavedChat = normalized.telegram_chat_id || "";
   syncSubstitutionRulesFromServer(normalizedSubs);
-  updateRandomLockIndicators();
+  refreshLockIndicators();
   GLOBAL_FIELD_LIST.forEach((field) => {
     if (!state.globalDirty[field]) {
       state.globalDraft[field] = normalized[field];
@@ -5811,63 +5964,64 @@ function updateSingleSendControls(card, device) {
     });
   }
 
-  const randomRefreshBtn = card.querySelector('button[data-action="random-refresh"]');
-  if (randomRefreshBtn && !randomRefreshBtn.dataset.bound) {
-    randomRefreshBtn.dataset.bound = "true";
-    randomRefreshBtn.addEventListener("click", async () => {
-      if (randomRefreshBtn.dataset.loading) return;
+  const lockRefreshBtn = card.querySelector('button[data-action="lock-refresh"]');
+  if (lockRefreshBtn && !lockRefreshBtn.dataset.bound) {
+    lockRefreshBtn.dataset.bound = "true";
+    lockRefreshBtn.addEventListener("click", async () => {
+      if (lockRefreshBtn.dataset.loading) return;
       const currentDevice = resolveCardDevice(card);
       if (!currentDevice?.id) {
         setNotice(card, "디바이스 정보를 확인할 수 없습니다.", "error");
         return;
       }
       const domain = getActiveDomain(card, currentDevice.active_domain);
-      const rcptInput = card.querySelector('[data-field="rcpt_to"]');
-      if (!randomRefreshBtn.dataset.defaultLabel) {
-        randomRefreshBtn.dataset.defaultLabel = randomRefreshBtn.textContent;
+      const config = bestConfig(currentDevice, domain);
+      if (!isConfigLocked(config)) {
+        setNotice(card, "고정 모드를 먼저 켜세요.", "error");
+        return;
       }
-      randomRefreshBtn.dataset.loading = "true";
-      randomRefreshBtn.disabled = true;
-      randomRefreshBtn.textContent = "랜덤 고정 중...";
+      const rcptInput = card.querySelector('[data-field="rcpt_to"]');
+      if (!lockRefreshBtn.dataset.defaultLabel) {
+        lockRefreshBtn.dataset.defaultLabel = lockRefreshBtn.textContent;
+      }
+      lockRefreshBtn.dataset.loading = "true";
+      lockRefreshBtn.disabled = true;
+      lockRefreshBtn.textContent = "다시 뽑는 중...";
       try {
         await ensureConfigSynced(card, currentDevice, domain);
-        await refreshRandomSnapshot(currentDevice.id, domain, {
+        await refreshDeviceLockSnapshot(currentDevice.id, domain, {
           rcpt_to: rcptInput?.value?.trim() || undefined,
         });
-        setNotice(card, "랜덤 치환 값을 다시 뽑아 고정했습니다.", "success");
+        setNotice(card, "고정 값을 새로 생성했습니다.", "success");
+        await loadDevices({ silent: true });
       } catch (err) {
-        setNotice(card, err?.message || "랜덤 값을 다시 뽑지 못했습니다.", "error");
+        setNotice(card, err?.message || "고정 값을 다시 뽑지 못했습니다.", "error");
       } finally {
-        delete randomRefreshBtn.dataset.loading;
-        randomRefreshBtn.disabled = false;
-        randomRefreshBtn.textContent = randomRefreshBtn.dataset.defaultLabel || "다시 뽑기";
+        delete lockRefreshBtn.dataset.loading;
+        lockRefreshBtn.textContent = lockRefreshBtn.dataset.defaultLabel || "다시 뽑기";
+        refreshLockIndicators();
       }
     });
   }
 
-  const randomLockToggle = card.querySelector('button[data-action="random-lock-toggle"]');
-  if (randomLockToggle && !randomLockToggle.dataset.bound) {
-    randomLockToggle.dataset.bound = "true";
-    randomLockToggle.addEventListener("click", async () => {
-      if (randomLockToggle.dataset.loading) return;
-      const mode = randomLockToggle.dataset.mode || (isRandomLockActive() ? "unlock" : "lock");
+  const lockToggleBtn = card.querySelector('button[data-action="lock-toggle"]');
+  if (lockToggleBtn && !lockToggleBtn.dataset.bound) {
+    lockToggleBtn.dataset.bound = "true";
+    lockToggleBtn.addEventListener("click", async () => {
+      if (lockToggleBtn.dataset.loading) return;
       const currentDevice = resolveCardDevice(card);
       if (!currentDevice?.id) {
         setNotice(card, "디바이스 정보를 확인할 수 없습니다.", "error");
         return;
       }
       const domain = getActiveDomain(card, currentDevice.active_domain);
-      if (!randomLockToggle.dataset.lockLabel) {
-        randomLockToggle.dataset.lockLabel = "락 설정";
-      }
-      if (!randomLockToggle.dataset.unlockLabel) {
-        randomLockToggle.dataset.unlockLabel = "락 해제";
-      }
-      randomLockToggle.dataset.loading = "true";
-      randomLockToggle.disabled = true;
-      randomLockToggle.textContent = mode === "lock" ? "락 설정 중..." : "락 해제 중...";
+      const config = bestConfig(currentDevice, domain);
+      const locked = isConfigLocked(config);
+      lockToggleBtn.dataset.loading = "true";
+      lockToggleBtn.disabled = true;
+      lockToggleBtn.textContent = locked ? "고정 해제 중..." : "고정 준비 중...";
       try {
-        if (mode === "lock") {
+        if (!locked) {
           await ensureConfigSynced(card, currentDevice, domain);
           const { requestBody } = prepareSinglePreviewRequest(card, currentDevice, domain);
           const previewResult = await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/preview-header`, {
@@ -5881,31 +6035,24 @@ function updateSingleSendControls(card, device) {
             anchor_email: String(previewResult.anchor_email ?? ""),
             rcpt_to: String(previewResult.rcpt_to ?? ""),
             missing_tokens: Array.isArray(previewResult.missing_tokens) ? previewResult.missing_tokens : [],
-            device_id: currentDevice.id,
-            domain,
           };
-          const lockResponse = await fetchJSON("/api/global/substitution-lock", {
+          await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/lock`, {
             method: "POST",
             body: JSON.stringify(lockPayload),
           });
-          if (lockResponse?.config) {
-            renderGlobalConfig(lockResponse.config);
-          }
-          setNotice(card, "현재 값을 랜덤 락으로 고정했습니다.", "success");
+          setNotice(card, "현재 값을 고정 모드로 저장했습니다.", "success");
         } else {
-          const result = await fetchJSON("/api/global/substitution-lock/reset", { method: "POST" });
-          if (result?.config) {
-            renderGlobalConfig(result.config);
-          }
-          setNotice(card, "랜덤 치환 고정을 해제했습니다.");
+          await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/lock/reset`, { method: "POST" });
+          setNotice(card, "고정 모드를 해제했습니다.");
         }
+        await loadDevices({ silent: true });
       } catch (err) {
-        const message = err?.message || (mode === "lock" ? "락 설정에 실패했습니다." : "락 해제에 실패했습니다.");
+        const message = err?.message || (locked ? "고정을 해제하지 못했습니다." : "고정 모드를 켜지 못했습니다.");
         setNotice(card, message, "error");
       } finally {
-        delete randomLockToggle.dataset.loading;
-        randomLockToggle.disabled = false;
-        updateRandomLockIndicators();
+        delete lockToggleBtn.dataset.loading;
+        lockToggleBtn.disabled = false;
+        refreshLockIndicators();
       }
     });
   }
@@ -6281,6 +6428,9 @@ function bestConfig(device, domain) {
     imap_last_mail_from: "",
     imap_last_sent_at: null,
     imap_last_received_at: null,
+    substitution_lock_mode: "auto",
+    substitution_lock_active: false,
+    substitution_snapshot: { fields: {}, generated_at: null, device_id: null, domain, missing_tokens: [] },
   };
 }
 
@@ -6330,6 +6480,28 @@ function updateDeviceEditButton() {
     setDeviceEditMode(false);
   } else if (!state.deviceEditMode && !btn.classList.contains("device-edit-active")) {
     btn.textContent = "편집";
+  }
+}
+
+function hasLockedCards() {
+  return (state.devices || []).some((device) => {
+    if (!device?.configs) return false;
+    return Object.values(device.configs).some((config) => isConfigLocked(config));
+  });
+}
+
+function updateLockActionButtons() {
+  const copyBtn = document.getElementById("lockCopyBtn");
+  const resetBtn = document.getElementById("lockResetAllBtn");
+  const hasDevices = (state.devices || []).length > 0;
+  const locked = hasLockedCards();
+  if (copyBtn) {
+    copyBtn.disabled = !locked;
+    copyBtn.setAttribute("aria-disabled", locked ? "false" : "true");
+  }
+  if (resetBtn) {
+    resetBtn.disabled = !hasDevices;
+    resetBtn.setAttribute("aria-disabled", hasDevices ? "false" : "true");
   }
 }
 
@@ -7024,6 +7196,7 @@ function populateConfigForm(card, device, domain) {
   if (anchorEmailInput && document.activeElement !== anchorEmailInput) anchorEmailInput.value = cache.values.anchor_email;
   const rcptInput = card.querySelector('[data-field="rcpt_to"]');
   if (rcptInput && document.activeElement !== rcptInput) rcptInput.value = cache.values.rcpt_to;
+  updateCardLockUI(card, config, domain);
   updateDeviceSchedule(card, device, domain, config);
   renderImapSection(card, device, domain);
 }
@@ -7770,7 +7943,7 @@ function buildDeviceCard(device) {
       <label class="field">
         <span class="field-label">
           HEADER
-          <span class="random-lock-badge hidden" data-role="randomLockBadge" title="랜덤 치환 고정">🔒 RAND 고정</span>
+          <span class="lock-badge hidden" data-role="lockBadge" title="고정 모드 활성">🔒 고정</span>
         </span>
         <textarea data-field="header" placeholder="헤더를 입력하세요"></textarea>
       </label>
@@ -7783,8 +7956,8 @@ function buildDeviceCard(device) {
           <button data-action="save">설정 저장</button>
           <button class="ghost" data-action="copy-global">전체 적용</button>
           <button class="ghost" data-action="single-preview">미리보기</button>
-          <button class="ghost" data-action="random-refresh">다시 뽑기</button>
-          <button class="ghost" data-action="random-lock-toggle">락 설정</button>
+          <button class="ghost" data-action="lock-refresh">다시 뽑기</button>
+          <button class="ghost" data-action="lock-toggle">고정 모드</button>
           <button class="secondary" data-action="single">단일 발송</button>
           <button data-action="batch">전체 발송</button>
           <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
@@ -7942,7 +8115,8 @@ function renderDevices() {
     }
     emptyHint.style.display = "none";
   }
-  updateRandomLockIndicators();
+  updateLockActionButtons();
+  refreshLockIndicators();
 }
 
 async function loadDevices(options = {}) {
@@ -8628,6 +8802,54 @@ document.getElementById("globalStopAllBtn").addEventListener("click", () => {
   handleGlobalStopAll();
 });
 
+const lockCopyBtn = document.getElementById("lockCopyBtn");
+if (lockCopyBtn) {
+  lockCopyBtn.addEventListener("click", () => {
+    openLockCopyModal();
+  });
+}
+
+const lockResetAllBtn = document.getElementById("lockResetAllBtn");
+if (lockResetAllBtn) {
+  lockResetAllBtn.addEventListener("click", () => {
+    handleLockResetAll();
+  });
+}
+
+const lockCopySourceSelect = document.getElementById("lockCopySourceSelect");
+if (lockCopySourceSelect) {
+  lockCopySourceSelect.addEventListener("change", (event) => {
+    const value = event.target.value || "";
+    const [deviceId, domain] = value.split("::");
+    state.lockCopy.sourceDeviceId = deviceId || null;
+    state.lockCopy.domain = domain || "naver";
+    state.lockCopy.targets = new Set();
+    renderLockCopyTargets();
+  });
+}
+
+const lockCopyApplyBtn = document.getElementById("lockCopyApplyBtn");
+if (lockCopyApplyBtn) {
+  lockCopyApplyBtn.addEventListener("click", () => {
+    handleLockCopyApply();
+  });
+}
+
+document.querySelectorAll('[data-action="lock-copy-cancel"]').forEach((btn) => {
+  btn.addEventListener("click", () => {
+    closeLockCopyModal();
+  });
+});
+
+const lockCopyModal = document.getElementById("lockCopyModal");
+if (lockCopyModal) {
+  lockCopyModal.addEventListener("click", (event) => {
+    if (event.target === lockCopyModal) {
+      closeLockCopyModal();
+    }
+  });
+}
+
 async function handleGlobalSaveAll() {
   const saveBtn = document.getElementById("globalSaveAllBtn");
   if (!saveBtn) return;
@@ -9105,6 +9327,76 @@ async function handleGlobalStopAll() {
   } finally {
     stopBtn.disabled = false;
     stopBtn.textContent = originalText;
+  }
+}
+
+async function handleLockResetAll() {
+  const resetBtn = document.getElementById("lockResetAllBtn");
+  if (!resetBtn) return;
+  const confirmed = confirm("모든 카드의 고정 모드를 해제하시겠습니까? 현재 저장된 고정 값이 삭제됩니다.");
+  if (!confirmed) {
+    return;
+  }
+  const originalText = resetBtn.textContent;
+  resetBtn.disabled = true;
+  resetBtn.textContent = "해제 중...";
+  try {
+    await fetchJSON("/api/substitution-lock/reset-all", { method: "POST" });
+    setGlobalStatus("모든 카드 고정을 해제했습니다.", "success");
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(err?.message || "전체 고정 해제에 실패했습니다.", "error");
+  } finally {
+    resetBtn.disabled = false;
+    resetBtn.textContent = originalText;
+  }
+}
+
+async function handleLockCopyApply() {
+  const applyBtn = document.getElementById("lockCopyApplyBtn");
+  const messageBox = document.getElementById("lockCopyModalMessage");
+  if (!applyBtn) return;
+  if (!state.lockCopy.sourceDeviceId) {
+    if (messageBox) {
+      messageBox.textContent = "원본 카드를 선택하세요.";
+      messageBox.className = "modal-message error";
+    }
+    return;
+  }
+  if (!state.lockCopy.targets.size) {
+    if (messageBox) {
+      messageBox.textContent = "복사할 대상 카드를 선택하세요.";
+      messageBox.className = "modal-message error";
+    }
+    return;
+  }
+  const originalText = applyBtn.textContent;
+  applyBtn.disabled = true;
+  applyBtn.textContent = "복사 중...";
+  if (messageBox) {
+    messageBox.textContent = "";
+    messageBox.className = "modal-message";
+  }
+  try {
+    await fetchJSON("/api/substitution-lock/copy", {
+      method: "POST",
+      body: JSON.stringify({
+        source_device_id: state.lockCopy.sourceDeviceId,
+        domain: state.lockCopy.domain,
+        target_device_ids: Array.from(state.lockCopy.targets),
+      }),
+    });
+    closeLockCopyModal();
+    setGlobalStatus("고정 값을 복사했습니다.", "success");
+    await loadDevices({ silent: true });
+  } catch (err) {
+    if (messageBox) {
+      messageBox.textContent = err?.message || "고정값 복사에 실패했습니다.";
+      messageBox.className = "modal-message error";
+    }
+  } finally {
+    applyBtn.disabled = false;
+    applyBtn.textContent = originalText;
   }
 }
 

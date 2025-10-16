@@ -72,6 +72,8 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "imap_last_mail_from": "",
     "imap_last_sent_at": None,
     "imap_last_received_at": None,
+    "substitution_lock_mode": "auto",
+    "substitution_snapshot": {"fields": {}, "missing_tokens": []},
 }
 
 IMAP_DELAY_MIN_SECONDS = 5
@@ -106,8 +108,6 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "substitution_rules": [],
     "telegram_bot_token": "",
     "telegram_chat_id": "",
-    "random_substitution_mode": "auto",
-    "substitution_snapshot": {},
 }
 GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count")
 MAX_DEVICE_LOG_HISTORY = 10
@@ -127,9 +127,9 @@ RANDOM_TOKEN_CHARSETS = {
 RANDOM_TOKEN_MAX_LENGTH = 128
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 5.0
-RANDOM_SUBSTITUTION_MODES = {"auto", "lock"}
+SUBSTITUTION_LOCK_MODES = {"auto", "lock"}
 SNAPSHOT_FIELD_KEYS = ("helo", "mail_from", "header", "anchor_email", "rcpt_to")
-LOCK_SENSITIVE_FIELDS = ("helo", "mail_from", "header", "substitution_rules")
+EMPTY_SUBSTITUTION_SNAPSHOT: Dict[str, Any] = {"fields": {}, "missing_tokens": []}
 
 
 def ensure_storage_root() -> None:
@@ -224,10 +224,10 @@ def sanitize_iso_timestamp(value: Any) -> Optional[str]:
     return parsed.isoformat()
 
 
-def sanitize_random_substitution_mode(value: Any) -> str:
+def sanitize_substitution_lock_mode(value: Any) -> str:
     if isinstance(value, str):
         lowered = value.strip().lower()
-        if lowered in RANDOM_SUBSTITUTION_MODES:
+        if lowered in SUBSTITUTION_LOCK_MODES:
             return lowered
     return "auto"
 
@@ -273,6 +273,30 @@ def sanitize_substitution_snapshot(raw: Any) -> Dict[str, Any]:
     if domain_value:
         snapshot["domain"] = domain_value
     return snapshot
+
+
+def decode_substitution_snapshot(raw: Any) -> Dict[str, Any]:
+    candidate = raw
+    if isinstance(candidate, str):
+        candidate = candidate.strip()
+        if candidate:
+            try:
+                candidate = json.loads(candidate)
+            except json.JSONDecodeError:
+                candidate = {}
+        else:
+            candidate = {}
+    if not isinstance(candidate, dict):
+        candidate = {}
+    snapshot = sanitize_substitution_snapshot(candidate)
+    if not snapshot:
+        return {"fields": {}, "missing_tokens": []}
+    return snapshot
+
+
+def encode_substitution_snapshot(snapshot: Dict[str, Any]) -> str:
+    sanitized = sanitize_substitution_snapshot(snapshot or {})
+    return json.dumps(sanitized, ensure_ascii=False)
 
 
 def field_contains_tokens(value: Any) -> bool:
@@ -735,10 +759,6 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized["substitution_rules"] = sanitize_substitution_rules(raw.get("substitution_rules"))
     sanitized["telegram_bot_token"] = sanitize_telegram_bot_token(raw.get("telegram_bot_token"))
     sanitized["telegram_chat_id"] = sanitize_telegram_chat_id(raw.get("telegram_chat_id"))
-    sanitized["random_substitution_mode"] = sanitize_random_substitution_mode(raw.get("random_substitution_mode"))
-    sanitized["substitution_snapshot"] = sanitize_substitution_snapshot(raw.get("substitution_snapshot"))
-    if sanitized["random_substitution_mode"] != "lock":
-        sanitized["substitution_snapshot"] = {"fields": {}, "missing_tokens": []}
     return sanitized
 
 
@@ -998,6 +1018,8 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_last_mail_from TEXT,
                 imap_last_sent_at TEXT,
                 imap_last_received_at TEXT,
+                substitution_lock_mode TEXT NOT NULL DEFAULT 'auto',
+                substitution_snapshot TEXT DEFAULT '{}',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (device_id, domain),
                 FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
@@ -1025,7 +1047,8 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_sent_last_reset_at,
                 imap_last_status, imap_last_checked_at, imap_last_latency,
                 imap_last_error, imap_last_mail_from, imap_last_sent_at,
-                imap_last_received_at, updated_at
+                imap_last_received_at, 'auto' AS substitution_lock_mode,
+                '{{}}' AS substitution_snapshot, updated_at
             )
             SELECT
                 device_id, domain, helo, smtp_host, smtp_port,
@@ -1046,7 +1069,8 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 NULL AS imap_sent_last_reset_at,
                 imap_last_status, imap_last_checked_at, imap_last_latency,
                 imap_last_error, imap_last_mail_from, imap_last_sent_at,
-                imap_last_received_at, updated_at
+                imap_last_received_at, 'auto' AS substitution_lock_mode,
+                '{{}}' AS substitution_snapshot, updated_at
             FROM device_configs_legacy
             """
         ).format(threshold_default=IMAP_SENT_THRESHOLD_DEFAULT)
@@ -1307,6 +1331,24 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_last_received_at TEXT"
             )
+        if "substitution_lock_mode" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN substitution_lock_mode TEXT NOT NULL DEFAULT 'auto'"
+            )
+        if "substitution_snapshot" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN substitution_snapshot TEXT DEFAULT '{}'"
+            )
+            conn.execute(
+                "UPDATE device_configs SET substitution_snapshot='{}' WHERE substitution_snapshot IS NULL OR substitution_snapshot=''"
+            )
+        else:
+            conn.execute(
+                "UPDATE device_configs SET substitution_snapshot='{}' WHERE substitution_snapshot IS NULL OR substitution_snapshot=''"
+            )
+        conn.execute(
+            "UPDATE device_configs SET substitution_lock_mode='auto' WHERE substitution_lock_mode IS NULL OR substitution_lock_mode=''"
+        )
         job_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(jobs)").fetchall()
@@ -1361,10 +1403,11 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     imap_enabled, imap_username, imap_password, imap_delay_seconds,
                     imap_last_status, imap_last_checked_at, imap_last_latency, imap_last_error, imap_last_mail_from,
                     imap_last_sent_at, imap_last_received_at,
+                    substitution_lock_mode, substitution_snapshot,
                     updated_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(device_id, domain) DO NOTHING
                 """,
@@ -1409,6 +1452,8 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG["imap_last_mail_from"],
                     DEFAULT_DOMAIN_CONFIG["imap_last_sent_at"],
                     DEFAULT_DOMAIN_CONFIG["imap_last_received_at"],
+                    DEFAULT_DOMAIN_CONFIG["substitution_lock_mode"],
+                    json.dumps(DEFAULT_DOMAIN_CONFIG["substitution_snapshot"], ensure_ascii=False),
                     now,
                 ),
             )
@@ -1496,6 +1541,8 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     imap_mail_from = str(row.get("imap_last_mail_from") or "")
     imap_last_sent = row.get("imap_last_sent_at")
     imap_last_received = row.get("imap_last_received_at")
+    lock_mode = sanitize_substitution_lock_mode(row.get("substitution_lock_mode"))
+    snapshot_payload = decode_substitution_snapshot(row.get("substitution_snapshot"))
     password_raw = row.get("imap_password") or ""
     if include_secret:
         imap_password = password_raw
@@ -1551,6 +1598,9 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "imap_last_mail_from": imap_mail_from,
         "imap_last_sent_at": imap_last_sent,
         "imap_last_received_at": imap_last_received,
+        "substitution_lock_mode": lock_mode,
+        "substitution_lock_active": lock_mode == "lock",
+        "substitution_snapshot": snapshot_payload,
     }
 
 
@@ -2054,7 +2104,8 @@ def apply_substitutions_to_config(
 def resolve_substitution_outputs(
     config_snapshot: Dict[str, Any],
     substitution_rules: List[Dict[str, Any]],
-    global_config: Dict[str, Any],
+    lock_mode: Any,
+    lock_snapshot: Any,
     *,
     context: Optional[Dict[str, Dict[str, Any]]] = None,
     random_generator: Optional[random.Random] = None,
@@ -2064,21 +2115,21 @@ def resolve_substitution_outputs(
 ) -> Tuple[Dict[str, Any], Optional[str], Set[str], Optional[Dict[str, Any]]]:
     working = dict(config_snapshot or {})
     overrides = set(override_fields or set())
-    mode = sanitize_random_substitution_mode(global_config.get("random_substitution_mode"))
-    snapshot_payload = sanitize_substitution_snapshot(global_config.get("substitution_snapshot"))
+    mode = sanitize_substitution_lock_mode(lock_mode)
+    snapshot_payload = sanitize_substitution_snapshot(lock_snapshot)
     if mode == "lock":
         locked_fields = snapshot_payload.get("fields") or {}
         if not locked_fields:
             raise HTTPException(
                 status_code=409,
-                detail="랜덤 치환이 락 모드지만 저장된 고정 값이 없습니다. '다시 뽑기' 후 락을 설정하거나 잠금을 해제하세요.",
+                detail="고정 모드를 사용 중이지만 저장된 고정 값이 없습니다. '다시 뽑기'로 값을 만들거나 고정을 해제하세요.",
             )
         for field in SUBSTITUTION_TARGET_FIELDS:
             if field in overrides and field != "rcpt_to":
                 if field_contains_tokens(working.get(field)):
                     raise HTTPException(
                         status_code=409,
-                        detail=f"락 모드에서는 {field.upper()} 필드에 랜덤 패턴을 사용할 수 없습니다. 락을 해제하거나 고정값을 갱신하세요.",
+                        detail=f"고정 모드에서는 {field.upper()} 필드에 랜덤 패턴을 사용할 수 없습니다. 고정을 해제하거나 고정값을 갱신하세요.",
                     )
                 continue
             locked_value = locked_fields.get(field)
@@ -2087,13 +2138,13 @@ def resolve_substitution_outputs(
             elif field != "rcpt_to" and field_contains_tokens(working.get(field)):
                 raise HTTPException(
                     status_code=409,
-                    detail=f"락 모드에서 {field.upper()} 값을 계산할 수 없습니다. '다시 뽑기'로 고정값을 만든 뒤 잠그거나 잠금을 해제하세요.",
+                    detail=f"고정 모드에서 {field.upper()} 값을 계산할 수 없습니다. '다시 뽑기'로 고정값을 만든 뒤 잠그거나 고정을 해제하세요.",
                 )
         if rcpt_override:
             if rcpt_source and field_contains_tokens(rcpt_source):
                 raise HTTPException(
                     status_code=409,
-                    detail="락 모드에서는 RCPT TO에 랜덤 패턴을 사용할 수 없습니다. 락을 해제하거나 고정값을 갱신하세요.",
+                    detail="고정 모드에서는 RCPT TO에 랜덤 패턴을 사용할 수 없습니다. 고정을 해제하거나 고정값을 갱신하세요.",
                 )
             rcpt_result = rcpt_source
         else:
@@ -2104,7 +2155,7 @@ def resolve_substitution_outputs(
                 if rcpt_source and field_contains_tokens(rcpt_source):
                     raise HTTPException(
                         status_code=409,
-                        detail="락 모드에서 RCPT TO 랜덤 값을 계산할 수 없습니다. '다시 뽑기' 후 잠그거나 잠금을 해제하세요.",
+                        detail="고정 모드에서 RCPT TO 랜덤 값을 계산할 수 없습니다. '다시 뽑기' 후 고정을 유지하거나 고정을 해제하세요.",
                     )
                 rcpt_result = rcpt_source
         missing_tokens = set(snapshot_payload.get("missing_tokens") or [])
@@ -2792,6 +2843,7 @@ def preview_single_header(device_id: str, domain: str, payload: HeaderPreviewReq
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         configs = load_device_configs(device_id, conn=conn)
         global_config = load_global_config(conn=conn)
+    base_config = configs.get(normalized) or {}
     substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
     context = build_substitution_context(substitution_rules)
     config_snapshot = build_config_snapshot(configs, normalized)
@@ -2801,10 +2853,13 @@ def preview_single_header(device_id: str, domain: str, payload: HeaderPreviewReq
     rcpt_override = payload.rcpt_to is not None
     rcpt_source = str(payload.rcpt_to or "").strip() if rcpt_override else config_snapshot.get("rcpt_to")
     rng = random.SystemRandom()
+    lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
+    lock_snapshot = decode_substitution_snapshot(base_config.get("substitution_snapshot"))
     resolved_config, resolved_rcpt, missing_tokens, snapshot_meta = resolve_substitution_outputs(
         config_snapshot,
         substitution_rules,
-        global_config,
+        lock_mode,
+        lock_snapshot,
         context=context,
         random_generator=rng,
         rcpt_source=rcpt_source,
@@ -2865,20 +2920,16 @@ class SubstitutionSnapshotResponse(BaseModel):
     missing_tokens: List[str] = Field(default_factory=list)
 
 
-class SubstitutionLockRequest(BaseModel):
+class DeviceLockRequest(BaseModel):
     helo: Optional[str] = None
     mail_from: Optional[str] = None
     header: Optional[str] = None
     anchor_email: Optional[str] = None
     rcpt_to: Optional[str] = None
-    device_id: Optional[str] = None
-    domain: Optional[str] = None
     missing_tokens: Optional[List[str]] = None
 
 
-class SubstitutionRefreshRequest(BaseModel):
-    device_id: Optional[str] = None
-    domain: Optional[str] = None
+class DeviceLockRefreshRequest(BaseModel):
     rcpt_to: Optional[str] = None
     header_override: Optional[str] = None
 
@@ -2890,6 +2941,12 @@ class SubstitutionPreviewRequest(BaseModel):
 
 class SubstitutionPreviewResponse(BaseModel):
     results: List[str] = Field(default_factory=list)
+
+
+class DeviceLockCopyRequest(BaseModel):
+    source_device_id: str
+    domain: str
+    target_device_ids: List[str] = Field(default_factory=list)
 
 
 class GlobalConfigPayload(BaseModel):
@@ -2921,15 +2978,6 @@ class GlobalConfigResponse(BaseModel):
     substitution_rules: List[SubstitutionRule] = Field(default_factory=list)
     telegram_bot_token: str
     telegram_chat_id: str
-    random_substitution_mode: str
-    substitution_snapshot: SubstitutionSnapshotResponse = Field(default_factory=SubstitutionSnapshotResponse)
-
-
-class SubstitutionLockResponse(BaseModel):
-    mode: str
-    snapshot: SubstitutionSnapshotResponse
-    updated_at: Optional[str] = None
-    config: GlobalConfigResponse
 
 
 class GlobalBatchRequest(BaseModel):
@@ -3043,8 +3091,6 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
     schedule_enabled = sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled"))
     if schedule_enabled and not schedule_time:
         schedule_enabled = False
-    mode_value = sanitize_random_substitution_mode(config.get("random_substitution_mode"))
-    snapshot_payload = sanitize_substitution_snapshot(config.get("substitution_snapshot"))
     return GlobalConfigResponse(
         helo=config.get("helo", ""),
         mail_from=config.get("mail_from", ""),
@@ -3063,18 +3109,6 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
         ],
         telegram_bot_token=sanitize_telegram_bot_token(config.get("telegram_bot_token")),
         telegram_chat_id=sanitize_telegram_chat_id(config.get("telegram_chat_id")),
-        random_substitution_mode=mode_value,
-        substitution_snapshot=SubstitutionSnapshotResponse(**snapshot_payload),
-    )
-
-
-def build_lock_operation_response(config: Dict[str, Any]) -> SubstitutionLockResponse:
-    normalized = build_global_config_response(config)
-    return SubstitutionLockResponse(
-        mode=normalized.random_substitution_mode,
-        snapshot=normalized.substitution_snapshot,
-        updated_at=normalized.updated_at,
-        config=normalized,
     )
 
 
@@ -3092,12 +3126,6 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
     with db_lock, get_conn() as conn:
         current_config = load_global_config(conn=conn)
         stored_config = sanitize_global_config_payload(current_config)
-        previous_lock_mode = sanitize_random_substitution_mode(stored_config.get("random_substitution_mode"))
-        lock_signature_before = json.dumps(
-            {field: stored_config.get(field) for field in LOCK_SENSITIVE_FIELDS},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
         previous_active_domain = stored_config.get("active_domain", "naver")
         requested_active_domain = (
             sanitize_global_active_domain(payload.active_domain)
@@ -3206,15 +3234,6 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
             applied_fields.append("active_domain")
         stored_config["active_domain"] = requested_active_domain
         device_count = max(device_count, domain_update_count)
-        lock_signature_after = json.dumps(
-            {field: stored_config.get(field) for field in LOCK_SENSITIVE_FIELDS},
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-        if previous_lock_mode == "lock" and lock_signature_after != lock_signature_before:
-            stored_config["random_substitution_mode"] = "auto"
-            stored_config["substitution_snapshot"] = {"fields": {}, "missing_tokens": []}
-            applied_fields.append("random_substitution_mode")
         updated_at = save_global_config(conn, stored_config)
         conn.commit()
         refreshed_config = load_global_config(conn=conn)
@@ -3243,7 +3262,7 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
     }
 
 
-def _sanitize_lock_fields(payload: SubstitutionLockRequest) -> Dict[str, str]:
+def _sanitize_lock_fields(payload: DeviceLockRequest) -> Dict[str, str]:
     fields: Dict[str, str] = {}
     for key in SNAPSHOT_FIELD_KEYS:
         value = getattr(payload, key, None)
@@ -3259,61 +3278,90 @@ def _sanitize_lock_fields(payload: SubstitutionLockRequest) -> Dict[str, str]:
     return fields
 
 
-@app.post("/api/global/substitution-lock", response_model=SubstitutionLockResponse)
-def create_substitution_lock(payload: SubstitutionLockRequest) -> SubstitutionLockResponse:
+@app.post("/api/devices/{device_id}/domains/{domain}/lock")
+def set_device_lock(device_id: str, domain: str, payload: DeviceLockRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
     lock_fields = _sanitize_lock_fields(payload)
     if not lock_fields:
-        raise HTTPException(status_code=400, detail="잠글 문자열 값을 최소 1개 이상 전달하세요.")
+        raise HTTPException(status_code=400, detail="고정할 필드 값을 최소 1개 이상 전달하세요.")
     missing_tokens = sorted({str(token).strip() for token in (payload.missing_tokens or []) if token})
     snapshot_payload: Dict[str, Any] = {
         "fields": lock_fields,
         "missing_tokens": missing_tokens,
         "generated_at": now_ts(),
+        "device_id": device_id,
+        "domain": normalized,
     }
-    if payload.device_id:
-        snapshot_payload["device_id"] = str(payload.device_id).strip()
-    if payload.domain:
-        snapshot_payload["domain"] = normalize_domain(payload.domain)
-    with db_lock, get_conn() as conn:
-        current_config = load_global_config(conn=conn)
-        stored_config = sanitize_global_config_payload(current_config)
-        stored_config["random_substitution_mode"] = "lock"
-        stored_config["substitution_snapshot"] = sanitize_substitution_snapshot(snapshot_payload)
-        updated_at = save_global_config(conn, stored_config)
-        conn.commit()
-        refreshed_config = load_global_config(conn=conn)
-        refreshed_config["updated_at"] = updated_at
-    return build_lock_operation_response(refreshed_config)
-
-
-@app.post("/api/global/substitution-lock/refresh", response_model=SubstitutionLockResponse)
-def refresh_substitution_lock(payload: SubstitutionRefreshRequest) -> SubstitutionLockResponse:
-    device_id = (payload.device_id or "").strip()
-    if not device_id:
-        raise HTTPException(status_code=400, detail="다시 뽑기를 실행할 디바이스 ID를 전달하세요.")
-    domain = normalize_domain(payload.domain or "naver")
     with db_lock, get_conn() as conn:
         device = get_device(device_id, conn=conn)
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        snapshot_json = encode_substitution_snapshot(snapshot_payload)
+        now = now_ts()
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET substitution_lock_mode='lock',
+                substitution_snapshot=?,
+                updated_at=?
+            WHERE device_id=? AND domain=?
+            """,
+            (snapshot_json, now, device_id, normalized),
+        )
+        conn.commit()
+        updated_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+    if not updated_row:
+        raise HTTPException(status_code=500, detail="고정 값을 저장하지 못했습니다.")
+    return {
+        "device_id": device_id,
+        "domain": normalized,
+        "snapshot": snapshot_payload,
+        "config": serialize_config(to_dict(updated_row), include_secret=False),
+    }
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/lock/refresh")
+def refresh_device_lock(device_id: str, domain: str, payload: DeviceLockRefreshRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
         global_config = load_global_config(conn=conn)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
-        config_snapshot = build_config_snapshot(configs, domain)
+        config_snapshot = build_config_snapshot(configs, normalized)
         override_fields: Set[str] = set()
         if payload.header_override is not None:
             config_snapshot["header"] = payload.header_override
             override_fields.add("header")
-        rcpt_source = (payload.rcpt_to or "").strip() if payload.rcpt_to is not None else config_snapshot.get("rcpt_to")
+        rcpt_source = (
+            (payload.rcpt_to or "").strip()
+            if payload.rcpt_to is not None
+            else config_snapshot.get("rcpt_to")
+        )
         rng = random.SystemRandom()
-        auto_config = dict(global_config)
-        auto_config["random_substitution_mode"] = "auto"
-        auto_config["substitution_snapshot"] = {"fields": {}, "missing_tokens": []}
         resolved_config, resolved_rcpt, missing_tokens, _ = resolve_substitution_outputs(
             config_snapshot,
             substitution_rules,
-            auto_config,
+            "auto",
+            EMPTY_SUBSTITUTION_SNAPSHOT,
             context=context,
             random_generator=rng,
             rcpt_source=rcpt_source,
@@ -3324,7 +3372,7 @@ def refresh_substitution_lock(payload: SubstitutionRefreshRequest) -> Substituti
             unresolved = ", ".join(sorted(missing_tokens))
             raise HTTPException(
                 status_code=400,
-                detail=f"치환되지 않은 토큰({unresolved})이 있어 랜덤 값을 고정할 수 없습니다.",
+                detail=f"치환되지 않은 토큰({unresolved})이 있어 고정 값을 생성할 수 없습니다.",
             )
         lock_fields: Dict[str, str] = {}
         for key in SNAPSHOT_FIELD_KEYS:
@@ -3340,30 +3388,166 @@ def refresh_substitution_lock(payload: SubstitutionRefreshRequest) -> Substituti
             "missing_tokens": [],
             "generated_at": now_ts(),
             "device_id": device_id,
-            "domain": domain,
+            "domain": normalized,
         }
-        stored_config = sanitize_global_config_payload(global_config)
-        stored_config["random_substitution_mode"] = "lock"
-        stored_config["substitution_snapshot"] = sanitize_substitution_snapshot(snapshot_payload)
-        updated_at = save_global_config(conn, stored_config)
+        snapshot_json = encode_substitution_snapshot(snapshot_payload)
+        now = now_ts()
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET substitution_lock_mode='lock',
+                substitution_snapshot=?,
+                updated_at=?
+            WHERE device_id=? AND domain=?
+            """,
+            (snapshot_json, now, device_id, normalized),
+        )
         conn.commit()
-        refreshed_config = load_global_config(conn=conn)
-        refreshed_config["updated_at"] = updated_at
-    return build_lock_operation_response(refreshed_config)
+        updated_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+    if not updated_row:
+        raise HTTPException(status_code=500, detail="고정 값을 저장하지 못했습니다.")
+    return {
+        "device_id": device_id,
+        "domain": normalized,
+        "snapshot": snapshot_payload,
+        "config": serialize_config(to_dict(updated_row), include_secret=False),
+    }
 
 
-@app.post("/api/global/substitution-lock/reset", response_model=SubstitutionLockResponse)
-def reset_substitution_lock() -> SubstitutionLockResponse:
+@app.post("/api/devices/{device_id}/domains/{domain}/lock/reset")
+def reset_device_lock(device_id: str, domain: str) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
     with db_lock, get_conn() as conn:
-        current_config = load_global_config(conn=conn)
-        stored_config = sanitize_global_config_payload(current_config)
-        stored_config["random_substitution_mode"] = "auto"
-        stored_config["substitution_snapshot"] = {"fields": {}, "missing_tokens": []}
-        updated_at = save_global_config(conn, stored_config)
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET substitution_lock_mode='auto',
+                substitution_snapshot='{}',
+                updated_at=?
+            WHERE device_id=? AND domain=?
+            """,
+            (now_ts(), device_id, normalized),
+        )
         conn.commit()
-        refreshed_config = load_global_config(conn=conn)
-        refreshed_config["updated_at"] = updated_at
-    return build_lock_operation_response(refreshed_config)
+        updated_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+    if not updated_row:
+        raise HTTPException(status_code=500, detail="고정을 해제하지 못했습니다.")
+    snapshot_payload = {
+        "fields": {},
+        "missing_tokens": [],
+        "generated_at": None,
+        "device_id": device_id,
+        "domain": normalized,
+    }
+    return {
+        "device_id": device_id,
+        "domain": normalized,
+        "snapshot": snapshot_payload,
+        "config": serialize_config(to_dict(updated_row), include_secret=False),
+    }
+
+
+@app.post("/api/substitution-lock/copy")
+def copy_device_lock(payload: DeviceLockCopyRequest) -> Dict[str, Any]:
+    source_device_id = (payload.source_device_id or "").strip()
+    if not source_device_id:
+        raise HTTPException(status_code=400, detail="원본 디바이스 ID를 입력하세요.")
+    normalized_domain = normalize_domain(payload.domain or "naver")
+    target_ids = [device_id.strip() for device_id in payload.target_device_ids or [] if device_id and device_id.strip()]
+    target_ids = [device_id for device_id in target_ids if device_id != source_device_id]
+    if not target_ids:
+        raise HTTPException(status_code=400, detail="복사할 대상 디바이스를 선택하세요.")
+    with db_lock, get_conn() as conn:
+        source_row = conn.execute(
+            "SELECT substitution_lock_mode, substitution_snapshot FROM device_configs WHERE device_id=? AND domain=?",
+            (source_device_id, normalized_domain),
+        ).fetchone()
+        if not source_row:
+            raise HTTPException(status_code=404, detail="원본 디바이스 도메인 설정을 찾을 수 없습니다.")
+        source_mode = sanitize_substitution_lock_mode(source_row["substitution_lock_mode"])
+        if source_mode != "lock":
+            raise HTTPException(status_code=409, detail="원본 카드가 고정 모드가 아닙니다.")
+        source_snapshot = decode_substitution_snapshot(source_row["substitution_snapshot"])
+        locked_fields = source_snapshot.get("fields") or {}
+        if not locked_fields:
+            raise HTTPException(status_code=409, detail="원본 카드에 고정된 값이 없습니다.")
+        updated_entries: List[Dict[str, Any]] = []
+        now = now_ts()
+        for target_id in target_ids:
+            target = get_device(target_id, conn=conn)
+            if not target:
+                raise HTTPException(status_code=404, detail=f"대상 디바이스({target_id})를 찾을 수 없습니다.")
+            target_row = conn.execute(
+                "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+                (target_id, normalized_domain),
+            ).fetchone()
+            if not target_row:
+                raise HTTPException(status_code=404, detail=f"대상 디바이스({target_id})의 도메인 설정을 찾을 수 없습니다.")
+            snapshot_payload = {
+                "fields": dict(locked_fields),
+                "missing_tokens": source_snapshot.get("missing_tokens", []),
+                "generated_at": now,
+                "device_id": target_id,
+                "domain": normalized_domain,
+            }
+            snapshot_json = encode_substitution_snapshot(snapshot_payload)
+            conn.execute(
+                """
+                UPDATE device_configs
+                SET substitution_lock_mode='lock',
+                    substitution_snapshot=?,
+                    updated_at=?
+                WHERE device_id=? AND domain=?
+                """,
+                (snapshot_json, now, target_id, normalized_domain),
+            )
+            updated_row = conn.execute(
+                "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+                (target_id, normalized_domain),
+            ).fetchone()
+            updated_entries.append(
+                {
+                    "device_id": target_id,
+                    "domain": normalized_domain,
+                    "snapshot": snapshot_payload,
+                    "config": serialize_config(to_dict(updated_row), include_secret=False) if updated_row else {},
+                }
+            )
+        conn.commit()
+    return {
+        "updated": updated_entries,
+        "count": len(updated_entries),
+        "domain": normalized_domain,
+        "source_device_id": source_device_id,
+    }
+
+
+@app.post("/api/substitution-lock/reset-all")
+def reset_all_device_locks() -> Dict[str, Any]:
+    with db_lock, get_conn() as conn:
+        cursor = conn.execute(
+            """
+            UPDATE device_configs
+            SET substitution_lock_mode='auto',
+                substitution_snapshot='{}',
+                updated_at=?
+            WHERE substitution_lock_mode!='auto'
+               OR substitution_snapshot NOT IN ('{}', '')
+            """,
+            (now_ts(),),
+        )
+        updated_count = cursor.rowcount
+        conn.commit()
+    return {"updated": updated_count}
 
 
 @app.post("/api/global/telegram/test")
@@ -3717,10 +3901,13 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
         config_snapshot["bcc_count"] = 0
         config_snapshot["anchor_interval"] = 0
         rng = random.SystemRandom()
+        lock_mode = sanitize_substitution_lock_mode(config_data.get("substitution_lock_mode"))
+        lock_snapshot = decode_substitution_snapshot(config_data.get("substitution_snapshot"))
         resolved_config, _, missing_tokens, _ = resolve_substitution_outputs(
             config_snapshot,
             substitution_rules,
-            global_config,
+            lock_mode,
+            lock_snapshot,
             context=context,
             random_generator=rng,
         )
@@ -3895,10 +4082,14 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
             configs = load_device_configs(device_id, conn=conn)
             config_snapshot = build_config_snapshot(configs, domain)
             rng = random.SystemRandom()
+            base_config = configs.get(domain) or {}
+            lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
+            lock_snapshot = decode_substitution_snapshot(base_config.get("substitution_snapshot"))
             resolved_config, _, missing_tokens, _ = resolve_substitution_outputs(
                 config_snapshot,
                 substitution_rules,
-                global_config,
+                lock_mode,
+                lock_snapshot,
                 context=context,
                 random_generator=rng,
             )
@@ -3942,10 +4133,14 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         if payload.header_override:
             override_fields.add("header")
         rng = random.SystemRandom()
+        base_config = configs.get(domain) or {}
+        lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
+        lock_snapshot = decode_substitution_snapshot(base_config.get("substitution_snapshot"))
         resolved_config, resolved_rcpt, missing_tokens, snapshot_meta = resolve_substitution_outputs(
             config_snapshot,
             substitution_rules,
-            global_config,
+            lock_mode,
+            lock_snapshot,
             context=context,
             random_generator=rng,
             rcpt_source=rcpt_to,
@@ -3983,10 +4178,14 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
         rng = random.SystemRandom()
+        base_config = configs.get(domain) or {}
+        lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
+        lock_snapshot = decode_substitution_snapshot(base_config.get("substitution_snapshot"))
         resolved_config, _, missing_tokens, _ = resolve_substitution_outputs(
             config_snapshot,
             substitution_rules,
-            global_config,
+            lock_mode,
+            lock_snapshot,
             context=context,
             random_generator=rng,
         )
