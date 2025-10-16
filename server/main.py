@@ -4684,7 +4684,11 @@ def clear_device_logs(device_id: str, payload: ClearLogsRequest) -> Dict[str, An
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         if normalized_domain:
             cursor = conn.execute(
-                "DELETE FROM send_logs WHERE device_id=? AND domain=?",
+                """
+                DELETE FROM send_logs
+                WHERE device_id=?
+                  AND (domain=? OR domain IS NULL)
+                """,
                 (device_id, normalized_domain),
             )
         else:
