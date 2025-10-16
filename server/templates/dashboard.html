@@ -8310,7 +8310,8 @@ function renderDevices() {
     emptyHint.dataset.defaultMessage = emptyHint.textContent;
   }
 
-  const filterOnlineOnly = Boolean(state.filterOnlineOnly && !state.deviceEditMode);
+  const hasOnlineDevices = (state.devices || []).some((device) => device.status === "connected");
+  const filterOnlineOnly = Boolean(state.filterOnlineOnly && !state.deviceEditMode && hasOnlineDevices);
   let visibleCards = 0;
 
   state.devices.forEach((device) => {
