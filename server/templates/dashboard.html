@@ -2402,6 +2402,34 @@ const IMAP_SENT_THRESHOLD_MAX = 1000;
 const IMAP_SINGLE_MIN_DELAY = 0;
 const IMAP_FAILURE_ACTIONS = ["none", "stop_device", "stop_all"];
 
+function createDefaultSubstitutionSnapshot() {
+  return {
+    fields: {},
+    generated_at: null,
+    device_id: null,
+    source_device_id: null,
+    domain: null,
+    missing_tokens: [],
+  };
+}
+
+function cloneSubstitutionSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== "object") {
+    return createDefaultSubstitutionSnapshot();
+  }
+  const fields =
+    snapshot.fields && typeof snapshot.fields === "object" ? { ...snapshot.fields } : {};
+  const missingTokens = Array.isArray(snapshot.missing_tokens) ? [...snapshot.missing_tokens] : [];
+  return {
+    fields,
+    generated_at: snapshot.generated_at || null,
+    device_id: snapshot.device_id || null,
+    source_device_id: snapshot.source_device_id || null,
+    domain: snapshot.domain || null,
+    missing_tokens: missingTokens,
+  };
+}
+
 const state = {
   devices: [],
   lastSync: null,
@@ -2426,6 +2454,7 @@ const state = {
   successCounters: {},
   globalConfig: {
     ...GLOBAL_DEFAULTS,
+    substitution_snapshot: cloneSubstitutionSnapshot(null),
     updated_at: null,
     stop_schedule_last_run: null,
     stop_schedule_next_run: null,
@@ -4062,6 +4091,7 @@ function normalizeGlobalConfig(config) {
   normalized.stop_schedule_last_run = config?.stop_schedule_last_run || null;
   normalized.stop_schedule_next_run = config?.stop_schedule_next_run || null;
   normalized.substitution_rules = normalizeSubstitutionRules(config?.substitution_rules || []);
+  normalized.substitution_snapshot = cloneSubstitutionSnapshot(config?.substitution_snapshot);
   return normalized;
 }
 
@@ -5773,7 +5803,7 @@ function renderGlobalConfig(config) {
   const normalized = normalizeGlobalConfig(config || {});
   const updatedAtEl = document.getElementById("globalUpdatedAt");
   const normalizedSubs = cloneSubstitutionRules(normalized.substitution_rules);
-  const snapshotClone = JSON.parse(JSON.stringify(normalized.substitution_snapshot || GLOBAL_DEFAULTS.substitution_snapshot));
+  const snapshotClone = cloneSubstitutionSnapshot(normalized.substitution_snapshot);
   state.globalConfig = {
     ...normalized,
     substitution_rules: normalizedSubs,
