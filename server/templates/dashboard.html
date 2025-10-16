@@ -307,6 +307,15 @@ header {
   display: inline-block;
   margin-left: 6px;
 }
+.action-buttons button[data-action="substitution-manage"][data-state="dirty"]::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-warning);
+  display: inline-block;
+  margin-left: 6px;
+}
 .global-panel {
   background: var(--color-surface);
   border-radius: 16px;
@@ -2177,7 +2186,7 @@ button:not(:disabled):hover {
   </div>
   <div class="summary-actions">
     <div class="summary-nav" role="group" aria-label="요약 액션">
-      <button type="button" class="summary-nav-btn substitution-manage-btn" id="substitutionManageBtn" title="치환 변수 목록을 관리합니다.">치환 변수</button>
+      <button type="button" class="summary-nav-btn substitution-manage-btn" id="substitutionManageBtn" title="치환 변수 목록을 관리합니다." data-substitution-trigger="true">치환 변수</button>
       <button type="button" class="summary-nav-btn" id="editDevicesBtn" title="디바이스 카드 삭제 모드를 켭니다." disabled>편집</button>
       <button type="button" class="summary-nav-btn" id="lockResetAllBtn" title="모든 카드의 고정을 해제합니다." disabled>전체 고정 해제</button>
     </div>
@@ -2540,7 +2549,9 @@ const state = {
   substitutionModal: {
     open: false,
     activeTab: "static",
+    lastTrigger: null,
   },
+  substitutionTriggerBound: false,
   substitutionDrag: {
     active: false,
     sourceIndex: null,
@@ -5486,14 +5497,14 @@ function updateSubstitutionModalButtons() {
     const hasInvalid = state.substitutionInvalidRows.size > 0;
     saveBtn.disabled = hasInvalid || !state.substitutionDirty;
   }
-  const openBtn = document.getElementById("substitutionManageBtn");
-  if (openBtn) {
+  const triggers = document.querySelectorAll('[data-substitution-trigger="true"]');
+  triggers.forEach((button) => {
     if (state.substitutionDirty) {
-      openBtn.setAttribute("data-state", "dirty");
+      button.setAttribute("data-state", "dirty");
     } else {
-      openBtn.removeAttribute("data-state");
+      button.removeAttribute("data-state");
     }
-  }
+  });
 }
 
 function setSubstitutionModalMessage(message = "", type = "info") {
@@ -5562,6 +5573,14 @@ function closeSubstitutionModal(options = {}) {
   } else {
     validateSubstitutionDraft({ showMessage: false });
   }
+  const lastTrigger = state.substitutionModal?.lastTrigger;
+  if (lastTrigger && typeof lastTrigger.focus === "function") {
+    if (document.contains(lastTrigger)) {
+      setTimeout(() => lastTrigger.focus(), 0);
+    } else {
+      state.substitutionModal.lastTrigger = null;
+    }
+  }
 }
 
 async function submitSubstitutionModal() {
@@ -5600,11 +5619,14 @@ async function submitSubstitutionModal() {
     renderSubstitutionDraft();
     updateSubstitutionRowValidity();
     updateSubstitutionModalButtons();
+    const storedTrigger = state.substitutionModal?.lastTrigger;
     closeSubstitutionModal();
     setGlobalStatus(`총 ${prepared.rules.length}개의 치환 변수를 저장했습니다.`, "success");
-    const manageBtn = document.getElementById("substitutionManageBtn");
-    if (manageBtn) {
-      manageBtn.focus();
+    if (!storedTrigger || !document.contains(storedTrigger) || typeof storedTrigger.focus !== "function") {
+      const fallback = document.getElementById("substitutionManageBtn");
+      if (fallback && typeof fallback.focus === "function") {
+        fallback.focus();
+      }
     }
   } catch (err) {
     console.error("치환 변수 저장 실패", err);
@@ -5664,11 +5686,22 @@ function initSubstitutionSection() {
       button.addEventListener("keydown", handleTabKeydown);
     });
   }
-  const openBtn = document.getElementById("substitutionManageBtn");
-  if (openBtn) {
-    openBtn.addEventListener("click", () => {
+  if (!state.substitutionTriggerBound) {
+    document.addEventListener("click", (event) => {
+      const trigger = event.target.closest('[data-substitution-trigger="true"]');
+      if (!trigger) {
+        return;
+      }
+      if (trigger.disabled) {
+        return;
+      }
+      event.preventDefault();
+      if (state.substitutionModal) {
+        state.substitutionModal.lastTrigger = trigger;
+      }
       openSubstitutionModal();
     });
+    state.substitutionTriggerBound = true;
   }
   const cancelBtn = document.getElementById("substitutionCancelBtn");
   if (cancelBtn) {
@@ -8196,6 +8229,7 @@ function attachCardEvents(card) {
     });
   }
 
+  updateSubstitutionModalButtons();
 }
 
 function buildDeviceCard(device) {
@@ -8285,6 +8319,7 @@ function buildDeviceCard(device) {
           <input type="text" data-field="rcpt_to" placeholder="recipient@example.com">
         </label>
         <div class="action-buttons">
+          <button data-action="substitution-manage" data-substitution-trigger="true" title="치환 변수를 편집합니다.">치환편집</button>
           <button data-action="save">설정 저장</button>
           <button class="ghost" data-action="copy-global">전체 적용</button>
           <button class="ghost" data-action="single-preview">미리보기</button>
