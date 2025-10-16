@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import hashlib
+import logging
 import json
 import random
 import re
@@ -140,6 +141,48 @@ def ensure_storage_root() -> None:
 ensure_storage_root()
 
 
+class HeartbeatAccessFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:
+            return True
+        return "/heartbeat" not in message
+
+
+_uvicorn_access_logger = logging.getLogger("uvicorn.access")
+if not any(isinstance(f, HeartbeatAccessFilter) for f in _uvicorn_access_logger.filters):
+    _uvicorn_access_logger.addFilter(HeartbeatAccessFilter())
+
+
+DEVICE_CONNECTION_STATES: Dict[str, str] = {}
+DEVICE_LAST_IP: Dict[str, Optional[str]] = {}
+
+
+def _log_device_connection_event(
+    device_id: str,
+    device_label: Optional[str],
+    status: str,
+    public_ip: Optional[str] = None,
+) -> None:
+    normalized_label = (device_label or "").strip() or device_id
+    normalized_status = "connected" if status == "connected" else "disconnected"
+    previous_status = DEVICE_CONNECTION_STATES.get(device_id)
+    previous_ip = DEVICE_LAST_IP.get(device_id)
+    if normalized_status == "connected":
+        ip_text = f" (IP: {public_ip})" if public_ip else ""
+        if previous_status != "connected":
+            print(f"[연결] 디바이스 {normalized_label} 온라인{ip_text}")
+        elif public_ip and public_ip != previous_ip:
+            origin_ip = previous_ip or "알 수 없음"
+            print(f"[연결] 디바이스 {normalized_label} IP 변경: {origin_ip} -> {public_ip}")
+        DEVICE_CONNECTION_STATES[device_id] = "connected"
+        if public_ip is not None:
+            DEVICE_LAST_IP[device_id] = public_ip
+    else:
+        if previous_status != "disconnected":
+            print(f"[연결] 디바이스 {normalized_label} 오프라인")
+        DEVICE_CONNECTION_STATES[device_id] = "disconnected"
 def now_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1685,6 +1728,10 @@ def load_device_summary() -> Dict[str, Any]:
             )
             conn.commit()
         device_lookup = {device["id"]: device for device in device_rows}
+        for device_id in stale_updates:
+            details = device_lookup.get(device_id)
+            device_name = details.get("name") if details else None
+            _log_device_connection_event(device_id, device_name or device_id, "disconnected")
         stale_message = "디바이스 연결이 끊겨 작업이 중단되었습니다."
         for job_row in job_rows:
             if job_row["status"] not in {"running", "dispatched"}:
@@ -3591,6 +3638,7 @@ def register_device(payload: RegisterRequest) -> RegisterResponse:
     device = ensure_device(payload.device_id or uuid.uuid4().hex, payload.device_name, payload.public_ip)
     raw_configs = load_device_configs(device["id"])
     configs = {domain: serialize_config(row, include_secret=True) for domain, row in raw_configs.items()}
+    _log_device_connection_event(device["id"], device.get("name"), "connected", device.get("public_ip"))
     return RegisterResponse(
         device_id=device["id"],
         name=device["name"],
@@ -5091,6 +5139,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
         for row in control_rows
         if row["cancel_requested"]
     ]
+    _log_device_connection_event(device_id, device_label, "connected", public_ip_value)
     return HeartbeatResponse(
         active_domain=active_domain,
         configs=configs,
