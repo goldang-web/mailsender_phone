@@ -1127,15 +1127,9 @@ class MailClient:
             )
             updated_counter = base_counter
             if counter_mode == "threshold":
-                if probe_success and did_send_probe:
-                    updated_counter = max(0, base_counter + 1)
                 self._set_sent_counter(normalized, updated_counter)
             elif counter_mode == "manual":
-                if probe_success and did_send_probe:
-                    updated_counter = max(0, base_counter + 1)
-                    self._set_sent_counter(normalized, updated_counter)
-                else:
-                    updated_counter = base_counter
+                self._set_sent_counter(normalized, updated_counter)
         if not probe_success or not probe_result:
             failure_enqueued = False
             if report_probe_failure:
@@ -1439,19 +1433,25 @@ class MailClient:
             settings["sent_last_reset_at"] = reset_timestamp
         self._imap_settings_dirty.add(normalized)
 
-    def _rollback_sent_counter(self, domain: str, amount: int, floor: int) -> int:
+    def _visible_sent_counter(self, domain: str) -> int:
         normalized = (domain or "").lower()
-        decrement = max(0, int(amount or 0))
-        if decrement <= 0:
-            return self._get_sent_counter(normalized)
-        floor_value = max(0, int(floor or 0))
-        stored_counter = self._get_sent_counter(normalized)
-        if stored_counter <= floor_value:
-            return stored_counter
-        new_counter = max(floor_value, stored_counter - decrement)
-        if new_counter != stored_counter:
-            self._set_sent_counter(normalized, new_counter)
-        return new_counter
+        try:
+            sequence_total = max(0, int(self.sent_sequences.get(normalized, 0)))
+        except (TypeError, ValueError):
+            sequence_total = 0
+        base_value = self._sent_log_bases.get(normalized)
+        if base_value is None:
+            base_value = sequence_total
+            self._sent_log_bases[normalized] = base_value
+        else:
+            try:
+                base_value = max(0, int(base_value))
+            except (TypeError, ValueError):
+                base_value = 0
+        if sequence_total < base_value:
+            base_value = sequence_total
+            self._sent_log_bases[normalized] = base_value
+        return max(0, sequence_total - base_value)
 
     def _get_last_threshold_multiple(self, domain: str) -> int:
         normalized = (domain or "").lower()
@@ -3279,7 +3279,8 @@ class MailClient:
         mail_from_value = self._effective_mail_from(normalized, config)
         header_from_value = self._extract_header_from(config.get("header"), mail_from_value)
         settings = self._imap_settings_for_domain(normalized)
-        current_sent_counter = self._get_sent_counter(normalized)
+        current_sent_counter = self._visible_sent_counter(normalized)
+        self._set_sent_counter(normalized, current_sent_counter)
         if current_sent_counter <= 0 and self._get_last_threshold_multiple(normalized) != 0:
             self._set_last_threshold_multiple(normalized, 0)
         if self._imap_enabled(normalized):
@@ -3404,7 +3405,7 @@ class MailClient:
             last_report_at = now_point
 
         def maybe_poll_updates(force: bool = False) -> None:
-            nonlocal last_poll_at, sent_reset_offset
+            nonlocal last_poll_at, sent_reset_offset, current_sent_counter
             now_point = time.monotonic()
             if not force and now_point - last_poll_at < poll_interval:
                 return
@@ -3464,6 +3465,8 @@ class MailClient:
                         target_domains = {str(inline_domain).lower()}
                     if normalized in target_domains:
                         sent_reset_offset = sent_count
+                        current_sent_counter = self._visible_sent_counter(normalized)
+                        self._set_sent_counter(normalized, current_sent_counter)
                         emit_progress(force=True)
                 except Exception as exc:  # pylint: disable=broad-except
                     message = f"발송 로그 초기화 처리 중 오류: {exc}"
@@ -3779,19 +3782,25 @@ class MailClient:
                         return
                     if mail_from_value:
                         self._remember_last_mail_from(normalized, mail_from_value)
-                    current_sent_counter = max(0, current_sent_counter + increment)
+                    visible_sent = max(0, sent_count - sent_reset_offset)
+                    visible_from_sequence = self._visible_sent_counter(normalized)
+                    if visible_from_sequence > visible_sent:
+                        visible_sent = visible_from_sequence
+                    current_sent_counter = visible_sent
                     settings_local = self._imap_settings_for_domain(normalized)
                     threshold_value = self._current_sent_threshold(normalized)
                     self._set_sent_counter(normalized, current_sent_counter)
                     if threshold_value <= 0:
                         return
-                    next_multiple = self._get_last_threshold_multiple(normalized) + 1
+                    last_multiple = max(0, self._get_last_threshold_multiple(normalized))
+                    next_multiple = last_multiple + 1
                     target_value = threshold_value * next_multiple
                     if current_sent_counter < target_value:
                         return
                     if threshold_check_request is not None:
                         return
-                    current_multiple = max(1, current_sent_counter // max(1, threshold_value))
+                    raw_multiple = current_sent_counter // max(1, threshold_value)
+                    current_multiple = max(next_multiple, raw_multiple if raw_multiple > 0 else 1)
                     session_success = current_sent_counter
                     global_success = max(0, int(self.sent_sequences.get(normalized, 0)))
                     self._emit_imap_section(
@@ -3955,9 +3964,13 @@ class MailClient:
                     status_value = str(report_payload.get("status") or "")
                     latency_value = report_payload.get("latency")
                     if status_value == "success":
-                        self._set_last_threshold_multiple(normalized, 0)
-                        self._set_sent_counter(normalized, 0, reset_timestamp=utc_now_iso())
-                        current_sent_counter = 0
+                        refreshed_counter = self._visible_sent_counter(normalized)
+                        if refreshed_counter < current_sent_counter:
+                            refreshed_counter = current_sent_counter
+                        current_sent_counter = refreshed_counter
+                        current_multiple = max(1, current_sent_counter // max(1, threshold_value))
+                        self._set_last_threshold_multiple(normalized, current_multiple)
+                        self._set_sent_counter(normalized, current_sent_counter, reset_timestamp=utc_now_iso())
                         def _format_latency(value: Optional[object]) -> str:
                             if value is None:
                                 return "-"
@@ -4004,7 +4017,11 @@ class MailClient:
                         if not failure_lines:
                             failure_lines.append(status_value or "IMAP 확인 실패")
                         self._emit_imap_section("IMAP 확인 실패", failure_lines, domain=normalized)
-                        current_sent_counter = self._get_sent_counter(normalized)
+                        refreshed_counter = self._visible_sent_counter(normalized)
+                        if refreshed_counter < current_sent_counter:
+                            refreshed_counter = current_sent_counter
+                        current_sent_counter = refreshed_counter
+                        self._set_sent_counter(normalized, current_sent_counter)
                     next_multiple = self._get_last_threshold_multiple(normalized) + 1
                     next_target = threshold_value * next_multiple if threshold_value > 0 else 0
                     remaining = max(0, next_target - current_sent_counter) if next_target else 0
@@ -4169,13 +4186,8 @@ class MailClient:
                     if session_success and normalized == "naver":
                         register_sent_success(outcome.sent_at, detail_for_log, success_increment)
                     elif not session_success and normalized == "naver":
-                        failure_decrement = max(0, (group_size_actual - db_nouser_count) + anchor_count)
-                        if failure_decrement > 0:
-                            current_sent_counter = self._rollback_sent_counter(
-                                normalized,
-                                failure_decrement,
-                                current_sent_counter,
-                            )
+                        current_sent_counter = max(0, sent_count - sent_reset_offset)
+                        self._set_sent_counter(normalized, current_sent_counter)
 
                     if anchor_count:
                         if session_success:
