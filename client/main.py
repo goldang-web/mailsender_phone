@@ -3418,8 +3418,15 @@ class MailClient:
             now_point = time.monotonic()
             if not force and now_point - last_poll_at < poll_interval:
                 return
+            response: Optional[Dict[str, object]] = None
             try:
-                response = self.heartbeat([], [])
+                if self.offline_mode:
+                    response = self._probe_server_if_due([])
+                    if response is None:
+                        last_poll_at = now_point
+                        return
+                else:
+                    response = self.heartbeat([], [])
             except requests.RequestException as exc:
                 print(f"[진행] 상태 동기화 실패: {exc}")
                 last_poll_at = now_point

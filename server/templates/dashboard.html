@@ -213,6 +213,124 @@ header {
   gap: 18px;
   margin-bottom: 20px;
 }
+.monitoring {
+  background: var(--color-surface);
+  border-radius: 16px;
+  padding: 16px 20px;
+  box-shadow: 0 8px 24px var(--shadow-elevated);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.monitoring-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.monitoring-header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--color-heading);
+}
+.monitoring-meta {
+  font-size: 13px;
+  color: var(--color-muted);
+}
+.monitoring-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 12px;
+}
+.monitoring-chip {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface-subtle);
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+.monitoring-chip:hover {
+  border-color: var(--color-accent);
+  box-shadow: 0 6px 18px var(--shadow-hover);
+  transform: translateY(-1px);
+}
+.monitoring-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.monitoring-left {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+.monitoring-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-heading);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.monitoring-status {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--color-chip-neutral-bg);
+  color: var(--color-chip-neutral-text);
+  border: 1px solid var(--color-chip-neutral-border);
+  white-space: nowrap;
+}
+.monitoring-status--running {
+  background: var(--color-success-bg);
+  color: var(--color-success);
+  border-color: var(--color-success-border);
+}
+.monitoring-status--idle {
+  background: rgba(217, 119, 6, 0.12);
+  color: var(--color-warning-strong);
+  border-color: rgba(217, 119, 6, 0.32);
+}
+.monitoring-status--offline {
+  background: var(--color-danger-bg);
+  color: var(--color-danger);
+  border-color: var(--color-danger-border);
+}
+.monitoring-counts {
+  font-size: 12px;
+  color: var(--color-muted-strong);
+  white-space: nowrap;
+}
+.monitoring-status-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.monitoring-subrow {
+  font-size: 12px;
+  color: var(--color-muted-strong);
+}
+.monitoring-updated {
+  color: var(--color-muted);
+}
+.monitoring-empty {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.card.monitoring-target {
+  box-shadow: 0 0 0 2px var(--color-accent-strong) inset, 0 10px 24px var(--shadow-hover);
+  transition: box-shadow 0.3s ease;
+}
 .summary-metrics {
   display: flex;
   flex-wrap: wrap;
@@ -2197,6 +2315,15 @@ button:not(:disabled):hover {
   </div>
 </section>
 
+<section class="monitoring" id="monitoringSection">
+  <div class="monitoring-header">
+    <h2>모니터링</h2>
+    <div class="monitoring-meta" id="monitoringMeta">전송 상태를 불러오는 중...</div>
+  </div>
+  <div class="monitoring-grid" id="monitoringGrid"></div>
+  <div class="monitoring-empty" id="monitoringEmpty" style="display:none;">표시할 디바이스가 없습니다.</div>
+</section>
+
 <div id="deviceContainer" class="device-grid"></div>
 <div id="emptyHint" class="empty-hint" style="display:none;">등록된 디바이스가 없습니다. 클라이언트에서 서버에 연결하면 여기에 표시됩니다.</div>
 
@@ -2600,6 +2727,16 @@ const JOB_STATUS_LABELS = {
   success: "완료",
   failed: "실패",
   cancelled: "중지됨",
+};
+const MONITORING_STATUS_INFO = {
+  running: { badge: "전송중", text: "진행중", className: "running" },
+  idle: { badge: "멈춤", text: "멈춤", className: "idle" },
+  offline: { badge: "오프라인", text: "오프라인", className: "offline" },
+};
+const MONITORING_STATUS_PRIORITY = {
+  running: 0,
+  idle: 1,
+  offline: 2,
 };
 const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
 const SINGLE_JOB_TYPES = new Set(["single_send"]);
@@ -6954,7 +7091,7 @@ function formatElapsedDuration(ms) {
 
 function describeElapsedStatus(job) {
   if (!job) {
-    return { text: "대기 중", state: "idle" };
+    return { text: "대기 중", state: "idle", label: "대기 중", duration: "-" };
   }
   const active = jobIsActive(job);
   const cancelRequested = Boolean(job.cancel_requested);
@@ -6963,17 +7100,18 @@ function describeElapsedStatus(job) {
   const createdMs = parseTimestampMs(job.created_at);
   const hasStarted = !Number.isNaN(startedMs);
   if (!hasStarted && (!active || job.status === "pending" || job.status === "dispatched")) {
-    const label = JOB_STATUS_LABELS[job.status] || job.status || "대기 중";
-    return { text: label, state: job.status || "idle" };
+    const statusLabel = JOB_STATUS_LABELS[job.status] || job.status || "대기 중";
+    const stateLabel = job.status || "idle";
+    return { text: statusLabel, state: stateLabel, label: statusLabel, duration: "-" };
   }
   let startMs = startedMs;
   if (Number.isNaN(startMs)) {
     startMs = Number.isNaN(queuedMs) ? createdMs : queuedMs;
   }
   if (Number.isNaN(startMs)) {
-    const fallbackLabel = JOB_STATUS_LABELS[job.status] || job.status || "대기 중";
-    const state = active ? (cancelRequested ? "cancelling" : "running") : (job.status || "idle");
-    return { text: fallbackLabel, state };
+    const statusLabel = JOB_STATUS_LABELS[job.status] || job.status || "대기 중";
+    const stateLabel = active ? (cancelRequested ? "cancelling" : "running") : (job.status || "idle");
+    return { text: statusLabel, state: stateLabel, label: statusLabel, duration: "-" };
   }
   let endMs = Date.now();
   if (!active) {
@@ -6990,8 +7128,7 @@ function describeElapsedStatus(job) {
     statusLabel = cancelRequested ? "중지 중" : (JOB_STATUS_LABELS[job.status] || "진행 중");
     stateLabel = cancelRequested ? "cancelling" : "running";
   } else {
-    const fallback = JOB_STATUS_LABELS[job.status] || job.status || "완료";
-    statusLabel = fallback;
+    statusLabel = JOB_STATUS_LABELS[job.status] || job.status || "완료";
     if (job.status === "success") {
       stateLabel = "success";
     } else if (job.status === "failed") {
@@ -7005,16 +7142,18 @@ function describeElapsedStatus(job) {
   return {
     text: `${statusLabel} ${durationText}`,
     state: stateLabel,
+    label: statusLabel,
+    duration: durationText,
   };
 }
 
-function updateSuccessCounter(card, device) {
-  if (!card || !device) {
-    return;
+function updateSuccessTrackerFromDevice(device) {
+  if (!device || !device.id) {
+    return null;
   }
   const tracker = ensureSuccessTracker(device.id);
   if (!tracker) {
-    return;
+    return null;
   }
   const job = latestBatchJob(device);
   const jobId = job?.id || null;
@@ -7158,14 +7297,26 @@ function updateSuccessCounter(card, device) {
   tracker.total = sentTotal;
   tracker.value = sentTotal;
   tracker.anchor = anchorTotal;
+  return { tracker, job };
+}
+
+function updateSuccessCounter(card, device) {
+  if (!card || !device) {
+    return;
+  }
+  const result = updateSuccessTrackerFromDevice(device);
+  if (!result) {
+    return;
+  }
+  const { tracker, job } = result;
   const counterEl = card.querySelector('[data-role="successCounter"]');
   if (counterEl) {
-    counterEl.textContent = `현재 성공: ${formatCount(sentCurrent)}건 · 누적 성공: ${formatCount(sentTotal)}건`;
+    counterEl.textContent = `현재 성공: ${formatCount(tracker.current)}건 · 누적 성공: ${formatCount(tracker.total)}건`;
   }
   const elapsedEl = card.querySelector('[data-role="elapsedCounter"]');
   if (elapsedEl) {
     const elapsed = describeElapsedStatus(job);
-    elapsedEl.textContent = `경과: ${elapsed.text} · 알박기: ${formatCount(anchorTotal)}건`;
+    elapsedEl.textContent = `경과: ${elapsed.text} · 알박기: ${formatCount(tracker.anchor)}건`;
     if (elapsed.state) {
       elapsedEl.dataset.state = elapsed.state;
     } else {
@@ -8421,6 +8572,164 @@ function updateDeviceCard(card, device) {
   updateBatchControls(card, device);
 }
 
+function resolveMonitoringStatus(device) {
+  if (hasActiveBatchJob(device)) {
+    return "running";
+  }
+  if ((device?.status || "") === "connected") {
+    return "idle";
+  }
+  return "offline";
+}
+
+function formatMonitoringUpdated(iso) {
+  if (!iso) {
+    return "-";
+  }
+  const relative = formatRelativeTime(iso, { allowSeconds: true }) || "";
+  if (relative) {
+    return relative;
+  }
+  const absolute = formatDate(iso);
+  return absolute || "-";
+}
+
+function focusDeviceCard(deviceId) {
+  if (!deviceId) {
+    return;
+  }
+  const registryEntries = Object.values(cardRegistry || {});
+  registryEntries.forEach((card) => {
+    if (card?.classList) {
+      card.classList.remove("monitoring-target");
+    }
+  });
+  const card = (cardRegistry || {})[deviceId];
+  if (!card) {
+    return;
+  }
+  if (typeof card.scrollIntoView === "function") {
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+  if (card.classList) {
+    card.classList.add("monitoring-target");
+    window.setTimeout(() => {
+      if (card?.classList) {
+        card.classList.remove("monitoring-target");
+      }
+    }, 1600);
+  }
+}
+
+function renderMonitoring() {
+  const grid = document.getElementById("monitoringGrid");
+  const empty = document.getElementById("monitoringEmpty");
+  const metaEl = document.getElementById("monitoringMeta");
+  if (!grid || !empty || !metaEl) {
+    return;
+  }
+
+  grid.innerHTML = "";
+  const devices = Array.isArray(state.devices) ? [...state.devices] : [];
+  if (!devices.length) {
+    metaEl.textContent = "표시할 디바이스가 없습니다.";
+    empty.style.display = "block";
+    return;
+  }
+
+  const entries = devices.map((device) => {
+    const result = updateSuccessTrackerFromDevice(device);
+    const tracker = result?.tracker;
+    const job = result?.job;
+    const statusKey = resolveMonitoringStatus(device);
+    const info = MONITORING_STATUS_INFO[statusKey] || { badge: statusKey, text: statusKey, className: statusKey };
+    return {
+      device,
+      tracker,
+      statusKey,
+      info,
+      priority: MONITORING_STATUS_PRIORITY[statusKey] ?? 99,
+      current: tracker?.current ?? 0,
+      total: tracker?.total ?? tracker?.value ?? 0,
+      job,
+      lastSeen: device.last_seen || null,
+    };
+  });
+
+  entries.sort((a, b) => {
+    if (a.priority !== b.priority) {
+      return a.priority - b.priority;
+    }
+    if (b.total !== a.total) {
+      return b.total - a.total;
+    }
+    const nameA = (a.device.name || a.device.id || "").toString().toLowerCase();
+    const nameB = (b.device.name || b.device.id || "").toString().toLowerCase();
+    return nameA.localeCompare(nameB, "ko");
+  });
+
+  const summaryGroups = new Map();
+  entries.forEach((entry) => {
+    const badgeLabel = entry.info?.badge || entry.statusKey;
+    summaryGroups.set(badgeLabel, (summaryGroups.get(badgeLabel) || 0) + 1);
+    const chip = document.createElement("div");
+    chip.className = "monitoring-chip";
+    chip.dataset.deviceId = entry.device.id;
+    chip.title = "상세 카드로 이동";
+    chip.addEventListener("click", () => {
+      focusDeviceCard(entry.device.id);
+    });
+
+    const headerRow = document.createElement("div");
+    headerRow.className = "monitoring-row";
+    const leftGroup = document.createElement("div");
+    leftGroup.className = "monitoring-left";
+    const nameEl = document.createElement("span");
+    nameEl.className = "monitoring-name";
+    nameEl.textContent = entry.device.name || entry.device.id || "-";
+    leftGroup.appendChild(nameEl);
+    const countsEl = document.createElement("span");
+    countsEl.className = "monitoring-counts";
+    countsEl.textContent = `성공 ${formatCount(entry.current)} / ${formatCount(entry.total)}`;
+    leftGroup.appendChild(countsEl);
+    headerRow.appendChild(leftGroup);
+
+    const statusGroup = document.createElement("div");
+    statusGroup.className = "monitoring-status-group";
+    const elapsedDetails = entry.job ? describeElapsedStatus(entry.job) : null;
+    const durationText = elapsedDetails?.duration || "-";
+
+    const statusEl = document.createElement("span");
+    const statusClass = entry.info?.className ? `monitoring-status--${entry.info.className}` : "monitoring-status--idle";
+    statusEl.className = `monitoring-status ${statusClass}`;
+    statusEl.textContent = entry.info?.badge || entry.statusKey;
+    statusGroup.appendChild(statusEl);
+
+    headerRow.appendChild(statusGroup);
+    chip.appendChild(headerRow);
+
+    const subRow = document.createElement("div");
+    subRow.className = "monitoring-subrow";
+    let progressLabel;
+    if (entry.statusKey === "running") {
+      progressLabel = `진행중: ${durationText && durationText !== "-" ? durationText : "측정 중"}`;
+    } else if (entry.statusKey === "idle") {
+      progressLabel = "상태: 멈춤";
+    } else {
+      progressLabel = "상태: 오프라인";
+    }
+    const updatedLabel = `응답: ${formatMonitoringUpdated(entry.lastSeen)}`;
+    subRow.textContent = `${progressLabel} | ${updatedLabel}`;
+
+    chip.appendChild(subRow);
+    grid.appendChild(chip);
+  });
+
+  empty.style.display = entries.length ? "none" : "block";
+  const summaryParts = Array.from(summaryGroups.entries()).map(([label, count]) => `${label} ${formatCount(count)}대`);
+  metaEl.textContent = summaryParts.length ? summaryParts.join(" · ") : "표시할 디바이스가 없습니다.";
+}
+
 function renderDevices() {
   const container = document.getElementById("deviceContainer");
   const emptyHint = document.getElementById("emptyHint");
@@ -8529,6 +8838,7 @@ async function loadDevices(options = {}) {
     state.lastSync = new Date().toISOString();
     renderLastSync();
     renderDevices();
+    renderMonitoring();
     const hasRunningBatch = (state.devices || []).some(hasActiveBatchJob);
     scheduleAutoRefresh(hasRunningBatch);
   } catch (err) {
