@@ -674,6 +674,8 @@ class MailClient:
         return self.public_ip
 
     def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+        suppress_log = bool(kwargs.pop("suppress_log", False))
+        log_context = kwargs.pop("log_context", None)
         url = join_url(self.server_url, path)
         timeout = kwargs.pop("timeout", self.timeout)
         max_attempts = 3
@@ -687,11 +689,17 @@ class MailClient:
                 break
             except requests.RequestException as exc:
                 last_exc = exc
-                if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
-                    message = self._summarize_http_connection_error(method, url, exc)
-                else:
-                    message = f"HTTP {method.upper()} 요청 실패: {exc}"
-                print(message)
+                if not suppress_log:
+                    if isinstance(exc, (requests.exceptions.ConnectionError, requests.exceptions.Timeout)):
+                        message = self._summarize_http_connection_error(method, url, exc, log_context=log_context)
+                    else:
+                        reason = self._short_error_reason(exc)
+                        if log_context:
+                            message = f"[네트워크] {log_context} 실패 - {reason}"
+                        else:
+                            target = urlparse(url).path or "/"
+                            message = f"[네트워크] {method.upper()} {target} 실패 - {reason}"
+                    print(message)
                 if attempt >= max_attempts or not self._should_retry(exc):
                     raise
                 self._reset_session()
@@ -718,23 +726,43 @@ class MailClient:
         return any(signature in message for signature in retry_signatures)
 
     @staticmethod
-    def _summarize_http_connection_error(method: str, url: str, exc: requests.RequestException) -> str:
-        parsed = urlparse(url)
-        host = parsed.hostname or "-"
-        if parsed.scheme == "https":
-            default_port = 443
-        else:
-            default_port = 80
-        port = parsed.port or default_port
-        reason = "Connection error"
-        message_lower = str(exc).lower()
+    def _short_error_reason(exc: Exception) -> str:
+        message = str(exc).strip()
+        message_lower = message.lower()
+        if isinstance(exc, requests.exceptions.Timeout) or "timed out" in message_lower:
+            return "타임아웃"
         if "connection refused" in message_lower:
-            reason = "Connection refused"
-        elif "timed out" in message_lower or isinstance(exc, requests.exceptions.Timeout):
-            reason = "Timed out"
-        elif "name or service not known" in message_lower or "temporary failure in name resolution" in message_lower:
-            reason = "DNS failure"
-        return f"HTTP {method.upper()} 연결 실패: {reason} ({host}:{port})"
+            return "연결 거부"
+        if "name or service not known" in message_lower or "temporary failure in name resolution" in message_lower:
+            return "DNS 오류"
+        if "remotedisconnected" in message_lower:
+            return "원격 연결 종료"
+        if "broken pipe" in message_lower or "connection aborted" in message_lower:
+            return "연결 끊김"
+        if "max retries exceeded" in message_lower:
+            return "재시도 한도 초과"
+        if "certificate verify failed" in message_lower or "ssl: wrong version number" in message_lower:
+            return "TLS 인증 오류"
+        if message:
+            first_line = message.splitlines()[0]
+            if len(first_line) > 60:
+                return f"{first_line[:57]}..."
+            return first_line
+        return exc.__class__.__name__
+
+    @staticmethod
+    def _summarize_http_connection_error(
+        method: str,
+        url: str,
+        exc: requests.RequestException,
+        log_context: Optional[str] = None,
+    ) -> str:
+        parsed = urlparse(url)
+        reason = MailClient._short_error_reason(exc)
+        if log_context:
+            return f"[네트워크] {log_context} 실패 - {reason}"
+        target = parsed.path or "/"
+        return f"[네트워크] {method.upper()} {target} 실패 - {reason}"
 
     def _enter_offline_mode(self, context: str, exc: Optional[Exception] = None) -> None:
         if self.offline_mode:
@@ -747,10 +775,10 @@ class MailClient:
             self._reset_session()
         except Exception:
             pass
-        reason = f"{context} 요청 실패로 오프라인 모드에 진입합니다."
+        summary = f"{context} 요청 실패"
         if exc:
-            reason = f"{context} 요청 실패({exc})로 오프라인 모드에 진입합니다."
-        print(f"[오프라인 전환] {reason}")
+            summary = f"{context} 요청 실패 - {self._short_error_reason(exc)}"
+        print(f"[오프라인 전환] {summary} · 오프라인 모드 진입")
 
     def _exit_offline_mode(self) -> None:
         if not self.offline_mode:
@@ -767,11 +795,17 @@ class MailClient:
         if now < self.next_offline_probe_at:
             return None
         self.next_offline_probe_at = now + OFFLINE_PROBE_INTERVAL_SECONDS
-        print("오프라인 모드 · 서버 핑 시도 중")
         try:
-            response = self._request("get", OFFLINE_HEALTH_PATH, timeout=min(5, self.timeout))
+            response = self._request(
+                "get",
+                OFFLINE_HEALTH_PATH,
+                timeout=min(5, self.timeout),
+                suppress_log=True,
+                log_context="서버 핑",
+            )
             response.raise_for_status()
-        except requests.RequestException:
+        except requests.RequestException as exc:
+            print(f"오프라인 모드 · 서버 핑 실패 - {self._short_error_reason(exc)}")
             return None
         self._exit_offline_mode()
         try:
@@ -2503,7 +2537,12 @@ class MailClient:
             "device_id": self.device_id or None,
             "public_ip": self.public_ip,
         }
-        response = self._request("post", "/api/devices/register", json=payload)
+        response = self._request(
+            "post",
+            "/api/devices/register",
+            json=payload,
+            log_context="디바이스 등록",
+        )
         response.raise_for_status()
         data = response.json()
         self.device_id = data["device_id"]
@@ -2548,7 +2587,13 @@ class MailClient:
         if imap_reports:
             payload["imap_reports"] = imap_reports
         try:
-            response = self._request("post", f"/api/devices/{self.device_id}/heartbeat", json=payload)
+            response = self._request(
+                "post",
+                f"/api/devices/{self.device_id}/heartbeat",
+                json=payload,
+                suppress_log=True,
+                log_context="하트비트",
+            )
         except requests.RequestException as exc:
             self._enter_offline_mode("하트비트", exc)
             raise
@@ -2827,7 +2872,12 @@ class MailClient:
         if not download_path:
             return JobResult(job_id=job_id, status="failed", message="다운로드 경로가 없습니다.")
         print(f"[Inject] 파일 다운로드 경로: {download_path}")
-        response = self._request("get", str(download_path), timeout=max(self.timeout, 30))
+        response = self._request(
+            "get",
+            str(download_path),
+            timeout=max(self.timeout, 30),
+            log_context="파일 다운로드",
+        )
         response.raise_for_status()
         data = response.content
         target_dir = DATA_DIR / normalized
