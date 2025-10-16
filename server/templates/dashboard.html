@@ -7335,7 +7335,11 @@ function renderImapSection(card, device, domain) {
   const checkedAt = config.imap_last_checked_at;
   const receivedAt = config.imap_last_received_at || checkedAt;
   const latencyValue = Number(config.imap_last_latency);
-  const reasonText = config.imap_last_error || "";
+  const reasonSource = config.imap_last_error;
+  let reasonText = reasonSource ? String(reasonSource) : "";
+  const normalizedReason = reasonText.toLowerCase();
+  const isBlockedReason = normalizedReason.includes("blocked");
+  const displayReasonText = isBlockedReason ? "Block" : reasonText;
   let statusClass = "off";
   let statusText = "IMAP 확인 비활성";
   let metaText = "네이버 도메인에서 계정을 설정하면 도착 여부를 자동으로 확인합니다.";
@@ -7354,13 +7358,13 @@ function renderImapSection(card, device, domain) {
       const relativeLabel = formatRelativeTime(checkedAt, { allowSeconds: true });
       statusText = relativeLabel ? `최근 확인 실패 (${relativeLabel})` : "최근 확인 실패";
       const relativeMeta = relativeLabel ? ` · ${relativeLabel}` : "";
-      metaText = `${checkedAt ? formatDate(checkedAt) : "최근 확인"}${relativeMeta} · ${reasonText || "허용 지연 초과"}`;
+      metaText = `${checkedAt ? formatDate(checkedAt) : "최근 확인"}${relativeMeta} · ${displayReasonText || "허용 지연 초과"}`;
     } else if (lastStatus === "error") {
       statusClass = "error";
       const relativeLabel = formatRelativeTime(checkedAt, { allowSeconds: true });
       statusText = relativeLabel ? `IMAP 확인 오류 (${relativeLabel})` : "IMAP 확인 오류";
       const relativeMeta = relativeLabel ? `최근 확인 ${relativeLabel} · ` : "";
-      const description = reasonText || "IMAP 확인 중 오류가 발생했습니다.";
+      const description = displayReasonText || "IMAP 확인 중 오류가 발생했습니다.";
       metaText = relativeMeta ? `${relativeMeta}${description}` : description;
     } else if (checkedAt) {
       const relativeLabel = formatRelativeTime(checkedAt, { allowSeconds: true });
@@ -7395,6 +7399,15 @@ function renderImapSection(card, device, domain) {
   statusEl.textContent = statusText;
   statusEl.className = `imap-status ${statusClass}`;
   metaEl.textContent = metaText;
+  if (metaText) {
+    if (isBlockedReason && reasonText) {
+      metaEl.title = reasonText;
+    } else {
+      metaEl.title = metaText;
+    }
+  } else {
+    metaEl.removeAttribute("title");
+  }
   const cancelBtn = block.querySelector('button[data-action="imap-cancel-check"]');
   if (cancelBtn) {
     if (!cancelBtn.dataset.defaultLabel) {

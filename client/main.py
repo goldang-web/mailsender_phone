@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.69"
+APP_VERSION = "0.0.71"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -1686,7 +1686,7 @@ class MailClient:
                 status_line="MAIL FROM 누락",
                 detail_line="MAIL FROM이 설정되지 않아 확인 메일을 발송할 수 없습니다.",
             )
-        rcpt_value = normalize_imap_recipient(domain, "vkdlxm145")
+        rcpt_value = normalize_imap_recipient(domain, rcpt_to)
         if not rcpt_value or "@" not in rcpt_value:
             self._log_imap_console("IMAP 발송 · RCPT TO 형식 오류", domain=normalized)
             return SentProbeResult(
