@@ -3363,7 +3363,41 @@ async function refreshSinglePreview() {
   setSinglePreviewLoading(true);
   setSinglePreviewMessage("새로운 미리보기를 계산 중입니다...", "info");
   try {
-    const result = await requestSinglePreview(deviceId, domain, payload);
+    let result;
+    if (lockActive) {
+      try {
+        await ensureConfigSynced(card, device, domain);
+      } catch (syncErr) {
+        throw syncErr;
+      }
+      const refreshRequest = {};
+      if (payload.rcpt_to) {
+        refreshRequest.rcpt_to = payload.rcpt_to;
+      }
+      const refreshResult = await refreshDeviceLockSnapshot(deviceId, domain, refreshRequest);
+      const snapshot = refreshResult?.snapshot || {};
+      const fields = snapshot.fields || {};
+      result = {
+        helo: String(fields.helo ?? ""),
+        mail_from: String(fields.mail_from ?? ""),
+        header: String(fields.header ?? ""),
+        rcpt_to: String(fields.rcpt_to ?? (payload.rcpt_to || "")),
+        anchor_email: String(fields.anchor_email ?? ""),
+        missing_tokens: Array.isArray(snapshot.missing_tokens) ? snapshot.missing_tokens : [],
+        generated_at: snapshot.generated_at || new Date().toISOString(),
+      };
+      if (refreshResult?.config) {
+        device.configs = device.configs || {};
+        device.configs[domain] = refreshResult.config;
+        if (card) {
+          card.__deviceData = { ...device };
+        }
+        applyConfigSnapshot(deviceId, domain, refreshResult.config);
+      }
+      refreshLockIndicators();
+    } else {
+      result = await requestSinglePreview(deviceId, domain, payload);
+    }
     state.singlePreview.pending = false;
     state.singlePreview.lastResult = result;
     state.singlePreview.rcpt = String(result?.rcpt_to ?? "");
@@ -3602,6 +3636,30 @@ function refreshLockIndicators() {
     const config = bestConfig(device, domain);
     updateCardLockUI(card, config, domain);
   });
+}
+
+function applyConfigSnapshot(deviceId, domain, updatedConfig) {
+  const normalizedDomain = normalizeDeviceDomain(domain);
+  const card = cardRegistry[deviceId];
+  if (card) {
+    const cachedDevice = card.__deviceData || state.devices.find((item) => item.id === deviceId) || { id: deviceId, configs: {} };
+    const nextConfigs = { ...(cachedDevice.configs || {}) };
+    if (updatedConfig) {
+      nextConfigs[normalizedDomain] = { ...(nextConfigs[normalizedDomain] || {}), ...updatedConfig };
+    }
+    const nextDevice = { ...cachedDevice, configs: nextConfigs };
+    card.__deviceData = nextDevice;
+  }
+  const deviceIndex = state.devices.findIndex((item) => item.id === deviceId);
+  if (deviceIndex >= 0) {
+    const source = state.devices[deviceIndex];
+    const nextConfigs = { ...(source.configs || {}) };
+    if (updatedConfig) {
+      nextConfigs[normalizedDomain] = { ...(nextConfigs[normalizedDomain] || {}), ...updatedConfig };
+    }
+    state.devices[deviceIndex] = { ...source, configs: nextConfigs };
+  }
+  ensureFieldCache(deviceId, normalizedDomain, updatedConfig || {});
 }
 
 async function requestDeviceScheduleUpdate(card, device, domain, payload) {
@@ -5989,10 +6047,16 @@ function updateSingleSendControls(card, device) {
       lockRefreshBtn.textContent = "다시 뽑는 중...";
       try {
         await ensureConfigSynced(card, currentDevice, domain);
-        await refreshDeviceLockSnapshot(currentDevice.id, domain, {
+        const refreshResult = await refreshDeviceLockSnapshot(currentDevice.id, domain, {
           rcpt_to: rcptInput?.value?.trim() || undefined,
         });
         setNotice(card, "고정 값을 새로 생성했습니다.", "success");
+        if (refreshResult?.config) {
+          currentDevice.configs = currentDevice.configs || {};
+          currentDevice.configs[domain] = refreshResult.config;
+          card.__deviceData = { ...currentDevice };
+          applyConfigSnapshot(currentDevice.id, domain, refreshResult.config);
+        }
         await loadDevices({ silent: true });
       } catch (err) {
         setNotice(card, err?.message || "고정 값을 다시 뽑지 못했습니다.", "error");
@@ -6036,13 +6100,25 @@ function updateSingleSendControls(card, device) {
             rcpt_to: String(previewResult.rcpt_to ?? ""),
             missing_tokens: Array.isArray(previewResult.missing_tokens) ? previewResult.missing_tokens : [],
           };
-          await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/lock`, {
+          const lockResult = await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/lock`, {
             method: "POST",
             body: JSON.stringify(lockPayload),
           });
+          if (lockResult?.config) {
+            currentDevice.configs = currentDevice.configs || {};
+            currentDevice.configs[domain] = lockResult.config;
+            card.__deviceData = { ...currentDevice };
+            applyConfigSnapshot(currentDevice.id, domain, lockResult.config);
+          }
           setNotice(card, "현재 값을 고정 모드로 저장했습니다.", "success");
         } else {
-          await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/lock/reset`, { method: "POST" });
+          const resetResult = await fetchJSON(`/api/devices/${currentDevice.id}/domains/${domain}/lock/reset`, { method: "POST" });
+          if (resetResult?.config) {
+            currentDevice.configs = currentDevice.configs || {};
+            currentDevice.configs[domain] = resetResult.config;
+            card.__deviceData = { ...currentDevice };
+            applyConfigSnapshot(currentDevice.id, domain, resetResult.config);
+          }
           setNotice(card, "고정 모드를 해제했습니다.");
         }
         await loadDevices({ silent: true });
