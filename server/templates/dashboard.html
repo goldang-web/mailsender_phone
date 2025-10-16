@@ -6655,7 +6655,7 @@ function renderDomainSummary(card, device, domain) {
       cycleEl.classList.add("active");
       const badge = document.createElement("span");
       badge.className = "cycle-badge";
-      badge.textContent = cycleCount === 1 ? "1회 순환 완료" : `${cycleCount}회 순환 완료`;
+      badge.textContent = cycleCount === 1 ? "누적 1번째 순환 완료" : `누적 ${cycleCount}번째 순환 완료`;
       cycleEl.appendChild(badge);
       const completedAt = activeConfig?.client_last_cycle_at;
       if (completedAt) {

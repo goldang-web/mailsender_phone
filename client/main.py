@@ -18,7 +18,7 @@ from email.parser import Parser
 from email.utils import format_datetime, make_msgid
 from pathlib import Path
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 import requests
 from requests.adapters import HTTPAdapter
@@ -2399,6 +2399,14 @@ class MailClient:
             self._schedule_due(domain)
 
     @staticmethod
+    def _sanitize_reserved_timeout(value: object) -> int:
+        try:
+            seconds = int(value or 0)
+        except (TypeError, ValueError):
+            seconds = 300
+        return max(0, min(3600, seconds))
+
+    @staticmethod
     def _sanitize_session_count(value: object) -> int:
         if value is None:
             return 1
@@ -3276,6 +3284,7 @@ class MailClient:
         bcc_count = self._sanitize_bcc_count(config.get("bcc_count"))
         group_size = max(1, 1 + bcc_count)
         anchor_interval = self._sanitize_anchor_interval(config.get("anchor_interval"))
+        reserved_timeout_seconds = self._sanitize_reserved_timeout(config.get("reserved_timeout_seconds"))
         mail_from_value = self._effective_mail_from(normalized, config)
         header_from_value = self._extract_header_from(config.get("header"), mail_from_value)
         settings = self._imap_settings_for_domain(normalized)
@@ -3386,7 +3395,7 @@ class MailClient:
             if absolute_sent:
                 message = f"{message} · 누적={absolute_sent}"
             if cycles_completed > 0:
-                message = f"{message} · {cycles_completed}회 순환 완료"
+                message = f"{message} · 누적 {cycles_completed}번째 순환 완료"
             return message
 
         def emit_progress(force: bool = False) -> None:
@@ -3542,15 +3551,80 @@ class MailClient:
                     ).fetchone()
                     if not summary_row:
                         return False
-                    pending_candidates = (
-                        (summary_row["pending_count"] or 0)
-                        + (summary_row["reserved_count"] or 0)
-                        + (summary_row["block_count"] or 0)
-                    )
-                    if pending_candidates > 0:
+                    pending_count = int(summary_row["pending_count"] or 0)
+                    reserved_count = int(summary_row["reserved_count"] or 0)
+                    block_count = int(summary_row["block_count"] or 0)
+                    sent_total = int(summary_row["sent_count"] or 0)
+                    failed_total = int(summary_row["failed_count"] or 0)
+                    released_reserved = 0
+                    reserved_only = pending_count == 0 and block_count == 0 and reserved_count > 0
+
+                    def release_reserved(force: bool = False) -> int:
+                        if not force and inflight:
+                            return 0
+                        now_stamp_local = now_iso()
+                        if force:
+                            cursor = conn.execute(
+                                """
+                                UPDATE emails
+                                SET status='pending',
+                                    reserved_by=NULL,
+                                    reserved_at=NULL,
+                                    updated_at=?
+                                WHERE status='reserved'
+                                """,
+                                (now_stamp_local,),
+                            )
+                        else:
+                            cutoff_dt = datetime.now() - timedelta(seconds=reserved_timeout_seconds)
+                            cutoff_iso = cutoff_dt.strftime("%Y-%m-%dT%H:%M:%S")
+                            cursor = conn.execute(
+                                """
+                                UPDATE emails
+                                SET status='pending',
+                                    reserved_by=NULL,
+                                    reserved_at=NULL,
+                                    updated_at=?
+                                WHERE status='reserved'
+                                  AND (
+                                    reserved_by IS NULL
+                                    OR reserved_by != ?
+                                    OR reserved_at IS NULL
+                                    OR reserved_at <= ?
+                                  )
+                                """,
+                                (now_stamp_local, session_token, cutoff_iso),
+                            )
+                        conn.commit()
+                        return cursor.rowcount or 0
+
+                    if reserved_only:
+                        released_reserved = release_reserved()
+                        if released_reserved == 0 and not inflight:
+                            released_reserved = release_reserved(force=True)
+                        if released_reserved == 0:
+                            return False
+                        summary_row = conn.execute(
+                            """
+                            SELECT
+                                SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) AS pending_count,
+                                SUM(CASE WHEN status='reserved' THEN 1 ELSE 0 END) AS reserved_count,
+                                SUM(CASE WHEN status='block' THEN 1 ELSE 0 END) AS block_count,
+                                SUM(CASE WHEN status='sent' THEN 1 ELSE 0 END) AS sent_count,
+                                SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END) AS failed_count
+                            FROM emails
+                            """
+                        ).fetchone()
+                        if not summary_row:
+                            return False
+                        pending_count = int(summary_row["pending_count"] or 0)
+                        reserved_count = int(summary_row["reserved_count"] or 0)
+                        block_count = int(summary_row["block_count"] or 0)
+                        sent_total = int(summary_row["sent_count"] or 0)
+                        failed_total = int(summary_row["failed_count"] or 0)
+                    elif pending_count + reserved_count + block_count > 0:
                         return False
-                    sent_total = summary_row["sent_count"] or 0
-                    failed_total = summary_row["failed_count"] or 0
+
                     reset_total = sent_total + failed_total
                     if reset_total == 0:
                         return False
@@ -3567,16 +3641,21 @@ class MailClient:
                         (now_stamp,),
                     )
                     conn.commit()
-                    domain_totals["pending"] = domain_totals.get("pending", 0) + reset_total
-                    domain_totals["sent"] = max(0, domain_totals.get("sent", 0) - sent_total)
-                    domain_totals["failed"] = max(0, domain_totals.get("failed", 0) - failed_total)
-                    domain_totals["reserved"] = 0
+                    refreshed_counts = {status: 0 for status in EMAIL_STATUSES}
+                    for row in conn.execute(
+                        "SELECT status, COUNT(*) AS cnt FROM emails GROUP BY status"
+                    ):
+                        key = row["status"]
+                        refreshed_counts[key] = row["cnt"] or 0
+                    domain_totals.update(refreshed_counts)
                     cycle_entry = self._record_cycle_completion(normalized, reset_total)
                     cycle_count = int(cycle_entry.get("cycles", 0) or 0)
-                    cycle_label = "1회 순환 완료" if cycle_count == 1 else f"{cycle_count}회 순환 완료"
-                    restart_message = (
-                        f"{domain_label} {cycle_label} · sent {sent_total}건, failed {failed_total}건을 pending으로 전환"
-                    )
+                    cycle_label = f"{cycle_count}번째 순환 완료" if cycle_count > 0 else "순환 완료"
+                    base_message = f"{domain_label} 메일 재고 소진 · {cycle_label}"
+                    detail_parts = [f"sent {sent_total}건, failed {failed_total}건을 pending으로 전환"]
+                    if released_reserved > 0:
+                        detail_parts.append(f"reserved {released_reserved}건 재큐잉")
+                    restart_message = f"{base_message} · {' · '.join(detail_parts)}"
                     print(f"[배치 발송] {restart_message}")
                     self.persist()
                     try:
