@@ -147,7 +147,9 @@ class HeartbeatAccessFilter(logging.Filter):
             message = record.getMessage()
         except Exception:
             return True
-        return "/heartbeat" not in message
+        if any(fragment in message for fragment in ("/api/devices/register", "/heartbeat")):
+            return False
+        return True
 
 
 _uvicorn_access_logger = logging.getLogger("uvicorn.access")
@@ -183,6 +185,8 @@ def _log_device_connection_event(
         if previous_status != "disconnected":
             print(f"[연결] 디바이스 {normalized_label} 오프라인")
         DEVICE_CONNECTION_STATES[device_id] = "disconnected"
+
+
 def now_ts() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -1877,7 +1881,7 @@ def remove_device(device_id: str) -> None:
     device_root = STORAGE_ROOT / "devices" / safe_device
     with db_lock, get_conn() as conn:
         row = conn.execute(
-            "SELECT id FROM devices WHERE id=?",
+            "SELECT id, name, public_ip FROM devices WHERE id=?",
             (device_id,),
         ).fetchone()
         if not row:
@@ -1886,6 +1890,17 @@ def remove_device(device_id: str) -> None:
         conn.commit()
     if device_root.exists():
         shutil.rmtree(device_root, ignore_errors=True)
+    device_label = ""
+    public_ip: Optional[str] = None
+    if row:
+        raw_name = row["name"] if "name" in row.keys() else ""
+        raw_ip = row["public_ip"] if "public_ip" in row.keys() else None
+        device_label = (raw_name or "").strip()
+        public_ip = (raw_ip or "").strip() or None
+    DEVICE_CONNECTION_STATES.pop(device_id, None)
+    DEVICE_LAST_IP.pop(device_id, None)
+    _log_device_connection_event(device_id, device_label or device_id, "disconnected", public_ip)
+    print(f"[연결] 디바이스 {(device_label or device_id)} 등록 해제")
 
 
 def get_next_file_version(conn: sqlite3.Connection, device_id: str, domain: str) -> int:
