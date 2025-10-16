@@ -8380,6 +8380,19 @@ async function loadDevices(options = {}) {
   try {
     const data = await fetchJSON("/api/devices", { method: "GET" });
     state.devices = data.devices || [];
+    if (state.filterOnlineOnly) {
+      const hasOnlineDevices = (state.devices || []).some((device) => device.status === "connected");
+      const hasAnyDevices = (state.devices || []).length > 0;
+      if (hasAnyDevices && !hasOnlineDevices) {
+        state.filterOnlineOnly = false;
+        persistOnlineOnlyPreference(false);
+        const toggle = document.getElementById("onlineOnlyToggle");
+        if (toggle) {
+          toggle.checked = false;
+        }
+        setGlobalStatus("온라인 디바이스가 없어 전체 보기를 표시합니다.", "info");
+      }
+    }
     const activeIds = new Set((state.devices || []).map((device) => device.id));
     if (state.deletingDevices?.size) {
       Array.from(state.deletingDevices).forEach((deviceId) => {
