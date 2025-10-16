@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.65"
+APP_VERSION = "0.0.66"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -108,6 +108,9 @@ IMAP_DEFAULT_SINGLE_DELAY_SECONDS = 20
 IMAP_DEFAULT_SENT_THRESHOLD = 90
 IMAP_SENT_THRESHOLD_MIN = 1
 IMAP_SENT_THRESHOLD_MAX = 1000
+
+OFFLINE_PROBE_INTERVAL_SECONDS = 10
+OFFLINE_HEALTH_PATH = "/health"
 
 DOMAIN_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS emails (
@@ -622,6 +625,9 @@ class MailClient:
         self._imap_throttle_flags: Dict[str, Dict[str, object]] = {}
         self._sent_guard_lock = threading.Lock()
 
+        self.offline_mode: bool = False
+        self.next_offline_probe_at: float = 0.0
+
         self._upgrade_domain_schemas()
 
     # ------------------------------------------------------------------ #
@@ -729,6 +735,51 @@ class MailClient:
         elif "name or service not known" in message_lower or "temporary failure in name resolution" in message_lower:
             reason = "DNS failure"
         return f"HTTP {method.upper()} 연결 실패: {reason} ({host}:{port})"
+
+    def _enter_offline_mode(self, context: str, exc: Optional[Exception] = None) -> None:
+        if self.offline_mode:
+            return
+        self.offline_mode = True
+        self.next_offline_probe_at = time.time() + OFFLINE_PROBE_INTERVAL_SECONDS
+        self.connected = False
+        self._report_flush_in_progress = False
+        try:
+            self._reset_session()
+        except Exception:
+            pass
+        reason = f"{context} 요청 실패로 오프라인 모드에 진입합니다."
+        if exc:
+            reason = f"{context} 요청 실패({exc})로 오프라인 모드에 진입합니다."
+        print(f"[오프라인 전환] {reason}")
+
+    def _exit_offline_mode(self) -> None:
+        if not self.offline_mode:
+            return
+        self.offline_mode = False
+        self.next_offline_probe_at = 0.0
+        self._disconnect_logged = False
+        print("[오프라인 복구] 서버 응답을 확인했습니다. 동기화를 재개합니다.")
+
+    def _probe_server_if_due(self, domain_states: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
+        if not self.offline_mode:
+            return None
+        now = time.time()
+        if now < self.next_offline_probe_at:
+            return None
+        self.next_offline_probe_at = now + OFFLINE_PROBE_INTERVAL_SECONDS
+        print("오프라인 모드 · 서버 핑 시도 중")
+        try:
+            response = self._request("get", OFFLINE_HEALTH_PATH, timeout=min(5, self.timeout))
+            response.raise_for_status()
+        except requests.RequestException:
+            return None
+        self._exit_offline_mode()
+        try:
+            data = self.heartbeat(domain_states, [])
+        except requests.RequestException:
+            return None
+        self._flush_pending_job_reports()
+        return data
 
     def _get_cycle_entry(self, domain: str) -> Dict[str, object]:
         normalized = (domain or "").lower()
@@ -2474,6 +2525,8 @@ class MailClient:
         domain_states: List[Dict[str, object]],
         job_reports: List[JobResult],
     ) -> Dict[str, object]:
+        if self.offline_mode:
+            raise RuntimeError("오프라인 모드에서는 하트비트를 전송할 수 없습니다.")
         self.refresh_public_ip()
         imap_reports = self._collect_imap_reports()
         payload = {
@@ -2494,7 +2547,11 @@ class MailClient:
         }
         if imap_reports:
             payload["imap_reports"] = imap_reports
-        response = self._request("post", f"/api/devices/{self.device_id}/heartbeat", json=payload)
+        try:
+            response = self._request("post", f"/api/devices/{self.device_id}/heartbeat", json=payload)
+        except requests.RequestException as exc:
+            self._enter_offline_mode("하트비트", exc)
+            raise
         response.raise_for_status()
         data = response.json()
         self.active_domain = data.get("active_domain", self.active_domain)
@@ -2505,18 +2562,16 @@ class MailClient:
             self._update_job_controls(controls)
         return data
 
-    def send_job_report(
-        self,
-        report: JobResult,
-        domain_states: Optional[List[Dict[str, object]]] = None,
-    ) -> None:
-        states_snapshot: List[Dict[str, object]] = list(domain_states or [])
-        self._pending_job_reports.append((report, states_snapshot))
+    def _flush_pending_job_reports(self) -> None:
+        if self.offline_mode:
+            return
         if self._report_flush_in_progress:
+            return
+        if not self._pending_job_reports:
             return
         self._report_flush_in_progress = True
         try:
-            while self._pending_job_reports:
+            while self._pending_job_reports and not self.offline_mode:
                 batch = list(self._pending_job_reports)
                 reports_payload = [item[0] for item in batch]
                 latest_states = list(batch[-1][1]) if batch and batch[-1][1] else []
@@ -2539,6 +2594,15 @@ class MailClient:
                 self._run_priority_jobs()
         finally:
             self._report_flush_in_progress = False
+
+    def send_job_report(
+        self,
+        report: JobResult,
+        domain_states: Optional[List[Dict[str, object]]] = None,
+    ) -> None:
+        states_snapshot: List[Dict[str, object]] = list(domain_states or [])
+        self._pending_job_reports.append((report, states_snapshot))
+        self._flush_pending_job_reports()
 
     def _update_job_controls(self, controls: Iterable[Dict[str, object]]) -> None:
         previous_ids = set(self.job_controls.keys())
@@ -4812,17 +4876,25 @@ class MailClient:
             while True:
                 try:
                     domain_states = self.collect_domain_states()
-                    response = self.heartbeat(domain_states, [])
-                    if not self.connected:
-                        print("[연결] 서버와 동기화되었습니다.")
-                        self._disconnect_logged = False
-                    self.connected = True
-                    configs = response.get("configs") or {}
-                    self.apply_configs(configs)
+                    response: Optional[Dict[str, object]] = None
+                    if self.offline_mode:
+                        response = self._probe_server_if_due(domain_states)
+                    else:
+                        response = self.heartbeat(domain_states, [])
+                    if not self.offline_mode and response is None:
+                        response = {}
+                    if not self.offline_mode and response is not None:
+                        if not self.connected:
+                            print("[연결] 서버와 동기화되었습니다.")
+                            self._disconnect_logged = False
+                        self.connected = True
+                        configs = response.get("configs") or {}
+                        if isinstance(configs, dict) and configs:
+                            self.apply_configs(configs)
+                        controls = response.get("job_controls") or []
+                        if isinstance(controls, Iterable):
+                            self._update_job_controls(controls)
                     self._evaluate_idle_schedules()
-                    controls = response.get("job_controls") or []
-                    if isinstance(controls, Iterable):
-                        self._update_job_controls(controls)
                     self._acknowledge_cancelled_jobs()
                     jobs: List[Dict[str, object]] = []
                     while self._pending_jobs:
@@ -4831,7 +4903,7 @@ class MailClient:
                         if pending_id:
                             self._pending_job_ids.discard(pending_id)
                         jobs.append(pending_job)
-                    response_jobs = response.get("jobs")
+                    response_jobs = response.get("jobs") if isinstance(response, dict) else None
                     if isinstance(response_jobs, list):
                         jobs.extend(job for job in response_jobs if isinstance(job, dict))
                     jobs.sort(key=lambda job: 0 if str(job.get("job_type") or "") == "single_send" else 1)
@@ -4868,6 +4940,8 @@ class MailClient:
                         if job_id:
                             self.job_controls.pop(job_id, None)
                             self._cancel_ack_sent.discard(job_id)
+                    if not self.offline_mode:
+                        self._flush_pending_job_reports()
                     time.sleep(self.interval)
                 except requests.RequestException:
                     if not self._disconnect_logged:
