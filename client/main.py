@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.68"
+APP_VERSION = "0.0.69"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -1044,6 +1044,8 @@ class MailClient:
         counter_mode: Optional[str] = None,
         counter_current: Optional[int] = None,
         counter_threshold: Optional[int] = None,
+        sent_window_count: Optional[int] = None,
+        probe_result: Optional[SentProbeResult] = None,
         report_probe_failure: bool = False,
     ) -> ImapGuardOutcome:
         normalized = (domain or "").lower()
@@ -1076,10 +1078,11 @@ class MailClient:
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
         username_value = normalize_imap_string(settings.get("username"))
         rcpt_username = normalize_imap_recipient(normalized, username_value)
+        provided_counter = counter_current if counter_current is not None else sent_window_count
         if counter_mode == "manual":
             base_counter = self._get_sent_counter(normalized)
         else:
-            base_counter = counter_current if counter_current is not None else self._get_sent_counter(normalized)
+            base_counter = provided_counter if provided_counter is not None else self._get_sent_counter(normalized)
         updated_counter: Optional[int] = base_counter
         if not self._imap_enabled(normalized):
             detail_message = "IMAP 도착 확인이 비활성화되어 있어 확인 메일을 발송하지 않습니다."
