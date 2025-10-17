@@ -579,8 +579,9 @@ class MailClient:
                 self._imap_threshold_multiples[domain] = 0
         self._imap_settings_dirty: Set[str] = set()
         self._schedule_events: Dict[str, Dict[str, object]] = {}
-        self.session = requests.Session()
-        self._configure_session()
+        self.session = self._create_session()
+        self.report_session = self._create_session()
+        self._download_in_progress = False
         self.domain_paths: Dict[str, Path] = {
             domain: DATA_DIR / domain / f"{domain}.db" for domain in DOMAINS
         }
@@ -647,8 +648,8 @@ class MailClient:
     # ------------------------------------------------------------------ #
     # 설정/환경 관리
     # ------------------------------------------------------------------ #
-    def _configure_session(self) -> None:
-        self.session.headers.update({"Connection": "keep-alive"})
+    def _configure_session(self, session: requests.Session) -> None:
+        session.headers.update({"Connection": "keep-alive"})
         retry_strategy = Retry(
             total=2,
             connect=2,
@@ -660,16 +661,27 @@ class MailClient:
             respect_retry_after_header=False,
         )
         adapter = HTTPAdapter(pool_connections=5, pool_maxsize=5, max_retries=retry_strategy)
-        self.session.mount("http://", adapter)
-        self.session.mount("https://", adapter)
+        session.mount("http://", adapter)
+        session.mount("https://", adapter)
+
+    def _create_session(self) -> requests.Session:
+        session = requests.Session()
+        self._configure_session(session)
+        return session
 
     def _reset_session(self) -> None:
         try:
             self.session.close()
         except Exception:
             pass
-        self.session = requests.Session()
-        self._configure_session()
+        self.session = self._create_session()
+
+    def _reset_report_session(self) -> None:
+        try:
+            self.report_session.close()
+        except Exception:
+            pass
+        self.report_session = self._create_session()
 
     def refresh_public_ip(self, force: bool = False) -> Optional[str]:
         now = time.time()
@@ -687,7 +699,7 @@ class MailClient:
             self.public_ip = ip
         return self.public_ip
 
-    def _request(self, method: str, path: str, **kwargs) -> requests.Response:
+    def _request(self, method: str, path: str, *, session: Optional[requests.Session] = None, **kwargs) -> requests.Response:
         suppress_log = bool(kwargs.pop("suppress_log", False))
         log_context = kwargs.pop("log_context", None)
         url = join_url(self.server_url, path)
@@ -696,10 +708,12 @@ class MailClient:
         attempt = 0
         last_exc: Optional[requests.RequestException] = None
         response: Optional[requests.Response] = None
+        session_obj = session
         while attempt < max_attempts:
             attempt += 1
             try:
-                response = self.session.request(method=method, url=url, timeout=timeout, **kwargs)
+                active_session = session_obj if session_obj is not None else self.session
+                response = active_session.request(method=method, url=url, timeout=timeout, **kwargs)
                 break
             except requests.RequestException as exc:
                 last_exc = exc
@@ -716,7 +730,11 @@ class MailClient:
                     print(message)
                 if attempt >= max_attempts or not self._should_retry(exc):
                     raise
-                self._reset_session()
+                if session_obj is None:
+                    self._reset_session()
+                else:
+                    self._reset_report_session()
+                    session_obj = self.report_session
                 time.sleep(min(1.0, 0.2 * attempt))
         if response is None:
             if last_exc:
@@ -791,6 +809,10 @@ class MailClient:
         self._schedule_offline_probe()
         try:
             self._reset_session()
+        except Exception:
+            pass
+        try:
+            self._reset_report_session()
         except Exception:
             pass
         summary = f"{context} 요청 실패"
@@ -2858,12 +2880,14 @@ class MailClient:
 
     def _post_heartbeat(self, payload: Dict[str, object], *, log_context: str, critical: bool) -> Dict[str, object]:
         try:
+            session = self.report_session if getattr(self, "_download_in_progress", False) else self.session
             response = self._request(
                 "post",
                 f"/api/devices/{self.device_id}/heartbeat",
                 json=payload,
                 suppress_log=True,
                 log_context=log_context,
+                session=session,
             )
             response.raise_for_status()
         except requests.RequestException as exc:
@@ -2970,13 +2994,11 @@ class MailClient:
         domain_states: Optional[List[Dict[str, object]]] = None,
         *,
         critical: bool = True,
-        defer_flush: bool = False,
     ) -> None:
         states_snapshot: List[Dict[str, object]] = list(domain_states or [])
         with self._pending_job_reports_lock:
             self._pending_job_reports.append((report, states_snapshot, critical))
-        if not defer_flush:
-            self._flush_pending_job_reports(asynchronous=not critical)
+        self._flush_pending_job_reports(asynchronous=not critical)
 
     def _update_job_controls(self, controls: Iterable[Dict[str, object]]) -> None:
         previous_ids = set(self.job_controls.keys())
@@ -3217,12 +3239,7 @@ class MailClient:
                 return parsed if parsed > 0 else None
             return None
 
-        flush_interval = 10
-        last_reported_percent = 0
-        last_flushed_percent = -flush_interval
-
         def report_progress(stage: str, progress: int) -> None:
-            nonlocal last_reported_percent, last_flushed_percent
             try:
                 progress_value = max(0, min(100, int(progress)))
             except (TypeError, ValueError):
@@ -3238,21 +3255,10 @@ class MailClient:
                         },
                     ),
                     critical=False,
-                    defer_flush=True,
                 )
             except Exception:
                 # 진행률 보고 실패는 Inject 흐름을 중단하지 않습니다.
                 pass
-            if stage == "download" and progress_value > last_reported_percent:
-                last_reported_percent = progress_value
-            if stage == "download":
-                should_flush = progress_value >= 100 or (progress_value - last_flushed_percent) >= flush_interval
-                if should_flush:
-                    try:
-                        self._flush_pending_job_reports(asynchronous=False)
-                    except Exception:
-                        pass
-                    last_flushed_percent = progress_value
 
         print(f"[Inject] 파일 다운로드 경로: {download_path}")
         response: Optional[requests.Response] = None
@@ -3281,6 +3287,7 @@ class MailClient:
             except OSError:
                 pass
 
+        self._download_in_progress = True
         try:
             response = self._request(
                 "get",
@@ -3325,6 +3332,10 @@ class MailClient:
                 raise RuntimeError("다운로드된 데이터가 없습니다.")
 
             report_progress("download", 100)
+            print(
+                f"[Inject] 다운로드 완료: {downloaded_bytes} B 수신"
+                + (f" (예상 {expected_bytes} B)" if expected_bytes else "")
+            )
             temp_path.replace(target_path)
 
             convert_stage_started = False
@@ -3355,6 +3366,7 @@ class MailClient:
             self._reset_cycle_stats(normalized)
             self.persist()
             report_progress("finalize", 100)
+            self._download_in_progress = False
             try:
                 self._flush_pending_job_reports(asynchronous=False)
             except Exception:
@@ -3384,6 +3396,7 @@ class MailClient:
                 self._flush_pending_job_reports(asynchronous=False)
             except Exception:
                 pass
+            self._download_in_progress = False
 
         total_records = self._count_emails_in_db(target_path)
 
