@@ -3343,6 +3343,8 @@ class MailClient:
             if response is not None:
                 response.close()
 
+        total_records = self._count_emails_in_db(target_path)
+
         summary_segments = [f"[Inject 완료] {filename} -> {target_path}"]
         if inserted_count >= 0:
             summary_segments.append(f"변환 {inserted_count}건")
@@ -3353,8 +3355,6 @@ class MailClient:
         message = f"{DOMAIN_LABELS.get(normalized, normalized)} DB 동기화 완료"
         if inserted_count >= 0:
             message += f" ({inserted_count}건 변환)"
-
-        total_records = self._count_emails_in_db(target_path)
         if total_records is not None:
             message += f" · 총 {total_records}건"
 
