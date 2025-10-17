@@ -633,6 +633,10 @@ class MailClient:
 
         self.offline_mode: bool = False
         self.next_offline_probe_at: float = 0.0
+        self._offline_probe_executor = ThreadPoolExecutor(max_workers=1)
+        self._offline_probe_future: Optional[Future] = None
+        self._offline_probe_lock = threading.Lock()
+        self._offline_probe_last_error: Optional[str] = None
 
         self._upgrade_domain_schemas()
 
@@ -777,6 +781,7 @@ class MailClient:
         self.next_offline_probe_at = time.time() + OFFLINE_PROBE_INTERVAL_SECONDS
         self.connected = False
         self._report_flush_in_progress = False
+        self._schedule_offline_probe()
         try:
             self._reset_session()
         except Exception:
@@ -794,32 +799,100 @@ class MailClient:
         self._disconnect_logged = False
         print("[오프라인 복구] 서버 응답을 확인했습니다. 동기화를 재개합니다.")
 
+    def _schedule_offline_probe(self) -> None:
+        if not self.server_url:
+            return
+        with self._offline_probe_lock:
+            if self._offline_probe_future and not self._offline_probe_future.done():
+                return
+            self._offline_probe_last_error = None
+            self._offline_probe_future = self._offline_probe_executor.submit(
+                self._perform_offline_probe
+            )
+
+    def _collect_offline_probe_result(self) -> Optional[Tuple[bool, Optional[str]]]:
+        with self._offline_probe_lock:
+            future = self._offline_probe_future
+            if not future or not future.done():
+                return None
+        try:
+            result = future.result()
+        except Exception as exc:  # pylint: disable=broad-except
+            result = (False, self._short_error_reason(exc))
+        with self._offline_probe_lock:
+            self._offline_probe_future = None
+        if isinstance(result, tuple) and len(result) == 2:
+            return result  # type: ignore[return-value]
+        return None
+
+    def _perform_offline_probe(self) -> Tuple[bool, Optional[str]]:
+        session = requests.Session()
+        try:
+            adapter = HTTPAdapter(
+                pool_connections=1,
+                pool_maxsize=1,
+                max_retries=Retry(
+                    total=0,
+                    connect=0,
+                    read=0,
+                    status=0,
+                    backoff_factor=0.0,
+                    allowed_methods=None,
+                    raise_on_status=False,
+                    respect_retry_after_header=False,
+                ),
+            )
+            session.headers.update({"Connection": "close"})
+            session.mount("http://", adapter)
+            session.mount("https://", adapter)
+            url = join_url(self.server_url, OFFLINE_HEALTH_PATH)
+            try:
+                timeout_candidate = float(self.timeout or 5)
+            except (TypeError, ValueError):
+                timeout_candidate = 5.0
+            timeout = max(1.0, min(3.0, timeout_candidate))
+            response = session.get(url, timeout=timeout)
+            response.raise_for_status()
+            return True, None
+        except requests.RequestException as exc:
+            return False, self._short_error_reason(exc)
+        finally:
+            try:
+                session.close()
+            except Exception:  # pylint: disable=broad-except
+                pass
+
     def _probe_server_if_due(self, domain_states: List[Dict[str, object]]) -> Optional[Dict[str, object]]:
         if not self.offline_mode:
             return None
+
+        probe_result = self._collect_offline_probe_result()
+        if probe_result is not None:
+            success, error_message = probe_result
+            if success:
+                self._offline_probe_last_error = None
+                self._exit_offline_mode()
+                try:
+                    fresh_states = self.collect_domain_states()
+                except Exception:  # pylint: disable=broad-except
+                    fresh_states = domain_states
+                try:
+                    data = self.heartbeat(fresh_states, [])
+                except requests.RequestException as exc:
+                    self._enter_offline_mode("하트비트", exc)
+                    return None
+                self._flush_pending_job_reports()
+                return data
+            if error_message and error_message != self._offline_probe_last_error:
+                print(f"오프라인 모드 · 서버 핑 실패 - {error_message}")
+                self._offline_probe_last_error = error_message
+
         now = time.time()
         if now < self.next_offline_probe_at:
             return None
         self.next_offline_probe_at = now + OFFLINE_PROBE_INTERVAL_SECONDS
-        try:
-            response = self._request(
-                "get",
-                OFFLINE_HEALTH_PATH,
-                timeout=min(5, self.timeout),
-                suppress_log=True,
-                log_context="서버 핑",
-            )
-            response.raise_for_status()
-        except requests.RequestException as exc:
-            print(f"오프라인 모드 · 서버 핑 실패 - {self._short_error_reason(exc)}")
-            return None
-        self._exit_offline_mode()
-        try:
-            data = self.heartbeat(domain_states, [])
-        except requests.RequestException:
-            return None
-        self._flush_pending_job_reports()
-        return data
+        self._schedule_offline_probe()
+        return None
 
     def _get_cycle_entry(self, domain: str) -> Dict[str, object]:
         normalized = (domain or "").lower()
@@ -1609,6 +1682,18 @@ class MailClient:
     def _shutdown_imap_executor(self) -> None:
         try:
             self._imap_executor.shutdown(wait=False)
+        except Exception:  # pylint: disable=broad-except
+            pass
+
+    def _shutdown_offline_probe_executor(self) -> None:
+        future: Optional[Future]
+        with self._offline_probe_lock:
+            future = self._offline_probe_future
+            self._offline_probe_future = None
+        if future and not future.done():
+            future.cancel()
+        try:
+            self._offline_probe_executor.shutdown(wait=False)
         except Exception:  # pylint: disable=broad-except
             pass
 
@@ -5273,6 +5358,7 @@ class MailClient:
         finally:
             self.persist()
             self._shutdown_imap_executor()
+            self._shutdown_offline_probe_executor()
 
     def apply_configs(self, configs: Dict[str, Dict[str, object]]) -> None:
         if not configs:

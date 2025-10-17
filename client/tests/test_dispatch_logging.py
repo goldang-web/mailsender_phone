@@ -51,6 +51,7 @@ class DispatchLoggingTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.client._shutdown_imap_executor()
+        self.client._shutdown_offline_probe_executor()
         self.imap_patch.stop()
         self.save_config_patch.stop()
 
