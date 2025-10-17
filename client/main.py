@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.71"
+APP_VERSION = "0.0.72"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -3136,34 +3136,150 @@ class MailClient:
         filename = payload.get("filename") or f"{normalized}.db"
         if not download_path:
             return JobResult(job_id=job_id, status="failed", message="다운로드 경로가 없습니다.")
+
+        def _coerce_positive_int(value: object) -> Optional[int]:
+            if isinstance(value, bool):
+                return None
+            if isinstance(value, int):
+                return value if value > 0 else None
+            if isinstance(value, float):
+                candidate = int(value)
+                return candidate if candidate > 0 else None
+            if isinstance(value, str):
+                candidate = value.strip()
+                if not candidate or not candidate.isdigit():
+                    return None
+                parsed = int(candidate)
+                return parsed if parsed > 0 else None
+            return None
+
+        def report_progress(stage: str, progress: int) -> None:
+            try:
+                progress_value = max(0, min(100, int(progress)))
+            except (TypeError, ValueError):
+                progress_value = 0
+            try:
+                self.send_job_report(
+                    JobResult(
+                        job_id=job_id,
+                        status="running",
+                        result={
+                            "stage": stage,
+                            "progress": progress_value,
+                        },
+                    )
+                )
+            except Exception:
+                # 진행률 보고 실패는 Inject 흐름을 중단하지 않습니다.
+                pass
+
         print(f"[Inject] 파일 다운로드 경로: {download_path}")
-        response = self._request(
-            "get",
-            str(download_path),
-            timeout=max(self.timeout, 30),
-            log_context="파일 다운로드",
-        )
-        response.raise_for_status()
-        data = response.content
+        response: Optional[requests.Response] = None
         target_dir = DATA_DIR / normalized
         target_dir.mkdir(parents=True, exist_ok=True)
         target_path = target_dir / f"{normalized}.db"
         backup_path = target_dir / f"{normalized}.db.bak"
+        temp_path = target_dir / f"{normalized}.db.download"
+        backup_taken = False
+        downloaded_bytes = 0
+        inserted_count = -1
+
         if target_path.exists():
-            target_path.replace(backup_path)
+            try:
+                target_path.replace(backup_path)
+                backup_taken = True
+            except OSError as error:
+                return JobResult(job_id=job_id, status="failed", message=f"기존 DB 백업 실패: {error}")
+
+        if temp_path.exists():
+            try:
+                temp_path.unlink()
+            except OSError:
+                pass
 
         try:
-            target_path.write_bytes(data)
-            inserted_count = self._ensure_sqlite_db(target_path, data, filename)
+            response = self._request(
+                "get",
+                str(download_path),
+                timeout=max(self.timeout, 30),
+                log_context="파일 다운로드",
+                stream=True,
+            )
+            response.raise_for_status()
+            total_bytes = _coerce_positive_int(payload.get("file_size") or payload.get("size"))
+            if total_bytes is None:
+                total_bytes = _coerce_positive_int(response.headers.get("Content-Length")) if response.headers else None
+
+            report_progress("download", 0)
+            last_percent = 0
+            with temp_path.open("wb") as temp_file:
+                for chunk in response.iter_content(chunk_size=131072):
+                    if not chunk:
+                        continue
+                    temp_file.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    if total_bytes:
+                        percent = int((downloaded_bytes * 100) // total_bytes)
+                        if downloaded_bytes >= total_bytes:
+                            percent = 100
+                        percent = max(0, min(100, percent))
+                        if percent > last_percent:
+                            last_percent = percent
+                            report_progress("download", percent)
+
+            report_progress("download", 100)
+            temp_path.replace(target_path)
+
+            convert_stage_started = False
+            original_bytes: Optional[bytes] = None
+            try:
+                with target_path.open("rb") as raw_file:
+                    prefix = raw_file.read(len(SQLITE_HEADER))
+                    if not self._looks_like_sqlite(prefix):
+                        convert_stage_started = True
+                        raw_file.seek(0)
+                        original_bytes = raw_file.read()
+            except OSError as file_error:
+                raise RuntimeError(f"다운로드한 파일을 열 수 없습니다: {file_error}") from file_error
+
+            if convert_stage_started:
+                report_progress("convert", 0)
+
+            inserted_count = self._ensure_sqlite_db(target_path, original_bytes, filename)
+
+            if inserted_count >= 0 and not convert_stage_started:
+                report_progress("convert", 0)
+                convert_stage_started = True
+            if convert_stage_started:
+                report_progress("convert", 100)
+
+            report_progress("finalize", 0)
+            self.local_versions[normalized] = version
+            self._reset_cycle_stats(normalized)
+            self.persist()
+            report_progress("finalize", 100)
         except Exception as error:  # pylint: disable=broad-except
             print(f"[오류] Inject 처리 중 문제 발생: {error}")
-            if backup_path.exists():
-                backup_path.replace(target_path)
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+            if backup_taken and backup_path.exists():
+                try:
+                    if target_path.exists():
+                        target_path.unlink()
+                except OSError:
+                    pass
+                try:
+                    backup_path.replace(target_path)
+                except OSError:
+                    pass
             return JobResult(job_id=job_id, status="failed", message=f"DB 갱신 실패: {error}")
+        finally:
+            if response is not None:
+                response.close()
 
-        self.local_versions[normalized] = version
-        self._reset_cycle_stats(normalized)
-        self.persist()
         print(f"[Inject 완료] {filename} -> {target_path}")
 
         message = f"{DOMAIN_LABELS.get(normalized, normalized)} DB 동기화 완료"
@@ -3175,7 +3291,7 @@ class MailClient:
             message += f" · 총 {total_records}건"
 
         result_payload = {
-            "bytes": len(data),
+            "bytes": downloaded_bytes,
             "version": version,
             "filename": filename,
             "records": inserted_count if inserted_count >= 0 else None,
@@ -5049,8 +5165,18 @@ class MailClient:
     def _looks_like_sqlite(raw: bytes) -> bool:
         return len(raw) >= len(SQLITE_HEADER) and raw.startswith(SQLITE_HEADER)
 
-    def _ensure_sqlite_db(self, db_path: Path, original_bytes: bytes, source_name: str) -> int:
-        if self._looks_like_sqlite(original_bytes):
+    def _ensure_sqlite_db(self, db_path: Path, original_bytes: Optional[bytes], source_name: str) -> int:
+        def _looks_like_sqlite_from_source() -> bool:
+            if original_bytes is not None:
+                return self._looks_like_sqlite(original_bytes)
+            try:
+                with db_path.open("rb") as candidate:
+                    prefix = candidate.read(len(SQLITE_HEADER))
+                return self._looks_like_sqlite(prefix)
+            except OSError:
+                return False
+
+        if _looks_like_sqlite_from_source():
             try:
                 with sqlite3.connect(db_path) as conn:
                     conn.execute("PRAGMA schema_version")
@@ -5063,7 +5189,13 @@ class MailClient:
                 conn.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
             return -1
         except sqlite3.DatabaseError:
-            emails = self._extract_emails_from_bytes(original_bytes)
+            data = original_bytes
+            if data is None:
+                try:
+                    data = db_path.read_bytes()
+                except OSError as exc:
+                    raise ValueError(f"텍스트 파일을 읽을 수 없습니다: {exc}") from exc
+            emails = self._extract_emails_from_bytes(data)
             if not emails:
                 raise ValueError("텍스트에서 이메일을 추출하지 못했습니다.")
             self._build_sqlite_from_emails(db_path, emails, source_name)

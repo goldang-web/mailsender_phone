@@ -9028,6 +9028,9 @@ async function loadDevices(options = {}) {
     renderLastSync();
     renderDevices();
     renderMonitoring();
+    if (state.modal.open && state.modal.deviceId && state.modal.domain) {
+      refreshFileListProgress(state.modal.deviceId, state.modal.domain);
+    }
     const hasRunningBatch = (state.devices || []).some(hasActiveBatchJob);
     scheduleAutoRefresh(hasRunningBatch);
   } catch (err) {
@@ -9083,6 +9086,103 @@ function showModalMessage(message, type = "error") {
   }
 }
 
+function findDeviceById(deviceId) {
+  return (state.devices || []).find((device) => device.id === deviceId) || null;
+}
+
+function describeInjectJobProgress(job) {
+  if (!job) {
+    return null;
+  }
+  const progressEntries = Array.isArray(job.progress) ? job.progress : [];
+  for (let index = progressEntries.length - 1; index >= 0; index -= 1) {
+    const entry = progressEntries[index];
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    if (String(entry.status || "").toLowerCase() !== "running") {
+      continue;
+    }
+    const data = entry.data;
+    if (!data || typeof data !== "object") {
+      continue;
+    }
+    const labels = {
+      download: "다운로드",
+      convert: "변환",
+      finalize: "정리",
+    };
+    const stageRaw = String(data.stage || "").toLowerCase();
+    const stageLabel = labels[stageRaw] || (stageRaw ? stageRaw : "진행");
+    const progressValue = Number(data.progress);
+    if (!Number.isFinite(progressValue)) {
+      return stageLabel;
+    }
+    const percent = Math.max(0, Math.min(100, Math.round(progressValue)));
+    return `${stageLabel} ${percent}%`;
+  }
+  return null;
+}
+
+function refreshFileListProgress(deviceId, domain) {
+  const container = document.getElementById("fileListContainer");
+  if (!container) return;
+  const table = container.querySelector("table.file-table");
+  if (!table) return;
+  const rows = table.querySelectorAll("tbody tr");
+  if (!rows.length) return;
+
+  const device = findDeviceById(deviceId);
+  const normalizedDomain = normalizeDeviceDomain(domain);
+  const finalStatuses = new Set(["success", "failed", "cancelled"]);
+  const jobMap = new Map();
+
+  if (device && Array.isArray(device.jobs)) {
+    device.jobs.forEach((job) => {
+      if (!job || (job.job_type || "").toLowerCase() !== "inject_file") {
+        return;
+      }
+      const jobDomain = normalizeDeviceDomain(job.domain || normalizedDomain);
+      if (jobDomain !== normalizedDomain) {
+        return;
+      }
+      const fileId = job?.payload?.file_id ?? job?.payload?.fileId ?? null;
+      if (fileId === null || fileId === undefined) {
+        return;
+      }
+      jobMap.set(String(fileId), job);
+    });
+  }
+
+  rows.forEach((row) => {
+    const indicator = row.querySelector('[data-role="injectProgress"]');
+    if (!indicator) {
+      return;
+    }
+    const fileId = String(row.dataset.fileId || "");
+    const job = jobMap.get(fileId);
+    if (!job) {
+      indicator.textContent = "";
+      indicator.classList.remove("active");
+      return;
+    }
+    const statusKey = String(job.status || "").toLowerCase();
+    if (finalStatuses.has(statusKey)) {
+      indicator.textContent = "";
+      indicator.classList.remove("active");
+      return;
+    }
+    const label = describeInjectJobProgress(job);
+    if (!label) {
+      indicator.textContent = "";
+      indicator.classList.remove("active");
+      return;
+    }
+    indicator.textContent = label;
+    indicator.classList.add("active");
+  });
+}
+
 async function loadFileList(deviceId, domain) {
   const container = document.getElementById("fileListContainer");
   container.innerHTML = '<div class="meta">파일 목록을 불러오는 중...</div>';
@@ -9121,6 +9221,7 @@ async function loadFileList(deviceId, domain) {
         <td>
           <div>${file.last_injected_status ? file.last_injected_status.toUpperCase() : "-"}</div>
           <div class="meta">${file.last_injected_at ? formatDate(file.last_injected_at) : "-"}</div>
+          <div class="meta inject-progress" data-role="injectProgress"></div>
         </td>
         <td>
           <div class="file-ops">
@@ -9135,6 +9236,7 @@ async function loadFileList(deviceId, domain) {
     });
     container.innerHTML = "";
     container.appendChild(table);
+    refreshFileListProgress(deviceId, domain);
   } catch (err) {
     container.innerHTML = '<div class="meta">파일 목록을 불러오지 못했습니다.</div>';
     showModalMessage(err.message || "파일 목록 요청 실패");

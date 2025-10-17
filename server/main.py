@@ -178,14 +178,10 @@ def _log_device_connection_event(
     normalized_label = (device_label or "").strip() or device_id
     normalized_status = "connected" if status == "connected" else "disconnected"
     previous_status = DEVICE_CONNECTION_STATES.get(device_id)
-    previous_ip = DEVICE_LAST_IP.get(device_id)
     if normalized_status == "connected":
         ip_text = f" (IP: {public_ip})" if public_ip else ""
         if previous_status != "connected":
             print(f"[연결] 디바이스 {normalized_label} 온라인{ip_text}")
-        elif public_ip and public_ip != previous_ip:
-            origin_ip = previous_ip or "알 수 없음"
-            print(f"[연결] 디바이스 {normalized_label} IP 변경: {origin_ip} -> {public_ip}")
         DEVICE_CONNECTION_STATES[device_id] = "connected"
         if public_ip is not None:
             DEVICE_LAST_IP[device_id] = public_ip
@@ -2383,7 +2379,7 @@ def record_job_progress(
                 device_ids = {entry[0] for entry in entries if entry and entry[0]}
                 for device_id in device_ids:
                     prune_device_logs(conn, device_id)
-    trackable_job_types = {"batch_send", "imap_manual_check"}
+    trackable_job_types = {"batch_send", "imap_manual_check", "inject_file"}
     if job_row["job_type"] not in trackable_job_types:
         return
     data_json: Optional[str] = None
@@ -4846,6 +4842,7 @@ def enqueue_inject_file(device_id: str, domain: str, file_id: int) -> Dict[str, 
                 "file_id": row["id"],
                 "filename": row["filename"],
                 "version": row["version"],
+                "file_size": row["size"],
                 "download_path": f"/api/devices/{device_id}/domains/{normalized}/files/{row['id']}/download",
             },
         )
@@ -5057,16 +5054,6 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             mail_from_value = (report.mail_from or config_snapshot.get("imap_last_mail_from")
                                or config_snapshot.get("mail_from") or "")
             error_value = "" if status_value == "success" else reason_text
-            if ip_change_attempted:
-                change_label = "성공" if ip_change_success else "시도"
-                step_message = (
-                    f"[IMAP] Sent 임계치 보호 · 디바이스 {device_id} · 도메인 {normalized_domain} · IP 변경 {change_label}"
-                )
-                if ip_after_change:
-                    step_message = f"{step_message} · 새 IP {ip_after_change}"
-                if ip_change_message:
-                    step_message = f"{step_message} · {ip_change_message}"
-                print(step_message, flush=True)
             reason_parts: List[str] = []
             if ip_change_attempted:
                 base_part = "IP 변경 후 IMAP 재확인"
