@@ -955,10 +955,38 @@ class MailClient:
     def _queue_imap_report(self, report: Dict[str, object]) -> None:
         if not isinstance(report, dict):
             return
+        if self._try_push_imap_reports_immediately([report]):
+            return
         with self._imap_lock:
             while len(self._imap_reports) >= 100:
                 self._imap_reports.popleft()
             self._imap_reports.append(report)
+
+    def _try_push_imap_reports_immediately(self, reports: List[Dict[str, object]]) -> bool:
+        if not reports:
+            return True
+        if self.offline_mode:
+            return False
+        if not self.device_id:
+            return False
+        payload = {
+            "device_name": self.device_name,
+            "active_domain": self.active_domain,
+            "domain_states": [],
+            "job_reports": [],
+            "public_ip": self.public_ip,
+            "imap_reports": reports,
+        }
+        try:
+            data = self._post_heartbeat(payload, log_context="IMAP 즉시 보고")
+        except requests.RequestException as exc:  # type: ignore[attr-defined]
+            print(f"[경고] 즉시 IMAP 보고 실패: {exc}")
+            return False
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[경고] 즉시 IMAP 보고 예외: {exc}")
+            return False
+        self._process_heartbeat_payload(data)
+        return True
 
     def _report_imap_probe_failure(
         self,
@@ -1939,6 +1967,14 @@ class MailClient:
         )
 
         passed_probe_result = probe_result
+        stop_actions = {"stop_device", "stop_all"}
+        should_retry_on_failure = (
+            failure_action_value in stop_actions and send_type == "sent-threshold"
+        )
+        max_check_attempts = 2 if should_retry_on_failure else 1
+        retry_wait_seconds = min(5.0, max(0.0, float(delay_seconds)))
+        if retry_wait_seconds <= 0:
+            retry_wait_seconds = 3.0
 
         def task() -> Dict[str, object]:
             nonlocal sent_at_value, sent_at_iso
@@ -1979,55 +2015,91 @@ class MailClient:
             latency = None
             received_at = None
             reason_text: Optional[str] = None
+            attempt_history: List[Dict[str, object]] = []
 
-            try:
-                result = verify_delivery(
-                    email_id=username,
-                    password=password,
-                    mail_from=mail_from,
-                    sent_at=sent_at_value,
-                    allowed_delay=allowed_delay_value,
-                    header_from=header_from,
-                    max_messages=10,
-                    check_delay=delay_seconds,
-                    message_id=passed_probe_result.message_id if passed_probe_result else None,
-                )
-                status = str(result.get("status") or "error")
-                latency = result.get("latency")
-                received_at = result.get("received_at")
-                reason_text = result.get("reason")
-                sent_display = result.get("sent_display")
-                received_display = result.get("received_display")
-                if sent_display:
-                    self._log_imap_console(f"  ↳ 발신 {sent_display}", domain=normalized)
-                if received_display:
-                    self._log_imap_console(f"  ↳ 수신 {received_display}", domain=normalized)
-                latency_label = f"{latency:.1f}s" if isinstance(latency, (int, float)) else "-"
-                self._log_imap_console(
-                    f"IMAP 확인 · 상태 {status} · 지연 {latency_label} · 허용 {allowed_delay_value}s",
-                    domain=normalized,
-                )
-                if status != "success" and reason_text:
-                    self._log_imap_console(f"  ↳ 사유: {reason_text}", domain=normalized)
-            except IMAPNetworkError as exc:
-                status = "network_error"
-                reason_text = str(exc)
-                self._log_imap_console("IMAP 확인 · 네트워크 오류", domain=normalized)
-            except (socket.timeout, OSError, ssl.SSLError) as exc:
-                status = "network_error"
-                reason_text = f"네트워크 예외: {exc}"
-                self._log_imap_console("IMAP 확인 · 네트워크 예외", domain=normalized)
-            except Exception as exc:  # pylint: disable=broad-except
-                status = "error"
-                reason_text = f"IMAP 확인 실패: {exc}"
-                self._log_imap_console("IMAP 확인 · 예외 발생", domain=normalized)
+            for attempt_index in range(1, max_check_attempts + 1):
+                attempt_reason: Optional[str] = None
+                attempt_status: str = "error"
+                attempt_latency = None
+                attempt_received_at = None
 
-            if status not in {"success", "failure", "error", "network_error"}:
-                status = "error"
+                try:
+                    result = verify_delivery(
+                        email_id=username,
+                        password=password,
+                        mail_from=mail_from,
+                        sent_at=sent_at_value,
+                        allowed_delay=allowed_delay_value,
+                        header_from=header_from,
+                        max_messages=10,
+                        check_delay=delay_seconds,
+                        message_id=passed_probe_result.message_id if passed_probe_result else None,
+                    )
+                    attempt_status = str(result.get("status") or "error")
+                    attempt_latency = result.get("latency")
+                    attempt_received_at = result.get("received_at")
+                    attempt_reason = result.get("reason")
+                    sent_display = result.get("sent_display")
+                    received_display = result.get("received_display")
+                    if sent_display:
+                        self._log_imap_console(f"  ↳ 발신 {sent_display}", domain=normalized)
+                    if received_display:
+                        self._log_imap_console(f"  ↳ 수신 {received_display}", domain=normalized)
+                    latency_label = (
+                        f"{attempt_latency:.1f}s" if isinstance(attempt_latency, (int, float)) else "-"
+                    )
+                    attempt_tag = f"({attempt_index}/{max_check_attempts}) " if max_check_attempts > 1 else ""
+                    self._log_imap_console(
+                        f"{attempt_tag}IMAP 확인 · 상태 {attempt_status} · 지연 {latency_label} · 허용 {allowed_delay_value}s",
+                        domain=normalized,
+                    )
+                    if attempt_status != "success" and attempt_reason:
+                        self._log_imap_console(f"  ↳ 사유: {attempt_reason}", domain=normalized)
+                except IMAPNetworkError as exc:
+                    attempt_status = "network_error"
+                    attempt_reason = str(exc)
+                    self._log_imap_console("IMAP 확인 · 네트워크 오류", domain=normalized)
+                except (socket.timeout, OSError, ssl.SSLError) as exc:
+                    attempt_status = "network_error"
+                    attempt_reason = f"네트워크 예외: {exc}"
+                    self._log_imap_console("IMAP 확인 · 네트워크 예외", domain=normalized)
+                except Exception as exc:  # pylint: disable=broad-except
+                    attempt_status = "error"
+                    attempt_reason = f"IMAP 확인 실패: {exc}"
+                    self._log_imap_console("IMAP 확인 · 예외 발생", domain=normalized)
+
+                if attempt_status not in {"success", "failure", "error", "network_error"}:
+                    attempt_status = "error"
+
+                attempt_history.append(
+                    {
+                        "attempt": attempt_index,
+                        "status": attempt_status,
+                        "reason": attempt_reason or "",
+                    }
+                )
+
+                status = attempt_status
+                latency = attempt_latency
+                received_at = attempt_received_at
+                reason_text = attempt_reason
+
+                if status in {"success", "network_error"}:
+                    break
+                if status in {"failure", "error"} and attempt_index < max_check_attempts:
+                    retry_components = [f"IMAP 확인 {attempt_index}차 실패 · 재시도 준비"]
+                    if attempt_reason:
+                        retry_components.append(f"사유 {attempt_reason}")
+                    self._log_imap_console(" · ".join(retry_components), domain=normalized)
+                    if retry_wait_seconds > 0:
+                        time.sleep(retry_wait_seconds)
+                    continue
+                break
 
             trigger_stop = bool(
-                failure_action_value in {"stop_device", "stop_all"}
+                failure_action_value in stop_actions
                 and status in {"failure", "error"}
+                and len(attempt_history) >= max_check_attempts
             )
             if status == "network_error":
                 trigger_stop = False
@@ -2047,6 +2119,18 @@ class MailClient:
                 reason_components.append(reason_text)
             elif context_reason:
                 reason_components.append(context_reason)
+            if len(attempt_history) > 1:
+                history_summaries: List[str] = []
+                for entry in attempt_history:
+                    attempt_no = entry.get("attempt")
+                    status_text = str(entry.get("status") or "")
+                    summary = f"{attempt_no}차 {status_text}"
+                    entry_reason = str(entry.get("reason") or "").strip()
+                    if entry_reason:
+                        summary = f"{summary} ({entry_reason})"
+                    history_summaries.append(summary)
+                reason_components.append(f"시도 기록: {', '.join(history_summaries)}")
+
             combined_reason = " · ".join([component for component in reason_components if component])
 
             report = {
@@ -2079,6 +2163,8 @@ class MailClient:
                 "probe_status_line": probe_status_line,
                 "probe_detail_line": probe_detail_line,
                 "probe_attempts": probe_attempts,
+                "check_attempts": len(attempt_history),
+                "check_max_attempts": max_check_attempts,
             }
             self._queue_imap_report(report)
             return report
@@ -2671,16 +2757,20 @@ class MailClient:
         }
         if imap_reports:
             payload["imap_reports"] = imap_reports
+        data = self._post_heartbeat(payload, log_context="하트비트")
+        return data
+
+    def _post_heartbeat(self, payload: Dict[str, object], *, log_context: str) -> Dict[str, object]:
         try:
             response = self._request(
                 "post",
                 f"/api/devices/{self.device_id}/heartbeat",
                 json=payload,
                 suppress_log=True,
-                log_context="하트비트",
+                log_context=log_context,
             )
         except requests.RequestException as exc:
-            self._enter_offline_mode("하트비트", exc)
+            self._enter_offline_mode(log_context, exc)
             raise
         response.raise_for_status()
         data = response.json()
@@ -2691,6 +2781,17 @@ class MailClient:
         if isinstance(controls, Iterable):
             self._update_job_controls(controls)
         return data
+
+    def _process_heartbeat_payload(self, data: Optional[Dict[str, object]]) -> None:
+        if not isinstance(data, dict):
+            return
+        configs = data.get("configs") if isinstance(data, dict) else None
+        if isinstance(configs, dict) and configs:
+            self.apply_configs(configs)
+        new_jobs = data.get("jobs") if isinstance(data, dict) else None
+        if isinstance(new_jobs, list):
+            self._queue_jobs(new_jobs)
+        self._run_priority_jobs()
 
     def _flush_pending_job_reports(self) -> None:
         if self.offline_mode:
@@ -2715,13 +2816,7 @@ class MailClient:
                     if not self._pending_job_reports:
                         break
                     self._pending_job_reports.popleft()
-                configs = data.get("configs") if isinstance(data, dict) else None
-                if isinstance(configs, dict) and configs:
-                    self.apply_configs(configs)
-                new_jobs = data.get("jobs") if isinstance(data, dict) else None
-                if isinstance(new_jobs, list):
-                    self._queue_jobs(new_jobs)
-                self._run_priority_jobs()
+                self._process_heartbeat_payload(data)
         finally:
             self._report_flush_in_progress = False
 
@@ -4708,13 +4803,51 @@ class MailClient:
         if mail_from_value:
             self._remember_last_mail_from(normalized, mail_from_value)
         header_from_value = self._extract_header_from(config_payload.get("header"), mail_from_value)
+        context_reason = str(payload.get("context_reason") or "사용자 수동 도착 확인")
         smtp_context = {
             "smtp_host": config_payload.get("smtp_host"),
             "smtp_port": config_payload.get("smtp_port"),
             "helo": config_payload.get("helo"),
             "header": config_payload.get("header"),
         }
-        context_reason = str(payload.get("context_reason") or "사용자 수동 도착 확인")
+        settings_snapshot = self._imap_settings_for_domain(normalized)
+        single_delay_seconds = sanitize_imap_delay(
+            settings_snapshot.get("single_delay_seconds"),
+            default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,
+            minimum=0,
+        )
+        hold_started_at_iso = utc_now_iso()
+        hold_token = f"imap-hold-{uuid.uuid4().hex}"
+        hold_message = (
+            f"확인 메일 발송 중 · 약 {single_delay_seconds}초 뒤 검사 예정"
+            if single_delay_seconds > 0
+            else "확인 메일 발송 중"
+        )
+        running_result: Dict[str, object] = {
+            "phase": "waiting_before_imap_check",
+            "delay_seconds": single_delay_seconds,
+            "context_reason": context_reason,
+            "hold": {
+                "token": hold_token,
+                "kind": "single",
+                "estimated_delay_seconds": single_delay_seconds,
+                "started_at": hold_started_at_iso,
+                "reason": context_reason,
+                "message": hold_message,
+            },
+        }
+        if job_id:
+            try:
+                self.send_job_report(
+                    JobResult(
+                        job_id=job_id,
+                        status="running",
+                        message="수동 도착 확인을 준비 중입니다.",
+                        result=running_result,
+                    )
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[경고] 수동 도착 확인 진행 상태 보고에 실패했습니다: {exc}")
         outcome = self._execute_imap_guard_flow(
             domain=normalized,
             job_id=job_id,
