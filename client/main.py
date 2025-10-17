@@ -3343,7 +3343,12 @@ class MailClient:
             if response is not None:
                 response.close()
 
-        print(f"[Inject 완료] {filename} -> {target_path}")
+        summary_segments = [f"[Inject 완료] {filename} -> {target_path}"]
+        if inserted_count >= 0:
+            summary_segments.append(f"변환 {inserted_count}건")
+        if total_records is not None:
+            summary_segments.append(f"총 {total_records}건")
+        print(" · ".join(summary_segments))
 
         message = f"{DOMAIN_LABELS.get(normalized, normalized)} DB 동기화 완료"
         if inserted_count >= 0:
