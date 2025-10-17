@@ -3246,6 +3246,9 @@ class MailClient:
         backup_taken = False
         downloaded_bytes = 0
         inserted_count = -1
+        payload_bytes: Optional[int] = None
+        header_bytes: Optional[int] = None
+        expected_bytes: Optional[int] = None
 
         if target_path.exists():
             try:
@@ -3269,9 +3272,15 @@ class MailClient:
                 stream=True,
             )
             response.raise_for_status()
-            total_bytes = _coerce_positive_int(payload.get("file_size") or payload.get("size"))
-            if total_bytes is None:
-                total_bytes = _coerce_positive_int(response.headers.get("Content-Length")) if response.headers else None
+            payload_bytes = _coerce_positive_int(payload.get("file_size") or payload.get("size"))
+            header_bytes = _coerce_positive_int(response.headers.get("Content-Length")) if response and response.headers else None
+            expected_bytes = payload_bytes or header_bytes
+            if payload_bytes and header_bytes and payload_bytes != header_bytes:
+                print(
+                    f"[경고] 다운로드 파일 크기 불일치 감지 - 메타 {payload_bytes} B, 헤더 {header_bytes} B"
+                )
+            if expected_bytes:
+                print(f"[Inject] 예상 다운로드 크기: {expected_bytes} B")
 
             report_progress("download", 0)
             last_percent = 0
@@ -3281,14 +3290,21 @@ class MailClient:
                         continue
                     temp_file.write(chunk)
                     downloaded_bytes += len(chunk)
-                    if total_bytes:
-                        percent = int((downloaded_bytes * 100) // total_bytes)
-                        if downloaded_bytes >= total_bytes:
+                    if expected_bytes:
+                        percent = int((downloaded_bytes * 100) // expected_bytes)
+                        if downloaded_bytes >= expected_bytes:
                             percent = 100
                         percent = max(0, min(100, percent))
                         if percent > last_percent:
                             last_percent = percent
                             report_progress("download", percent)
+
+            if expected_bytes and downloaded_bytes < expected_bytes:
+                raise RuntimeError(
+                    f"다운로드 용량이 부족합니다 ({downloaded_bytes} / {expected_bytes} B)"
+                )
+            if downloaded_bytes == 0:
+                raise RuntimeError("다운로드된 데이터가 없습니다.")
 
             report_progress("download", 100)
             temp_path.replace(target_path)
@@ -3364,6 +3380,9 @@ class MailClient:
             "filename": filename,
             "records": inserted_count if inserted_count >= 0 else None,
             "total_records": total_records,
+            "expected_bytes": expected_bytes,
+            "header_bytes": header_bytes,
+            "payload_bytes": payload_bytes,
         }
 
         return JobResult(
