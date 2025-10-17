@@ -2970,11 +2970,13 @@ class MailClient:
         domain_states: Optional[List[Dict[str, object]]] = None,
         *,
         critical: bool = True,
+        defer_flush: bool = False,
     ) -> None:
         states_snapshot: List[Dict[str, object]] = list(domain_states or [])
         with self._pending_job_reports_lock:
             self._pending_job_reports.append((report, states_snapshot, critical))
-        self._flush_pending_job_reports(asynchronous=not critical)
+        if not defer_flush:
+            self._flush_pending_job_reports(asynchronous=not critical)
 
     def _update_job_controls(self, controls: Iterable[Dict[str, object]]) -> None:
         previous_ids = set(self.job_controls.keys())
@@ -3215,7 +3217,12 @@ class MailClient:
                 return parsed if parsed > 0 else None
             return None
 
+        flush_interval = 10
+        last_reported_percent = 0
+        last_flushed_percent = -flush_interval
+
         def report_progress(stage: str, progress: int) -> None:
+            nonlocal last_reported_percent, last_flushed_percent
             try:
                 progress_value = max(0, min(100, int(progress)))
             except (TypeError, ValueError):
@@ -3231,10 +3238,21 @@ class MailClient:
                         },
                     ),
                     critical=False,
+                    defer_flush=True,
                 )
             except Exception:
                 # 진행률 보고 실패는 Inject 흐름을 중단하지 않습니다.
                 pass
+            if stage == "download" and progress_value > last_reported_percent:
+                last_reported_percent = progress_value
+            if stage == "download":
+                should_flush = progress_value >= 100 or (progress_value - last_flushed_percent) >= flush_interval
+                if should_flush:
+                    try:
+                        self._flush_pending_job_reports(asynchronous=False)
+                    except Exception:
+                        pass
+                    last_flushed_percent = progress_value
 
         print(f"[Inject] 파일 다운로드 경로: {download_path}")
         response: Optional[requests.Response] = None
@@ -3337,6 +3355,10 @@ class MailClient:
             self._reset_cycle_stats(normalized)
             self.persist()
             report_progress("finalize", 100)
+            try:
+                self._flush_pending_job_reports(asynchronous=False)
+            except Exception:
+                pass
         except Exception as error:  # pylint: disable=broad-except
             print(f"[오류] Inject 처리 중 문제 발생: {error}")
             if temp_path.exists():
@@ -3358,6 +3380,10 @@ class MailClient:
         finally:
             if response is not None:
                 response.close()
+            try:
+                self._flush_pending_job_reports(asynchronous=False)
+            except Exception:
+                pass
 
         total_records = self._count_emails_in_db(target_path)
 
