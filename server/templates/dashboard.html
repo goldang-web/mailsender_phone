@@ -6325,6 +6325,77 @@ function latestJobSummary(job) {
   return null;
 }
 
+function extractImapHoldInfo(job) {
+  if (!job) {
+    return null;
+  }
+  const progress = Array.isArray(job.progress) ? job.progress : [];
+  if (!progress.length) {
+    return null;
+  }
+  for (let i = progress.length - 1; i >= 0; i -= 1) {
+    const entry = progress[i];
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const data = entry.data;
+    if (!data || typeof data !== "object") {
+      continue;
+    }
+    const holdCandidate = data.hold && typeof data.hold === "object" ? data.hold : null;
+    let estimatedSeconds = null;
+    let startedAt = null;
+    let tokenValue = null;
+    let kindValue = null;
+    let reasonValue = null;
+    let messageValue = null;
+    if (holdCandidate) {
+      estimatedSeconds = holdCandidate.estimated_delay_seconds ?? holdCandidate.delay_seconds ?? null;
+      startedAt = holdCandidate.started_at ?? null;
+      tokenValue = holdCandidate.token ?? null;
+      kindValue = holdCandidate.kind ?? null;
+      reasonValue = holdCandidate.reason ?? null;
+      messageValue = holdCandidate.message ?? null;
+    }
+    if (estimatedSeconds === null && data.delay_seconds !== undefined) {
+      estimatedSeconds = data.delay_seconds;
+    }
+    if (!startedAt && data.started_at) {
+      startedAt = data.started_at;
+    }
+    if (!tokenValue) {
+      tokenValue = data.token ?? entry.created_at ?? job.id ?? null;
+    }
+    if (!kindValue && data.kind) {
+      kindValue = data.kind;
+    }
+    if (!reasonValue && data.reason) {
+      reasonValue = data.reason;
+    }
+    if (!messageValue && data.message) {
+      messageValue = data.message;
+    }
+    const hasHoldData = holdCandidate || estimatedSeconds !== null || startedAt || tokenValue;
+    if (!hasHoldData) {
+      continue;
+    }
+    const numericEstimated = Number(estimatedSeconds);
+    let startedLabel = startedAt || entry.created_at || job.started_at || null;
+    if (typeof startedLabel === "number" && Number.isFinite(startedLabel) && startedLabel < 1e11) {
+      startedLabel = startedLabel * 1000;
+    }
+    return {
+      token: tokenValue ? String(tokenValue) : "",
+      estimatedSeconds: Number.isFinite(numericEstimated) ? Math.max(0, Math.round(numericEstimated)) : null,
+      kind: (kindValue || "").toString().trim() || "single",
+      startedAt: startedLabel,
+      reason: (reasonValue || "").toString(),
+      message: (messageValue || "").toString(),
+    };
+  }
+  return null;
+}
+
 function applyScheduledSingleSendJob(card, currentDevice, scheduledJob) {
   const baseDevice = card.__deviceData || currentDevice || {};
   if (!scheduledJob) {
@@ -6391,6 +6462,7 @@ function updateSingleSendControls(card, device) {
   const imapJob = latestImapManualJob(deviceData, activeDomain);
   const singleActive = singleJob ? ACTIVE_JOB_STATES.has(singleJob.status) : false;
   const imapActive = imapJob ? ACTIVE_JOB_STATES.has(imapJob.status) : false;
+  const imapHoldInfo = extractImapHoldInfo(imapJob);
   card.dataset.currentSingleJobDomain = activeDomain;
   card.dataset.currentSingleJobId = singleActive ? (singleJob?.id || "") : "";
   card.dataset.currentImapJobId = imapActive ? (imapJob?.id || "") : "";
@@ -6580,6 +6652,47 @@ function updateSingleSendControls(card, device) {
       imapCheckBtn.dataset.defaultLabel = imapCheckBtn.textContent;
     }
     const imapBlock = card.querySelector('[data-role="imapBlock"]');
+    if (imapBlock && imapActive && imapHoldInfo) {
+      const nextToken = imapHoldInfo.token || "";
+      const currentToken = imapBlock.dataset.imapHoldToken || "";
+      const estimatedSeconds = Number.isFinite(imapHoldInfo.estimatedSeconds)
+        ? imapHoldInfo.estimatedSeconds
+        : Number(imapBlock.dataset.imapHoldCountdown || "0");
+      const holdMessage = imapHoldInfo.message || imapHoldInfo.reason || "";
+      const markOptions = {
+        delaySeconds: Number.isFinite(estimatedSeconds) ? estimatedSeconds : 0,
+        kind: imapHoldInfo.kind || "single",
+        token: nextToken || undefined,
+        startTimestamp: imapHoldInfo.startedAt,
+        message: holdMessage,
+        reason: holdMessage || imapHoldInfo.reason || "",
+      };
+      if (!nextToken || currentToken !== nextToken || imapBlock.dataset.imapHoldStatus !== "checking") {
+        markImapStatusChecking(card, markOptions);
+      } else {
+        if (markOptions.message) {
+          imapBlock.dataset.imapHoldMessage = markOptions.message;
+        }
+        if (markOptions.reason) {
+          imapBlock.dataset.imapHoldReason = markOptions.reason;
+        }
+        if (markOptions.startTimestamp !== undefined && markOptions.startTimestamp !== null) {
+          let parsedStart = NaN;
+          if (typeof markOptions.startTimestamp === "number" && Number.isFinite(markOptions.startTimestamp)) {
+            parsedStart = markOptions.startTimestamp > 1e11
+              ? markOptions.startTimestamp
+              : markOptions.startTimestamp * 1000;
+          } else if (typeof markOptions.startTimestamp === "string" && markOptions.startTimestamp.trim()) {
+            parsedStart = Date.parse(markOptions.startTimestamp);
+          }
+          if (Number.isFinite(parsedStart) && parsedStart > 0) {
+            if (!imapBlock.dataset.imapHoldCountdownStart || imapBlock.dataset.imapHoldCountdownStart === "0") {
+              imapBlock.dataset.imapHoldCountdownStart = String(Math.round(parsedStart));
+            }
+          }
+        }
+      }
+    }
     const username = (imapBlock?.dataset?.imapUsername || "").trim();
     const isNaverDomain = activeDomain === "naver";
     const holdStatus = imapBlock?.dataset?.imapHoldStatus || "";
@@ -6599,6 +6712,8 @@ function updateSingleSendControls(card, device) {
       delete imapBlock.dataset.imapHoldToken;
       delete imapBlock.dataset.imapHoldCountdownFetched;
       delete imapBlock.dataset.imapHoldKind;
+      delete imapBlock.dataset.imapHoldMessage;
+      delete imapBlock.dataset.imapHoldReason;
       clearImapCountdown(card);
     }
     const holdResultChanged = holdCheckedAt !== lastCheckedMarker || holdLastStatus !== currentStatusMarker;
@@ -6650,21 +6765,46 @@ function markImapStatusChecking(card, options = {}) {
   if (!block) return false;
   const statusEl = block.querySelector('[data-role="imapStatus"]');
   if (!statusEl) return false;
-  const holdStartedAt = Date.now();
+  const startOption =
+    options.startTimestamp ??
+    options.startedAt ??
+    options.started_at ??
+    options.start_ms ??
+    null;
+  let holdStartedAt = Date.now();
+  if (typeof startOption === "number" && Number.isFinite(startOption)) {
+    holdStartedAt = startOption > 1e11 ? startOption : startOption * 1000;
+  } else if (typeof startOption === "string" && startOption.trim()) {
+    const parsed = Date.parse(startOption);
+    if (!Number.isNaN(parsed)) {
+      holdStartedAt = parsed;
+    }
+  }
+  holdStartedAt = Math.max(0, Math.round(holdStartedAt));
   block.dataset.imapHoldStatus = "checking";
   block.dataset.imapHoldCheckedAt = block.dataset.imapLastCheckedAt || "";
   block.dataset.imapHoldLastStatus = block.dataset.imapLastStatus || "";
   block.dataset.imapHoldSetAt = String(holdStartedAt);
-  block.dataset.imapHoldToken = String(holdStartedAt);
+  const holdTokenOption = options.token ?? options.holdToken ?? null;
+  const holdTokenValue = holdTokenOption ? String(holdTokenOption) : String(holdStartedAt || Date.now());
+  block.dataset.imapHoldToken = holdTokenValue;
   delete block.dataset.imapHoldCountdownFetched;
   const delayCandidate = typeof options.delaySeconds === "number" ? options.delaySeconds : Number(block.dataset.imapSingleDelay || "0");
   const delaySeconds = Number.isFinite(delayCandidate) ? Math.max(0, Math.round(delayCandidate)) : 0;
   if (delaySeconds > 0) {
     block.dataset.imapHoldCountdown = String(delaySeconds);
-    delete block.dataset.imapHoldCountdownStart;
+    if (startOption !== null && startOption !== undefined && Number.isFinite(holdStartedAt)) {
+      block.dataset.imapHoldCountdownStart = String(holdStartedAt);
+    } else {
+      delete block.dataset.imapHoldCountdownStart;
+    }
   } else {
     delete block.dataset.imapHoldCountdown;
-    delete block.dataset.imapHoldCountdownStart;
+    if (startOption !== null && startOption !== undefined && Number.isFinite(holdStartedAt)) {
+      block.dataset.imapHoldCountdownStart = String(holdStartedAt);
+    } else {
+      delete block.dataset.imapHoldCountdownStart;
+    }
   }
   const requestedKind = typeof options.kind === "string" ? options.kind.trim().toLowerCase() : "";
   if (requestedKind) {
@@ -6674,7 +6814,21 @@ function markImapStatusChecking(card, options = {}) {
   } else {
     delete block.dataset.imapHoldKind;
   }
-  statusEl.textContent = "도착 확인 중";
+  const holdMessage = typeof options.message === "string" ? options.message.trim() : "";
+  const holdReason = typeof options.reason === "string" ? options.reason.trim() : "";
+  if (holdMessage) {
+    block.dataset.imapHoldMessage = holdMessage;
+  } else {
+    delete block.dataset.imapHoldMessage;
+  }
+  if (holdReason) {
+    block.dataset.imapHoldReason = holdReason;
+  } else if (holdMessage) {
+    block.dataset.imapHoldReason = holdMessage;
+  } else {
+    delete block.dataset.imapHoldReason;
+  }
+  statusEl.textContent = holdMessage || "도착 확인 중";
   statusEl.className = "imap-status warning";
   const cancelBtn = block.querySelector('button[data-action="imap-cancel-check"]');
   if (cancelBtn) {
@@ -7377,20 +7531,47 @@ function resolveImapHoldKind(block) {
 
 function describeImapHold(block, remainingSeconds) {
   const kind = resolveImapHoldKind(block);
+  const holdMessage = block.dataset.imapHoldMessage || "";
+  const holdReason = block.dataset.imapHoldReason || "";
+  const normalizedMessage = holdMessage.trim();
+  const normalizedReason = holdReason.trim();
+  const contextLabel = normalizedReason || normalizedMessage;
+  const labelsMatch = normalizedMessage && normalizedMessage === normalizedReason;
   if (remainingSeconds > 0) {
     if (kind === "single") {
-      return `단일 대기 중 · 확인까지 ${remainingSeconds}초`;
+      const base = `단일 대기 중 · 확인까지 ${remainingSeconds}초`;
+      if (contextLabel && !labelsMatch) {
+        return `${base} · ${contextLabel}`;
+      }
+      return base;
     }
     if (kind === "threshold") {
-      return `Sent 기준 대기 중 · 확인까지 ${remainingSeconds}초`;
+      const base = `Sent 기준 대기 중 · 확인까지 ${remainingSeconds}초`;
+      if (contextLabel && !labelsMatch) {
+        return `${base} · ${contextLabel}`;
+      }
+      return base;
     }
-    return `확인까지 ${remainingSeconds}초`;
+    const base = `확인까지 ${remainingSeconds}초`;
+    if (contextLabel && !labelsMatch) {
+      return `${base} · ${contextLabel}`;
+    }
+    return base;
   }
   if (kind === "single") {
+    if (contextLabel) {
+      return contextLabel;
+    }
     return "단일 도착 여부를 확인 중입니다.";
   }
   if (kind === "threshold") {
+    if (contextLabel) {
+      return contextLabel;
+    }
     return "Sent 누적 기준으로 도착 여부를 확인 중입니다.";
+  }
+  if (contextLabel) {
+    return contextLabel;
   }
   return "IMAP 도착 여부를 확인 중입니다.";
 }
@@ -7483,6 +7664,8 @@ function renderImapSection(card, device, domain) {
     block.dataset.imapLastCheckedAt = "";
     block.dataset.imapLastStatus = "";
     delete block.dataset.imapHoldKind;
+    delete block.dataset.imapHoldMessage;
+    delete block.dataset.imapHoldReason;
     const thresholdMetaEl = block.querySelector('[data-role="imapThresholdMeta"]');
     if (thresholdMetaEl) {
       thresholdMetaEl.textContent = "Sent 누적 확인: 사용 안 함";
@@ -7578,6 +7761,8 @@ function renderImapSection(card, device, domain) {
     delete block.dataset.imapHoldToken;
     delete block.dataset.imapHoldCountdownFetched;
     delete block.dataset.imapHoldKind;
+    delete block.dataset.imapHoldMessage;
+    delete block.dataset.imapHoldReason;
     clearImapCountdown(card);
   }
   statusEl.textContent = statusText;
@@ -8224,6 +8409,8 @@ function attachCardEvents(card) {
           delete block.dataset.imapHoldToken;
           delete block.dataset.imapHoldCountdownFetched;
           delete block.dataset.imapHoldKind;
+          delete block.dataset.imapHoldMessage;
+          delete block.dataset.imapHoldReason;
         }
         clearImapCountdown(card);
         imapCancelBtn.hidden = true;
@@ -8271,6 +8458,8 @@ function attachCardEvents(card) {
         delete block.dataset.imapHoldToken;
         delete block.dataset.imapHoldCountdownFetched;
         delete block.dataset.imapHoldKind;
+        delete block.dataset.imapHoldMessage;
+        delete block.dataset.imapHoldReason;
       }
       clearImapCountdown(card);
       imapCancelBtn.textContent = originalText;

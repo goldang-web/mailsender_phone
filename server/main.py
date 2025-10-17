@@ -2383,13 +2383,18 @@ def record_job_progress(
                 device_ids = {entry[0] for entry in entries if entry and entry[0]}
                 for device_id in device_ids:
                     prune_device_logs(conn, device_id)
-    if job_row["job_type"] != "batch_send":
+    trackable_job_types = {"batch_send", "imap_manual_check"}
+    if job_row["job_type"] not in trackable_job_types:
         return
     data_json: Optional[str] = None
     if result is not None:
         try:
             if isinstance(result, dict):
-                filtered = {key: value for key, value in result.items() if key != "logs"}
+                filtered = {
+                    key: value
+                    for key, value in result.items()
+                    if key != "logs"
+                }
                 data_json = json.dumps(filtered, ensure_ascii=False) if filtered else None
             else:
                 data_json = json.dumps(result, ensure_ascii=False)
