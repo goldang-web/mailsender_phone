@@ -9150,7 +9150,21 @@ function refreshFileListProgress(deviceId, domain) {
       if (fileId === null || fileId === undefined) {
         return;
       }
-      jobMap.set(String(fileId), job);
+      const statusKey = String(job.status || "").toLowerCase();
+      if (finalStatuses.has(statusKey)) {
+        return;
+      }
+      const key = String(fileId);
+      const existing = jobMap.get(key);
+      if (!existing) {
+        jobMap.set(key, job);
+        return;
+      }
+      const existingCreated = new Date(existing.created_at || existing.queued_at || 0).getTime();
+      const currentCreated = new Date(job.created_at || job.queued_at || 0).getTime();
+      if (!Number.isFinite(existingCreated) || currentCreated > existingCreated) {
+        jobMap.set(key, job);
+      }
     });
   }
 

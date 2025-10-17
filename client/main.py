@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.72"
+APP_VERSION = "0.0.73"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -597,8 +597,12 @@ class MailClient:
         self._cancel_ack_sent: Set[str] = set()
         self._pending_jobs: Deque[Dict[str, object]] = deque()
         self._pending_job_ids: Set[str] = set()
-        self._pending_job_reports: Deque[Tuple[JobResult, List[Dict[str, object]]]] = deque()
+        self._pending_job_reports: Deque[Tuple[JobResult, List[Dict[str, object]], bool]] = deque()
+        self._pending_job_reports_lock = threading.Lock()
+        self._report_flush_lock = threading.Lock()
         self._report_flush_in_progress: bool = False
+        self._report_flush_thread: Optional[threading.Thread] = None
+        self._noncritical_report_failures: int = 0
         raw_sequences = config.get("sent_sequences")
         if not isinstance(raw_sequences, dict):
             raw_sequences = {}
@@ -780,7 +784,10 @@ class MailClient:
         self.offline_mode = True
         self.next_offline_probe_at = time.time() + OFFLINE_PROBE_INTERVAL_SECONDS
         self.connected = False
-        self._report_flush_in_progress = False
+        with self._report_flush_lock:
+            self._report_flush_in_progress = False
+            self._report_flush_thread = None
+        self._noncritical_report_failures = 0
         self._schedule_offline_probe()
         try:
             self._reset_session()
@@ -797,6 +804,7 @@ class MailClient:
         self.offline_mode = False
         self.next_offline_probe_at = 0.0
         self._disconnect_logged = False
+        self._noncritical_report_failures = 0
         print("[오프라인 복구] 서버 응답을 확인했습니다. 동기화를 재개합니다.")
 
     def _schedule_offline_probe(self) -> None:
@@ -1051,7 +1059,7 @@ class MailClient:
             "imap_reports": reports,
         }
         try:
-            data = self._post_heartbeat(payload, log_context="IMAP 즉시 보고")
+            data = self._post_heartbeat(payload, log_context="IMAP 즉시 보고", critical=True)
         except requests.RequestException as exc:  # type: ignore[attr-defined]
             print(f"[경고] 즉시 IMAP 보고 실패: {exc}")
             return False
@@ -2819,6 +2827,9 @@ class MailClient:
         self,
         domain_states: List[Dict[str, object]],
         job_reports: List[JobResult],
+        *,
+        critical: bool = True,
+        log_context: str = "하트비트",
     ) -> Dict[str, object]:
         if self.offline_mode:
             raise RuntimeError("오프라인 모드에서는 하트비트를 전송할 수 없습니다.")
@@ -2842,10 +2853,10 @@ class MailClient:
         }
         if imap_reports:
             payload["imap_reports"] = imap_reports
-        data = self._post_heartbeat(payload, log_context="하트비트")
+        data = self._post_heartbeat(payload, log_context=log_context, critical=critical)
         return data
 
-    def _post_heartbeat(self, payload: Dict[str, object], *, log_context: str) -> Dict[str, object]:
+    def _post_heartbeat(self, payload: Dict[str, object], *, log_context: str, critical: bool) -> Dict[str, object]:
         try:
             response = self._request(
                 "post",
@@ -2854,11 +2865,20 @@ class MailClient:
                 suppress_log=True,
                 log_context=log_context,
             )
+            response.raise_for_status()
         except requests.RequestException as exc:
-            self._enter_offline_mode(log_context, exc)
+            reason = self._short_error_reason(exc)
+            if critical:
+                self._enter_offline_mode(log_context, exc)
+            else:
+                self._noncritical_report_failures = min(self._noncritical_report_failures + 1, 10)
+                if self._noncritical_report_failures >= 3:
+                    self._enter_offline_mode(f"{log_context}", exc)
+                else:
+                    print(f"[경고] {log_context} 실패 - {reason} (재시도 예정)")
             raise
-        response.raise_for_status()
         data = response.json()
+        self._noncritical_report_failures = 0
         self.active_domain = data.get("active_domain", self.active_domain)
         if data.get("public_ip"):
             self.public_ip = data["public_ip"]
@@ -2878,41 +2898,83 @@ class MailClient:
             self._queue_jobs(new_jobs)
         self._run_priority_jobs()
 
-    def _flush_pending_job_reports(self) -> None:
+    def _flush_pending_job_reports(self, *, asynchronous: bool = False) -> None:
         if self.offline_mode:
             return
-        if self._report_flush_in_progress:
+        with self._pending_job_reports_lock:
+            if not self._pending_job_reports:
+                return
+        start_worker: Optional[threading.Thread] = None
+        with self._report_flush_lock:
+            if self._report_flush_in_progress:
+                return
+            self._report_flush_in_progress = True
+            if asynchronous:
+                start_worker = threading.Thread(
+                    target=self._drain_job_reports_worker,
+                    name="job-report-flush",
+                    daemon=True,
+                )
+                self._report_flush_thread = start_worker
+        if asynchronous:
+            if start_worker is not None:
+                start_worker.start()
             return
-        if not self._pending_job_reports:
-            return
-        self._report_flush_in_progress = True
         try:
-            while self._pending_job_reports and not self.offline_mode:
-                batch = list(self._pending_job_reports)
-                reports_payload = [item[0] for item in batch]
-                latest_states = list(batch[-1][1]) if batch and batch[-1][1] else []
-                try:
-                    data = self.heartbeat(latest_states, reports_payload)
-                except Exception as exc:  # pylint: disable=broad-except
-                    print(f"[경고] 작업 보고 실패: {exc}")
+            self._drain_job_reports()
+        finally:
+            with self._report_flush_lock:
+                self._report_flush_in_progress = False
+                self._report_flush_thread = None
+
+    def _drain_job_reports_worker(self) -> None:
+        try:
+            self._drain_job_reports()
+        finally:
+            with self._report_flush_lock:
+                self._report_flush_in_progress = False
+                self._report_flush_thread = None
+
+    def _drain_job_reports(self) -> None:
+        while True:
+            if self.offline_mode:
+                return
+            with self._pending_job_reports_lock:
+                if not self._pending_job_reports:
                     return
-                processed_count = len(batch)
+                batch = list(self._pending_job_reports)
+            reports_payload = [item[0] for item in batch]
+            latest_states = list(batch[-1][1]) if batch and batch[-1][1] else []
+            batch_critical = any(item[2] for item in batch)
+            try:
+                data = self.heartbeat(
+                    latest_states,
+                    reports_payload,
+                    critical=batch_critical,
+                    log_context="작업 보고",
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                print(f"[경고] 작업 보고 실패: {exc}")
+                return
+            processed_count = len(batch)
+            with self._pending_job_reports_lock:
                 for _ in range(processed_count):
                     if not self._pending_job_reports:
                         break
                     self._pending_job_reports.popleft()
-                self._process_heartbeat_payload(data)
-        finally:
-            self._report_flush_in_progress = False
+            self._process_heartbeat_payload(data)
 
     def send_job_report(
         self,
         report: JobResult,
         domain_states: Optional[List[Dict[str, object]]] = None,
+        *,
+        critical: bool = True,
     ) -> None:
         states_snapshot: List[Dict[str, object]] = list(domain_states or [])
-        self._pending_job_reports.append((report, states_snapshot))
-        self._flush_pending_job_reports()
+        with self._pending_job_reports_lock:
+            self._pending_job_reports.append((report, states_snapshot, critical))
+        self._flush_pending_job_reports(asynchronous=not critical)
 
     def _update_job_controls(self, controls: Iterable[Dict[str, object]]) -> None:
         previous_ids = set(self.job_controls.keys())
@@ -3167,7 +3229,8 @@ class MailClient:
                             "stage": stage,
                             "progress": progress_value,
                         },
-                    )
+                    ),
+                    critical=False,
                 )
             except Exception:
                 # 진행률 보고 실패는 Inject 흐름을 중단하지 않습니다.
