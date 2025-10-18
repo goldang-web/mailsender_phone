@@ -4894,14 +4894,13 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             """
             UPDATE devices
             SET name=?,
-                active_domain=?,
                 status='connected',
                 last_seen=?,
                 public_ip=COALESCE(?, public_ip),
                 updated_at=?
             WHERE id=?
             """,
-            (payload.device_name, normalized_active, now, public_ip, now, device_id),
+            (payload.device_name, now, public_ip, now, device_id),
         )
         schedule_triggers: List[str] = []
         for state in payload.domain_states:
