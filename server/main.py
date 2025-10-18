@@ -1967,6 +1967,29 @@ def create_job(
     }
 
 
+def extract_telegram_credentials(config: Dict[str, Any]) -> Tuple[str, str]:
+    return (
+        sanitize_telegram_bot_token(config.get("telegram_bot_token")),
+        sanitize_telegram_chat_id(config.get("telegram_chat_id")),
+    )
+
+
+def attach_telegram_credentials(
+    payload: Dict[str, Any],
+    *,
+    bot_token: str,
+    chat_id: str,
+) -> Dict[str, Any]:
+    if not bot_token and not chat_id:
+        return dict(payload)
+    enriched = dict(payload)
+    if bot_token:
+        enriched["telegram_bot_token"] = bot_token
+    if chat_id:
+        enriched["telegram_chat_id"] = chat_id
+    return enriched
+
+
 def build_substitution_context(rules: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
     static_map: Dict[str, str] = {}
     list_map: Dict[str, List[str]] = {}
@@ -2545,28 +2568,11 @@ def format_local_timestamp() -> str:
     return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %Z")
 
 
-STOP_NOTIFICATION_SUPPRESSION_WINDOW = timedelta(seconds=90)
-STOP_NOTIFICATION_CACHE: Dict[str, datetime] = {}
-STOP_NOTIFICATION_LOCK = threading.RLock()
-
-
 def _coerce_non_negative_int(value: Any) -> int:
     try:
         return max(0, int(value))
     except (TypeError, ValueError):
         return 0
-
-
-def _simplify_stop_reason(raw: str) -> str:
-    base = (raw or "").strip()
-    if not base:
-        return "사유 정보 없음"
-    if ":" in base:
-        base = base.split(":", 1)[0].strip()
-    delimiter = " - 디바이스"
-    if delimiter in base:
-        base = base.split(delimiter, 1)[0].strip()
-    return base or "사유 정보 없음"
 
 
 def _collect_target_domains(raw: Any) -> List[str]:
@@ -2649,202 +2655,6 @@ def enrich_stop_metadata_with_sent_stats(
     return metadata_obj
 
 
-def _build_stop_notification_signature(
-    reason: str,
-    metadata: Optional[Dict[str, Any]],
-) -> Optional[str]:
-    if metadata is None:
-        metadata = {}
-    simplified_reason = _simplify_stop_reason(reason)
-    device_id = str(metadata.get("device_id") or "").strip()
-    event_marker = str(metadata.get("stop_event_marker") or "").strip()
-    domain = ""
-    if isinstance(metadata.get("domain"), str):
-        domain = metadata["domain"].strip().lower()
-    elif isinstance(metadata.get("domains"), Iterable):
-        domains = _collect_target_domains(metadata.get("domains"))
-        if domains:
-            domain = ",".join(domains)
-    current = max(
-        _coerce_non_negative_int(metadata.get("sent_window_count")),
-        _coerce_non_negative_int(metadata.get("sent_since_last_check")),
-        _coerce_non_negative_int(metadata.get("imap_sent_since_last_check")),
-    )
-    total = max(
-        _coerce_non_negative_int(metadata.get("client_sent")),
-        _coerce_non_negative_int(metadata.get("sent_total_success")),
-        _coerce_non_negative_int(metadata.get("sent_sequence_total")),
-    )
-    if not device_id:
-        return None
-    base_key = event_marker or f"{device_id or '-'}:{simplified_reason or '-'}"
-    signature_parts = [
-        base_key,
-        device_id or "-",
-        domain or "-",
-        simplified_reason or "-",
-        str(current),
-        str(total),
-    ]
-    return "|".join(signature_parts)
-
-
-def _should_suppress_stop_notification(signature: Optional[str]) -> bool:
-    if not signature:
-        return False
-    now = datetime.now(timezone.utc)
-    with STOP_NOTIFICATION_LOCK:
-        last_sent = STOP_NOTIFICATION_CACHE.get(signature)
-        if last_sent is None:
-            return False
-        if now - last_sent <= STOP_NOTIFICATION_SUPPRESSION_WINDOW:
-            return True
-        STOP_NOTIFICATION_CACHE.pop(signature, None)
-        return False
-
-
-def _mark_stop_notification_sent(signature: Optional[str]) -> None:
-    if not signature:
-        return
-    now = datetime.now(timezone.utc)
-    with STOP_NOTIFICATION_LOCK:
-        STOP_NOTIFICATION_CACHE[signature] = now
-
-
-def build_pre_stop_message(
-    reason: str,
-    metadata: Optional[Dict[str, Any]],
-) -> str:
-    return build_stop_notification_message(reason, metadata)
-
-
-def build_auto_stop_message(
-    reason: str,
-    _origin: str,
-    metadata: Optional[Dict[str, Any]],
-    _result: Optional[Dict[str, Any]],
-) -> str:
-    return build_stop_notification_message(reason, metadata)
-
-
-def build_stop_notification_message(
-    reason: str,
-    metadata: Optional[Dict[str, Any]],
-) -> str:
-    def resolve_device_label(data: Optional[Dict[str, Any]]) -> str:
-        if not data:
-            return "알 수 없음"
-        candidates = [
-            data.get("device_name"),
-            data.get("device_label"),
-            data.get("device_id"),
-        ]
-        for candidate in candidates:
-            text = (str(candidate).strip() if candidate is not None else "")
-            if text:
-                return text
-        return "알 수 없음"
-
-    def extract_sent_counts(data: Optional[Dict[str, Any]]) -> Tuple[int, int]:
-        if not data:
-            return 0, 0
-        current_candidates = [
-            data.get("sent_window_count"),
-            data.get("sent_since_last_check"),
-            data.get("imap_sent_since_last_check"),
-        ]
-        total_candidates = [
-            data.get("client_sent"),
-            data.get("sent_total_success"),
-            data.get("sent_sequence_total"),
-        ]
-        current = next((_coerce_non_negative_int(val) for val in current_candidates if val is not None), 0)
-        total = next((_coerce_non_negative_int(val) for val in total_candidates if val is not None), 0)
-        return current, total
-
-    simplified_reason = _simplify_stop_reason(reason)
-    device_label = resolve_device_label(metadata)
-    now = datetime.now().astimezone()
-    date_line = now.strftime("%Y-%m-%d")
-    time_line = now.strftime("%H:%M:%S %Z")
-    current_sent, total_sent = extract_sent_counts(metadata)
-    lines = [
-        "[MailSender] 중지안내",
-        f"사유: {simplified_reason}",
-        f"디바이스: {device_label}",
-        f"날짜: {date_line}",
-        f"시각: {time_line}",
-        f"Sent: 현재 성공 {current_sent}건 / 누적 성공 {total_sent}건",
-    ]
-    return "\n".join(lines)
-
-
-def maybe_dispatch_telegram_pre_stop(
-    conn: sqlite3.Connection,
-    *,
-    reason: str,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    try:
-        config = load_global_config(conn=conn)
-    except Exception as exc:
-        print(f"[TELEGRAM] 사전 알림 설정 로드 실패: {exc}")
-        return None
-    bot_token = sanitize_telegram_bot_token(config.get("telegram_bot_token"))
-    chat_id = sanitize_telegram_chat_id(config.get("telegram_chat_id"))
-    if not bot_token or not chat_id:
-        return None
-    enriched_metadata = enrich_stop_metadata_with_sent_stats(conn, metadata)
-    signature = _build_stop_notification_signature(reason, enriched_metadata)
-    if _should_suppress_stop_notification(signature):
-        device_marker = (enriched_metadata or {}).get("device_id") or "unknown"
-        print(f"[TELEGRAM] 중지 사전 알림 중복으로 생략 (device={device_marker})")
-        return {"sent": False, "suppressed": True, "metadata": enriched_metadata}
-    message = build_pre_stop_message(reason, enriched_metadata)
-    try:
-        response = send_telegram_message(bot_token, chat_id, message)
-    except Exception as exc:
-        print(f"[TELEGRAM] 중지 사전 알림 발송 실패: {exc}")
-        return {"sent": False, "error": str(exc), "metadata": enriched_metadata}
-    _mark_stop_notification_sent(signature)
-    print("[TELEGRAM] 중지 사전 알림 발송 성공")
-    return {"sent": True, "response": response, "metadata": enriched_metadata}
-
-
-def maybe_dispatch_telegram_auto_stop(
-    conn: sqlite3.Connection,
-    *,
-    reason: str,
-    origin: str,
-    metadata: Optional[Dict[str, Any]] = None,
-    result: Optional[Dict[str, Any]] = None,
-) -> Optional[Dict[str, Any]]:
-    try:
-        config = load_global_config(conn=conn)
-    except Exception as exc:
-        print(f"[TELEGRAM] 설정 로드 실패: {exc}")
-        return None
-    bot_token = sanitize_telegram_bot_token(config.get("telegram_bot_token"))
-    chat_id = sanitize_telegram_chat_id(config.get("telegram_chat_id"))
-    if not bot_token or not chat_id:
-        return None
-    enriched_metadata = enrich_stop_metadata_with_sent_stats(conn, metadata)
-    signature = _build_stop_notification_signature(reason, enriched_metadata)
-    if _should_suppress_stop_notification(signature):
-        device_marker = (enriched_metadata or {}).get("device_id") or "unknown"
-        print(f"[TELEGRAM] 자동 중지 알림 중복으로 생략 (device={device_marker}, origin={origin})")
-        return {"sent": False, "suppressed": True, "metadata": enriched_metadata}
-    message = build_auto_stop_message(reason, origin, enriched_metadata, result)
-    try:
-        response = send_telegram_message(bot_token, chat_id, message)
-    except Exception as exc:
-        print(f"[TELEGRAM] 자동 중지 알림 발송 실패: {exc}")
-        return {"sent": False, "error": str(exc), "metadata": enriched_metadata}
-    _mark_stop_notification_sent(signature)
-    print(f"[TELEGRAM] 자동 중지 알림 발송 성공 (origin={origin})")
-    return {"sent": True, "response": response, "metadata": enriched_metadata}
-
-
 def handle_auto_stop(
     conn: sqlite3.Connection,
     reason: str,
@@ -2862,15 +2672,6 @@ def handle_auto_stop(
         device_id=device_id,
         job_types=job_types,
     )
-    notification: Optional[Dict[str, Any]] = None
-    if not suppress_notification:
-        notification = maybe_dispatch_telegram_auto_stop(
-            conn,
-            reason=reason,
-            origin=origin,
-            metadata=enriched_metadata,
-            result=result,
-        )
     payload = {
         "reason": reason,
         "origin": origin,
@@ -2881,8 +2682,6 @@ def handle_auto_stop(
         payload["device_id"] = device_id
     if job_types:
         payload["job_types"] = list(job_types)
-    if notification is not None:
-        payload["notification"] = notification
     return payload
 
 
@@ -4049,6 +3848,8 @@ def enqueue_imap_test(device_id: str, domain: str, payload: ImapTestRequest) -> 
         if not config_row:
             raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
         config_data = to_dict(config_row)
+        global_config = load_global_config(conn=conn)
+        bot_token, chat_id = extract_telegram_credentials(global_config)
         saved_password = config_data.get("imap_password") or ""
         use_saved = bool(payload.use_saved_password)
         password_value = (
@@ -4068,6 +3869,11 @@ def enqueue_imap_test(device_id: str, domain: str, payload: ImapTestRequest) -> 
             job_payload["password"] = password_value
         else:
             job_payload["use_saved_password"] = True
+        job_payload = attach_telegram_credentials(
+            job_payload,
+            bot_token=bot_token,
+            chat_id=chat_id,
+        )
         job = create_job(conn, device_id, normalized, "imap_test", job_payload)
         conn.commit()
     public_job = dict(job)
@@ -4094,6 +3900,8 @@ def enqueue_imap_fetch_latest(device_id: str, domain: str, payload: ImapFetchLat
         if not config_row:
             raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
         config_data = to_dict(config_row)
+        global_config = load_global_config(conn=conn)
+        bot_token, chat_id = extract_telegram_credentials(global_config)
         saved_password = config_data.get("imap_password") or ""
         use_saved = bool(payload.use_saved_password)
         password_value = (
@@ -4119,6 +3927,11 @@ def enqueue_imap_fetch_latest(device_id: str, domain: str, payload: ImapFetchLat
             job_payload["password"] = password_value
         else:
             job_payload["use_saved_password"] = True
+        job_payload = attach_telegram_credentials(
+            job_payload,
+            bot_token=bot_token,
+            chat_id=chat_id,
+        )
         job = create_job(conn, device_id, normalized, "imap_fetch_latest", job_payload)
         conn.commit()
     public_job = dict(job)
@@ -4149,6 +3962,7 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
         if not username_value:
             raise HTTPException(status_code=400, detail="IMAP 계정 ID가 설정되어 있지 않습니다.")
         global_config = load_global_config(conn=conn)
+        bot_token, chat_id = extract_telegram_credentials(global_config)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
@@ -4191,6 +4005,11 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
             "config": minimal_config,
             "username": username_value,
         }
+        job_payload = attach_telegram_credentials(
+            job_payload,
+            bot_token=bot_token,
+            chat_id=chat_id,
+        )
         job = create_job(conn, device_id, normalized, "imap_manual_check", job_payload)
         conn.commit()
     public_job = dict(job)
@@ -4328,6 +4147,7 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
             "SELECT id, active_domain FROM devices ORDER BY name COLLATE NOCASE",
         ).fetchall()
         global_config = load_global_config(conn=conn)
+        bot_token, chat_id = extract_telegram_credentials(global_config)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         for device_row in device_rows:
@@ -4348,12 +4168,17 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                 context=context,
                 random_generator=rng,
             )
+            job_payload = attach_telegram_credentials(
+                {"config": resolved_config},
+                bot_token=bot_token,
+                chat_id=chat_id,
+            )
             job = create_job(
                 conn,
                 device_id,
                 domain,
                 "batch_send",
-                {"config": resolved_config},
+                job_payload,
             )
             log_missing_substitutions(job, missing_tokens)
             created_jobs.append(job)
@@ -4373,6 +4198,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         global_config = load_global_config(conn=conn)
+        bot_token, chat_id = extract_telegram_credentials(global_config)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
@@ -4404,16 +4230,22 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         )
         substituted_rcpt = resolved_rcpt or rcpt_to
         force_imap_check = bool(payload.force_imap_check)
+        base_payload = {
+            "rcpt_to": substituted_rcpt,
+            "config": resolved_config,
+            "force_imap_check": force_imap_check,
+        }
+        job_payload = attach_telegram_credentials(
+            base_payload,
+            bot_token=bot_token,
+            chat_id=chat_id,
+        )
         job = create_job(
             conn,
             device_id,
             domain,
             "single_send",
-            {
-                "rcpt_to": substituted_rcpt,
-                "config": resolved_config,
-                "force_imap_check": force_imap_check,
-            },
+            job_payload,
         )
         conn.commit()
     log_missing_substitutions(job, missing_tokens)
@@ -4428,6 +4260,7 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         global_config = load_global_config(conn=conn)
+        bot_token, chat_id = extract_telegram_credentials(global_config)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
@@ -4441,15 +4274,20 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             substitution_rules,
             lock_mode,
             lock_snapshot,
-            context=context,
-            random_generator=rng,
+                context=context,
+                random_generator=rng,
+            )
+        job_payload = attach_telegram_credentials(
+            {"config": resolved_config},
+            bot_token=bot_token,
+            chat_id=chat_id,
         )
         job = create_job(
             conn,
             device_id,
             domain,
             "batch_send",
-            {"config": resolved_config},
+            job_payload,
         )
         conn.commit()
     log_missing_substitutions(job, missing_tokens)
@@ -5238,12 +5076,6 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     }
         device_stop_result: Optional[Dict[str, Any]] = None
         if device_stop_context is not None:
-            if device_stop_context.get("notify_before"):
-                device_stop_context["pre_notification"] = maybe_dispatch_telegram_pre_stop(
-                    conn,
-                    reason=device_stop_context["reason"],
-                    metadata=device_stop_context.get("metadata"),
-                )
             device_stop_result = cancel_active_sends(
                 conn,
                 device_stop_context["reason"],
@@ -5251,16 +5083,6 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             )
             print(f"[IMAP] 디바이스 중지: {device_stop_context['reason']}")
         auto_stop_result: Optional[Dict[str, Any]] = None
-        if (
-            auto_stop_context is not None
-            and auto_stop_context.get("notify_before")
-        ):
-            pre_notification = maybe_dispatch_telegram_pre_stop(
-                conn,
-                reason=auto_stop_context["reason"],
-                metadata=auto_stop_context.get("metadata"),
-            )
-            auto_stop_context["pre_notification"] = pre_notification
         if auto_stop_context is not None:
             auto_stop_result = handle_auto_stop(
                 conn,
