@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.73"
+APP_VERSION = "0.0.74"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -48,6 +48,9 @@ LOG_DIR = BASE_DIR / "logs"
 DOMAINS = ("naver", "daum")
 EMAIL_STATUSES = ("pending", "reserved", "sent", "block", "failed", "nouser", "removed")
 SMTP_RECIPIENT_LIMIT = 25
+TELEGRAM_API_BASE = "https://api.telegram.org"
+TELEGRAM_TIMEOUT_SECONDS = 5.0
+TELEGRAM_SUPPRESSION_WINDOW_SECONDS = 90.0
 
 THROTTLE_MARKER_MESSAGES = {
     "550 5.7.2": "네이버 '550 5.7.2' 응답 감지",
@@ -99,6 +102,8 @@ DEFAULT_CONFIG: Dict[str, object] = {
     "stop_schedule": {},
     "imap_settings": {},
     "telnet_debug_mode": False,
+    "telegram_bot_token": "",
+    "telegram_chat_id": "",
 }
 
 IMAP_ALLOWED_LATENCY_MIN_SECONDS = 5
@@ -159,6 +164,30 @@ DOMAIN_CONFIG_DEFAULTS = {
 
 EMAIL_PATTERN = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z0-9-]{2,}")
 SQLITE_HEADER = b"SQLite format 3\x00"
+
+
+def send_telegram_message(bot_token: str, chat_id: str, text: str, *, timeout: float = TELEGRAM_TIMEOUT_SECONDS) -> bool:
+    token = (bot_token or "").strip()
+    target_chat = (chat_id or "").strip()
+    message = (text or "").strip()
+    if not token or not target_chat or not message:
+        return False
+    url = f"{TELEGRAM_API_BASE}/bot{token}/sendMessage"
+    payload = {
+        "chat_id": target_chat,
+        "text": message,
+        "disable_web_page_preview": True,
+    }
+    try:
+        response = requests.post(url, json=payload, timeout=timeout)
+        response.raise_for_status()
+        data = response.json()
+        return bool(data.get("ok"))
+    except requests.RequestException as exc:  # type: ignore[attr-defined]
+        print(f"[TELEGRAM] 전송 실패: {exc}")
+    except ValueError:
+        print("[TELEGRAM] 응답 파싱 실패")
+    return False
 
 
 def load_config() -> Dict[str, object]:
@@ -604,6 +633,11 @@ class MailClient:
         self._report_flush_in_progress: bool = False
         self._report_flush_thread: Optional[threading.Thread] = None
         self._noncritical_report_failures: int = 0
+        self.telegram_bot_token = str(config.get("telegram_bot_token") or "").strip()
+        self.telegram_chat_id = str(config.get("telegram_chat_id") or "").strip()
+        self._stop_notification_cache: Dict[str, float] = {}
+        self._stop_notification_lock = threading.Lock()
+        self._stop_notification_window = TELEGRAM_SUPPRESSION_WINDOW_SECONDS
         raw_sequences = config.get("sent_sequences")
         if not isinstance(raw_sequences, dict):
             raw_sequences = {}
@@ -987,9 +1021,13 @@ class MailClient:
         snapshot["sent_sequences"] = self.sent_sequences
         snapshot["imap_settings"] = self._serialize_imap_settings()
         snapshot["telnet_debug_mode"] = self.telnet_debug_mode
+        snapshot["telegram_bot_token"] = self.telegram_bot_token
+        snapshot["telegram_chat_id"] = self.telegram_chat_id
         save_config(snapshot)
         self.config["sent_sequences"] = self.sent_sequences
         self.config["imap_settings"] = snapshot["imap_settings"]
+        self.config["telegram_bot_token"] = self.telegram_bot_token
+        self.config["telegram_chat_id"] = self.telegram_chat_id
         self._sequence_dirty.clear()
         self._imap_settings_dirty.clear()
         self._last_sequence_flush = time.monotonic()
@@ -1046,6 +1084,163 @@ class MailClient:
                 "last_threshold_multiple": last_multiple,
             }
         return serialized
+
+    # ------------------------------------------------------------------ #
+    # 텔레그램 알림 유틸
+    # ------------------------------------------------------------------ #
+    def _update_job_notification_context(self, payload: Dict[str, object]) -> None:
+        if not isinstance(payload, dict):
+            return
+        token = str(payload.get("telegram_bot_token") or "").strip()
+        chat = str(payload.get("telegram_chat_id") or "").strip()
+        updated = False
+        if token and token != self.telegram_bot_token:
+            self.telegram_bot_token = token
+            self.config["telegram_bot_token"] = token
+            updated = True
+        if chat and chat != self.telegram_chat_id:
+            self.telegram_chat_id = chat
+            self.config["telegram_chat_id"] = chat
+            updated = True
+        if updated:
+            # 저장은 이후 persist 시점에 함께 처리된다.
+            pass
+
+    def _get_telegram_credentials(self) -> Optional[Tuple[str, str]]:
+        token = (self.telegram_bot_token or "").strip()
+        chat = (self.telegram_chat_id or "").strip()
+        if token and chat:
+            return token, chat
+        return None
+
+    @staticmethod
+    def _simplify_stop_reason(reason: Optional[str]) -> str:
+        base = (reason or "").strip()
+        if not base:
+            return "사유 정보 없음"
+        if ":" in base:
+            base = base.split(":", 1)[0].strip()
+        marker = " - 디바이스"
+        if marker in base:
+            base = base.split(marker, 1)[0].strip()
+        return base or "사유 정보 없음"
+
+    def _stop_notification_signature(
+        self,
+        simplified_reason: str,
+        domain: Optional[str],
+        current_sent: int,
+        total_sent: int,
+    ) -> str:
+        device_id = (self.device_id or "").strip() or "-"
+        domain_part = (domain or "-").strip() or "-"
+        base_key = f"{device_id}:{simplified_reason or '-'}"
+        return "|".join(
+            [
+                base_key,
+                device_id,
+                domain_part,
+                simplified_reason or "-",
+                str(current_sent),
+                str(total_sent),
+            ]
+        )
+
+    def _build_stop_notification_message(
+        self,
+        simplified_reason: str,
+        *,
+        device_label: str,
+        domain: Optional[str],
+        current_sent: int,
+        total_sent: int,
+        send_type: Optional[str],
+        failure_action: Optional[str],
+    ) -> str:
+        now_local = datetime.now().astimezone()
+        date_line = now_local.strftime("%Y-%m-%d")
+        time_line = now_local.strftime("%H:%M:%S %Z")
+        domain_label = DOMAIN_LABELS.get((domain or "").lower(), domain or "-") if domain else "-"
+        lines = [
+            "[MailSender] 중지안내",
+            f"사유: {simplified_reason}",
+            f"디바이스: {device_label}",
+            f"도메인: {domain_label}",
+            f"날짜: {date_line}",
+            f"시각: {time_line}",
+            f"Sent: 현재 성공 {current_sent}건 / 누적 성공 {total_sent}건",
+        ]
+        if send_type:
+            lines.append(f"컨텍스트: {send_type}")
+        if failure_action:
+            lines.append(f"대응: {failure_action}")
+        return "\n".join(lines)
+
+    def _should_suppress_stop_notification(self, signature: str) -> bool:
+        if not signature:
+            return False
+        now = time.monotonic()
+        with self._stop_notification_lock:
+            last_sent = self._stop_notification_cache.get(signature)
+            if last_sent is None:
+                return False
+            if now - last_sent <= self._stop_notification_window:
+                return True
+            self._stop_notification_cache.pop(signature, None)
+            return False
+
+    def _mark_stop_notification_sent(self, signature: str) -> None:
+        if not signature:
+            return
+        with self._stop_notification_lock:
+            self._stop_notification_cache[signature] = time.monotonic()
+
+    def _notify_stop_event(
+        self,
+        *,
+        reason: str,
+        domain: Optional[str],
+        current_sent: Optional[int],
+        total_sent: Optional[int],
+        send_type: Optional[str],
+        failure_action: Optional[str],
+    ) -> None:
+        credentials = self._get_telegram_credentials()
+        if not credentials:
+            return
+        try:
+            current_value = max(0, int(current_sent or 0))
+        except (TypeError, ValueError):
+            current_value = 0
+        try:
+            total_value = max(0, int(total_sent or 0))
+        except (TypeError, ValueError):
+            total_value = 0
+        simplified_reason = self._simplify_stop_reason(reason)
+        signature = self._stop_notification_signature(simplified_reason, domain, current_value, total_value)
+        if self._should_suppress_stop_notification(signature):
+            print("[TELEGRAM] 중지 알림 중복으로 생략")
+            return
+        device_label = (self.device_name or self.device_id or "알 수 없음").strip() or "알 수 없음"
+        message = self._build_stop_notification_message(
+            simplified_reason,
+            device_label=device_label,
+            domain=domain,
+            current_sent=current_value,
+            total_sent=total_value,
+            send_type=send_type,
+            failure_action=failure_action,
+        )
+        try:
+            sent = send_telegram_message(credentials[0], credentials[1], message)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[TELEGRAM] 중지 알림 발송 예외: {exc}")
+            sent = False
+        if sent:
+            self._mark_stop_notification_sent(signature)
+            print("[TELEGRAM] 중지 알림 발송 완료")
+        else:
+            print("[TELEGRAM] 중지 알림 발송 실패")
 
     def _collect_imap_reports(self) -> List[Dict[str, object]]:
         with self._imap_lock:
@@ -2076,6 +2271,7 @@ class MailClient:
         sent_at_value = sent_at
         sent_at_iso = to_utc_iso(sent_at_value)
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
+        notify_before_stop = sanitize_bool_flag(settings.get("notify_before_stop_all"))
         threshold_value = sanitize_imap_sent_threshold(
             sent_threshold if sent_threshold is not None else settings.get("sent_threshold"),
             default=IMAP_DEFAULT_SENT_THRESHOLD,
@@ -2247,6 +2443,25 @@ class MailClient:
                 reason_components.append(f"시도 기록: {', '.join(history_summaries)}")
 
             combined_reason = " · ".join([component for component in reason_components if component])
+
+            if trigger_stop:
+                should_notify = failure_action_value == "stop_all" or (
+                    failure_action_value == "stop_device" and notify_before_stop
+                )
+                if should_notify:
+                    notice_current = sent_window_count if sent_window_count is not None else self._get_sent_counter(
+                        normalized
+                    )
+                    notice_total = self.sent_sequences.get(normalized, 0)
+                    notification_reason = combined_reason or reason_text or context_reason or "IMAP 체크 실패"
+                    self._notify_stop_event(
+                        reason=notification_reason,
+                        domain=normalized,
+                        current_sent=notice_current,
+                        total_sent=notice_total,
+                        send_type=send_type,
+                        failure_action=failure_action_value,
+                    )
 
             report = {
                 "domain": normalized,
@@ -3192,6 +3407,7 @@ class MailClient:
         domain = job.get("domain")
         payload = job.get("payload") or {}
         job_id = str(job.get("job_id"))
+        self._update_job_notification_context(payload)
         print(f"[작업 수신] {job_type} (ID: {job_id})", flush=True)
         if job_type == "inject_file":
             return self.handle_inject(domain, payload, job_id)
@@ -4876,6 +5092,15 @@ class MailClient:
             final_message = format_summary(headline, summary)
             error_text = stop_reason or "사용자 요청으로 발송을 중단했습니다."
             print(f"[배치 발송] {domain_label} · {final_message}")
+            if stop_reason and "자동 정지" in stop_reason:
+                self._notify_stop_event(
+                    reason=stop_reason,
+                    domain=normalized,
+                    current_sent=current_sent_counter,
+                    total_sent=self.sent_sequences.get(normalized, 0),
+                    send_type="schedule",
+                    failure_action="schedule",
+                )
             self._maybe_flush_sent_sequences(force=True)
             return JobResult(
                 job_id=job_id,
