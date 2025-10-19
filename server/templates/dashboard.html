@@ -6990,6 +6990,7 @@ async function fetchJSON(url, options = {}) {
   const response = await fetch(url, {
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
+    cache: "no-store",
     ...options,
   });
   const contentType = response.headers.get("Content-Type") || "";
