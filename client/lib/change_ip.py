@@ -12,11 +12,15 @@ def get_public_ipv4():
     except requests.RequestException:
         return None
 
-def change_mobile_ip_at_phone():
+def change_mobile_ip_at_phone(max_cycles=None):
     """모바일 아이피를 변경하는 함수
 
+    Args:
+        max_cycles (int, optional): 비행기 모드 토글을 반복할 최대 횟수.
+            지정하지 않으면 성공할 때까지 계속 시도합니다.
+
     Returns:
-        str: 변경된 IP 주소
+        str | None: 성공 시 변경된 IP 주소, 제한 횟수를 초과하면 None
     """
     def toggle_airplane_mode(state):
         try:
@@ -60,32 +64,39 @@ def change_mobile_ip_at_phone():
     except Exception as e:
         print(f"정보 로드 오류: {e}")
     
-    # 비행기 모드 활성화 → 비활성화 → 데이터 리셋
-    print("🔄 비행기모드 전환중...")
-    print(f"   📱 디바이스: {device_name}")
-    print(f"   ⏱ 알박기 간격: {albakgi_interval}")
-    toggle_airplane_mode('on')
-    time.sleep(3)
-    toggle_airplane_mode('off')
-    time.sleep(4)
-    reset_data()
-    print("🔄 모바일 IP 변경 시도 중...")
-
-    # IP를 받아올 수 있을 때까지 최대 30초 대기
     max_attempts = 15
-    attempt = 0
-    while attempt < max_attempts:
-        new_ip = get_public_ipv4()
-        if new_ip:
-            print(f"변경된 IP: {new_ip}")
-            return new_ip
-            
-        print(f"IP 확인 대기 중... ({attempt + 1}/{max_attempts})")
-        time.sleep(2)
-        attempt += 1
-    
-    print("❌ IP 확인 실패: 시간 초과")
-    return None
+    cycle = 0
+
+    while True:
+        cycle += 1
+        print("🔄 비행기모드 전환중...")
+        if cycle == 1:
+            print(f"   📱 디바이스: {device_name}")
+            print(f"   ⏱ 알박기 간격: {albakgi_interval}")
+        else:
+            print(f"   🔁 재시도 사이클: {cycle}")
+
+        toggle_airplane_mode('on')
+        time.sleep(3)
+        toggle_airplane_mode('off')
+        time.sleep(4)
+        reset_data()
+        print("🔄 모바일 IP 변경 시도 중...")
+
+        for attempt in range(1, max_attempts + 1):
+            new_ip = get_public_ipv4()
+            if new_ip:
+                print(f"변경된 IP: {new_ip}")
+                return new_ip
+
+            print(f"IP 확인 대기 중... ({attempt}/{max_attempts})")
+            time.sleep(2)
+
+        if max_cycles is not None and cycle >= max_cycles:
+            print("❌ IP 확인 실패: 최대 비행기 모드 재시도 횟수를 초과했습니다.")
+            return None
+
+        print("⚠️ IP 확인 실패: 비행기 모드를 다시 토글합니다.")
 
 if __name__ == "__main__":
     change_mobile_ip_at_phone()

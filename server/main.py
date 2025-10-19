@@ -141,6 +141,16 @@ def ensure_storage_root() -> None:
 ensure_storage_root()
 
 
+def _format_log_prefix() -> str:
+    return datetime.now().strftime("[%Y-%m-%d %H:%M:%S]")
+
+
+def log_console(message: Any, *, flush: bool = False) -> None:
+    """서버 표준 출력에 시간을 접두어로 붙여 기록한다."""
+    text = str(message)
+    print(f"{_format_log_prefix()} {text}", flush=flush)
+
+
 class HeartbeatAccessFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         try:
@@ -181,13 +191,13 @@ def _log_device_connection_event(
     if normalized_status == "connected":
         ip_text = f" (IP: {public_ip})" if public_ip else ""
         if previous_status != "connected":
-            print(f"[연결] 디바이스 {normalized_label} 온라인{ip_text}")
+            log_console(f"[연결] 디바이스 {normalized_label} 온라인{ip_text}")
         DEVICE_CONNECTION_STATES[device_id] = "connected"
         if public_ip is not None:
             DEVICE_LAST_IP[device_id] = public_ip
     else:
         if previous_status != "disconnected":
-            print(f"[연결] 디바이스 {normalized_label} 오프라인")
+            log_console(f"[연결] 디바이스 {normalized_label} 오프라인")
         DEVICE_CONNECTION_STATES[device_id] = "disconnected"
 
 
@@ -1904,7 +1914,7 @@ def remove_device(device_id: str) -> None:
     DEVICE_CONNECTION_STATES.pop(device_id, None)
     DEVICE_LAST_IP.pop(device_id, None)
     _log_device_connection_event(device_id, device_label or device_id, "disconnected", public_ip)
-    print(f"[연결] 디바이스 {(device_label or device_id)} 등록 해제")
+    log_console(f"[연결] 디바이스 {(device_label or device_id)} 등록 해제")
 
 
 def get_next_file_version(conn: sqlite3.Connection, device_id: str, domain: str) -> int:
@@ -2025,7 +2035,7 @@ def build_substitution_context(rules: List[Dict[str, Any]]) -> Dict[str, Dict[st
 
 
 def log_substitution_error(message: str) -> None:
-    print(f"[SUBSTITUTION] {message}")
+    log_console(f"[SUBSTITUTION] {message}")
 
 
 def _parse_random_length(spec: str) -> Tuple[int, int]:
@@ -2285,7 +2295,7 @@ def log_missing_substitutions(job: Dict[str, Any], missing: Iterable[str]) -> No
     domain = job.get("domain")
     device_id = job.get("device_id")
     missing_str = ", ".join(deduped)
-    print(
+    log_console(
         f"[SUBSTITUTION] 미정의 변수({missing_str}) · job={job_id} type={job_type} device={device_id} domain={domain}"
     )
 
@@ -3297,7 +3307,7 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
     field_log = ", ".join(unique_fields) if unique_fields else "none"
     schedule_mode = "on" if schedule_state["enabled"] else "off"
     schedule_time = schedule_state["time"] or "-"
-    print(
+    log_console(
         f"[{updated_at}] Applied global config (fields={field_log}, devices={device_count}, updates={update_count}) "
         f"schedule={schedule_mode}({schedule_time})"
     )
@@ -3620,7 +3630,7 @@ def send_global_telegram_test(payload: TelegramTestRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail=str(exc))
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=f"텔레그램 발송 실패: {exc}")
-    print("[TELEGRAM] 테스트 메시지를 발송했습니다.")
+    log_console("[TELEGRAM] 테스트 메시지를 발송했습니다.")
     return {
         "ok": True,
         "message": "텔레그램 메시지를 발송했습니다.",
@@ -4826,7 +4836,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 schedule_auto_stop_payload.get("result", {}) if schedule_auto_stop_payload else {}
             )
             if schedule_auto_stop_result.get("cancelled") or schedule_auto_stop_result.get("cancel_requested"):
-                print(f"[SCHEDULE] 디바이스 {device_id} 자동 중지: {schedule_reason}")
+                log_console(f"[SCHEDULE] 디바이스 {device_id} 자동 중지: {schedule_reason}")
         auto_stop_context: Optional[Dict[str, Any]] = None
         device_stop_context: Optional[Dict[str, Any]] = None
         job_type_cache: Dict[str, str] = {}
@@ -4911,7 +4921,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 reason_parts.append(reason_text)
             reason_text = " · ".join(part for part in reason_parts if part)
             if status_value == "network_error":
-                print(
+                log_console(
                     "[IMAP] 네트워크 오류 보고 · 디바이스 {} · 도메인 {} · 사유 {}".format(
                         device_id,
                         normalized_domain,
@@ -5081,7 +5091,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 device_stop_context["reason"],
                 device_id=device_id,
             )
-            print(f"[IMAP] 디바이스 중지: {device_stop_context['reason']}")
+            log_console(f"[IMAP] 디바이스 중지: {device_stop_context['reason']}")
         auto_stop_result: Optional[Dict[str, Any]] = None
         if auto_stop_context is not None:
             auto_stop_result = handle_auto_stop(
@@ -5091,7 +5101,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 metadata=auto_stop_context.get("metadata"),
                 suppress_notification=bool(auto_stop_context.get("suppress_notification")),
             )
-            print(f"[IMAP] 자동 전체 중지: {auto_stop_context['reason']}")
+            log_console(f"[IMAP] 자동 전체 중지: {auto_stop_context['reason']}")
         dispatched_jobs: List[JobDispatchPayload] = []
         for report in payload.job_reports:
             updated_row = update_job_status(
