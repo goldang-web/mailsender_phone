@@ -3615,6 +3615,35 @@ class MailClient:
             self._download_in_progress = False
 
         total_records = self._count_emails_in_db(target_path)
+        result_payload = {
+            "bytes": downloaded_bytes,
+            "version": version,
+            "filename": filename,
+            "records": inserted_count if inserted_count >= 0 else None,
+            "total_records": total_records,
+            "expected_bytes": expected_bytes,
+            "header_bytes": header_bytes,
+            "payload_bytes": payload_bytes,
+        }
+
+        anomaly_reason: Optional[str] = None
+        if total_records is None:
+            anomaly_reason = "emails 테이블을 읽을 수 없습니다."
+        elif total_records == 0 and inserted_count < 0:
+            anomaly_reason = "변환이 생략되었으나 emails 레코드가 비어 있습니다."
+
+        if anomaly_reason:
+            result_payload["anomaly"] = anomaly_reason
+            print(f"[오류] Inject 완료 후 이상 상태 감지: {anomaly_reason}")
+            failure_message = (
+                f"{DOMAIN_LABELS.get(normalized, normalized)} DB 동기화 실패 ({anomaly_reason})"
+            )
+            return JobResult(
+                job_id=job_id,
+                status="failed",
+                message=failure_message,
+                result=result_payload,
+            )
 
         summary_segments = [f"[Inject 완료] {filename} -> {target_path}"]
         if inserted_count >= 0:
@@ -3628,17 +3657,6 @@ class MailClient:
             message += f" ({inserted_count}건 변환)"
         if total_records is not None:
             message += f" · 총 {total_records}건"
-
-        result_payload = {
-            "bytes": downloaded_bytes,
-            "version": version,
-            "filename": filename,
-            "records": inserted_count if inserted_count >= 0 else None,
-            "total_records": total_records,
-            "expected_bytes": expected_bytes,
-            "header_bytes": header_bytes,
-            "payload_bytes": payload_bytes,
-        }
 
         return JobResult(
             job_id=job_id,
@@ -5527,30 +5545,67 @@ class MailClient:
             except OSError:
                 return False
 
-        if _looks_like_sqlite_from_source():
+        def _check_existing_sqlite() -> Tuple[bool, Optional[int], Optional[str]]:
             try:
-                with sqlite3.connect(db_path) as conn:
-                    conn.execute("PRAGMA schema_version")
-                return -1
+                with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as conn:
+                    conn.row_factory = sqlite3.Row
+                    has_emails = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='emails' LIMIT 1"
+                    ).fetchone()
+                    if not has_emails:
+                        return False, None, "emails 테이블이 존재하지 않습니다."
+                    row = conn.execute("SELECT COUNT(*) AS cnt FROM emails").fetchone()
+                    count = (
+                        row["cnt"]
+                        if isinstance(row, sqlite3.Row)
+                        else (row[0] if row else 0)
+                    )
+                    if count and count > 0:
+                        return True, int(count), None
+                    return False, 0, "emails 테이블이 비어 있습니다."
             except sqlite3.DatabaseError as exc:
-                raise ValueError(f"SQLite DB 형식이지만 열 수 없습니다: {exc}") from exc
+                return False, None, f"SQLite 검사 실패: {exc}"
 
-        try:
-            with sqlite3.connect(db_path) as conn:
-                conn.execute("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1")
-            return -1
-        except sqlite3.DatabaseError:
-            data = original_bytes
-            if data is None:
-                try:
-                    data = db_path.read_bytes()
-                except OSError as exc:
-                    raise ValueError(f"텍스트 파일을 읽을 수 없습니다: {exc}") from exc
-            emails = self._extract_emails_from_bytes(data)
-            if not emails:
-                raise ValueError("텍스트에서 이메일을 추출하지 못했습니다.")
-            self._build_sqlite_from_emails(db_path, emails, source_name)
-            return len(emails)
+        force_rebuild = False
+        rebuild_reason: Optional[str] = None
+
+        if _looks_like_sqlite_from_source():
+            is_valid, existing_count, reason = _check_existing_sqlite()
+            if is_valid:
+                return -1
+            force_rebuild = True
+            rebuild_reason = reason or "SQLite로 감지됐지만 유효하지 않습니다."
+            if existing_count == 0:
+                print(f"[주의] SQLite 감지 후 emails 레코드가 없어 재변환을 시도합니다: {source_name}")
+            else:
+                print(
+                    f"[주의] SQLite 감지 후 스키마 검증에 실패해 재변환을 시도합니다 ({source_name}): {rebuild_reason}"
+                )
+        else:
+            try:
+                is_valid, _, _ = _check_existing_sqlite()
+                if is_valid:
+                    return -1
+            except OSError:
+                pass
+
+        if not force_rebuild:
+            # 여기까지 왔다는 것은 SQLite가 아니라고 판단된 경우
+            pass
+        else:
+            print(f"[Inject] 텍스트 재변환을 강제 실행합니다 ({rebuild_reason or '원인 불명'})")
+
+        data = original_bytes
+        if data is None:
+            try:
+                data = db_path.read_bytes()
+            except OSError as exc:
+                raise ValueError(f"텍스트 파일을 읽을 수 없습니다: {exc}") from exc
+        emails = self._extract_emails_from_bytes(data)
+        if not emails:
+            raise ValueError("텍스트에서 이메일을 추출하지 못했습니다.")
+        self._build_sqlite_from_emails(db_path, emails, source_name)
+        return len(emails)
 
     def _extract_emails_from_bytes(self, data: bytes) -> List[str]:
         candidates = ["utf-8", "euc-kr", "cp949", "latin-1"]
