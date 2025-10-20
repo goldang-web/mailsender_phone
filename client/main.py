@@ -39,7 +39,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.82"
+APP_VERSION = "0.0.83"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -1689,6 +1689,15 @@ class MailClient:
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
         username_value = normalize_imap_string(settings.get("username"))
         rcpt_username = normalize_imap_recipient(normalized, username_value)
+        password_value = settings.get("password") or ""
+        purge_before_check_enabled = sanitize_bool_flag(settings.get("purge_before_check"))
+        purge_context: Optional[Dict[str, object]] = None
+        if purge_before_check_enabled and rcpt_username and password_value:
+            purge_context = self._run_imap_precheck_purge(
+                domain=normalized,
+                username=rcpt_username,
+                password=password_value,
+            )
         provided_counter = counter_current if counter_current is not None else sent_window_count
         if counter_mode == "manual":
             base_counter = self._get_sent_counter(normalized)
@@ -1785,6 +1794,7 @@ class MailClient:
             sent_threshold=threshold_value,
             smtp_context=smtp_context,
             probe_result=probe_result,
+            precheck_purge=purge_context,
         )
         return ImapGuardOutcome(
             probe=probe_result,
@@ -1793,6 +1803,103 @@ class MailClient:
             sent_threshold=threshold_value,
             scheduled=bool(future),
         )
+
+    def _run_imap_precheck_purge(
+        self,
+        *,
+        domain: str,
+        username: str,
+        password: str,
+        folder: str = "Junk",
+    ) -> Dict[str, object]:
+        normalized = (domain or "naver").lower()
+
+        def _coerce_int(value: object) -> Optional[int]:
+            try:
+                if value is None:
+                    return None
+                if isinstance(value, bool):
+                    return int(value)
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _coerce_float(value: object) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        result: Dict[str, object] = {
+            "attempted": True,
+            "success": False,
+            "reason": "",
+            "total_count": None,
+            "deleted_count": None,
+            "remaining_count": None,
+            "elapsed_seconds": None,
+            "folder": folder,
+        }
+
+        self._log_imap_console(
+            f"확인용 메일 발송 전에 스팸함 비우기 실행 · 폴더 {folder}",
+            domain=normalized,
+        )
+        try:
+            summary = purge_imap_folder(username, password, folder=folder)
+        except Exception as exc:  # pylint: disable=broad-except
+            reason_text = f"예외: {exc}"
+            self._log_imap_console(
+                f"확인용 메일 발송 전 스팸함 비우기 실패 - {reason_text}",
+                domain=normalized,
+            )
+            result["reason"] = reason_text
+            return result
+
+        success = bool(summary.get("success"))
+        reason_text = str(summary.get("reason") or "")
+        total_count = _coerce_int(summary.get("total_count", summary.get("total")))
+        deleted_count = _coerce_int(summary.get("deleted_count", summary.get("deleted")))
+        remaining_count = _coerce_int(summary.get("remaining_count", summary.get("remaining")))
+        elapsed_seconds = _coerce_float(summary.get("elapsed_seconds", summary.get("elapsed")))
+
+        result.update(
+            {
+                "success": success,
+                "reason": reason_text,
+                "total_count": total_count,
+                "deleted_count": deleted_count,
+                "remaining_count": remaining_count,
+                "elapsed_seconds": elapsed_seconds,
+            }
+        )
+
+        detail_parts: List[str] = []
+        if total_count is not None:
+            detail_parts.append(f"총 {total_count}건")
+        if deleted_count is not None:
+            detail_parts.append(f"삭제 {deleted_count}건")
+        if remaining_count is not None:
+            detail_parts.append(f"남은 {remaining_count}건")
+        if elapsed_seconds is not None:
+            detail_parts.append(f"소요 {elapsed_seconds:.1f}s")
+
+        if success:
+            message = "확인용 메일 발송 전 스팸함 비우기 완료"
+            if detail_parts:
+                message = f"{message} · {' · '.join(detail_parts)}"
+            self._log_imap_console(message, domain=normalized)
+        else:
+            reason_label = reason_text or "사유 정보 없음"
+            detail = " · ".join(detail_parts) if detail_parts else ""
+            combined = f"확인용 메일 발송 전 스팸함 비우기 실패 - {reason_label}"
+            if detail:
+                combined = f"{combined} · {detail}"
+            self._log_imap_console(combined, domain=normalized)
+
+        return result
 
     def _guard_sent_threshold(
         self,
@@ -2525,6 +2632,7 @@ class MailClient:
         sent_threshold: Optional[int] = None,
         smtp_context: Optional[Dict[str, object]] = None,
         probe_result: Optional[SentProbeResult] = None,
+        precheck_purge: Optional[Dict[str, object]] = None,
     ) -> Optional[Future]:
         normalized = (domain or "").lower()
         if normalized != "naver":
@@ -2610,8 +2718,31 @@ class MailClient:
             ]
             if sent_window_count is not None and sent_window_count > 0:
                 components.append(f"Sent {sent_window_count}건")
+            purge_context = precheck_purge if isinstance(precheck_purge, dict) else None
+            purge_attempted = bool(purge_context and purge_context.get("attempted"))
+            purge_success: Optional[bool] = purge_context.get("success") if purge_attempted else None
+            purge_reason_text = str(purge_context.get("reason") or "") if purge_attempted else ""
+            purge_total_count: Optional[int] = (
+                _safe_int(purge_context.get("total_count")) if purge_attempted else None
+            )
+            purge_deleted_count: Optional[int] = (
+                _safe_int(purge_context.get("deleted_count")) if purge_attempted else None
+            )
+            purge_remaining_count: Optional[int] = (
+                _safe_int(purge_context.get("remaining_count")) if purge_attempted else None
+            )
+            purge_elapsed_seconds: Optional[float] = (
+                _safe_float(purge_context.get("elapsed_seconds")) if purge_attempted else None
+            )
+            purge_folder = str(purge_context.get("folder") or "Junk") if purge_context else "Junk"
+
             if purge_before_check_enabled:
-                components.append("스팸함 비우기 선행")
+                if purge_attempted and purge_success:
+                    components.append("스팸함 비우기 선행 완료")
+                elif purge_attempted:
+                    components.append("스팸함 비우기 선행 실패")
+                else:
+                    components.append("스팸함 비우기 선행 미실행")
             self._log_imap_console(" · ".join(components), domain=normalized)
 
             probe_mail_sent = bool(passed_probe_result and passed_probe_result.success)
@@ -2630,58 +2761,6 @@ class MailClient:
             ip_after_change = passed_probe_result.ip_after_change if passed_probe_result else None
             throttle_marker = passed_probe_result.throttle_marker if passed_probe_result else None
             throttle_detail = passed_probe_result.throttle_detail if passed_probe_result else None
-
-            purge_attempted = False
-            purge_success: Optional[bool] = None
-            purge_reason_text = ""
-            purge_total_count: Optional[int] = None
-            purge_deleted_count: Optional[int] = None
-            purge_remaining_count: Optional[int] = None
-            purge_elapsed_seconds: Optional[float] = None
-            purge_folder = "Junk"
-            if purge_before_check_enabled:
-                purge_attempted = True
-                self._log_imap_console(
-                    f"IMAP 확인 전 스팸함 비우기 실행 · 폴더 {purge_folder}",
-                    domain=normalized,
-                )
-                try:
-                    purge_summary = purge_imap_folder(username, password, folder=purge_folder)
-                except Exception as exc:  # pylint: disable=broad-except
-                    purge_success = False
-                    purge_reason_text = f"예외: {exc}"
-                    self._log_imap_console(
-                        f"IMAP 확인 전 스팸함 비우기 실패 - {purge_reason_text}",
-                        domain=normalized,
-                    )
-                else:
-                    purge_success = bool(purge_summary.get("success"))
-                    purge_reason_text = str(purge_summary.get("reason") or "")
-                    purge_total_count = _safe_int(purge_summary.get("total_count", purge_summary.get("total")))
-                    purge_deleted_count = _safe_int(purge_summary.get("deleted_count", purge_summary.get("deleted")))
-                    purge_remaining_count = _safe_int(purge_summary.get("remaining_count", purge_summary.get("remaining")))
-                    purge_elapsed_seconds = _safe_float(purge_summary.get("elapsed_seconds", purge_summary.get("elapsed")))
-                    detail_parts: List[str] = []
-                    if purge_total_count is not None:
-                        detail_parts.append(f"총 {purge_total_count}건")
-                    if purge_deleted_count is not None:
-                        detail_parts.append(f"삭제 {purge_deleted_count}건")
-                    if purge_remaining_count is not None:
-                        detail_parts.append(f"남은 {purge_remaining_count}건")
-                    if purge_elapsed_seconds is not None:
-                        detail_parts.append(f"소요 {purge_elapsed_seconds:.1f}s")
-                    if purge_success:
-                        message = "IMAP 확인 전 스팸함 비우기 완료"
-                        if detail_parts:
-                            message = f"{message} · {' · '.join(detail_parts)}"
-                        self._log_imap_console(message, domain=normalized)
-                    else:
-                        reason_label = purge_reason_text or "사유 정보 없음"
-                        detail = " · ".join(detail_parts) if detail_parts else ""
-                        combined = f"IMAP 확인 전 스팸함 비우기 실패 - {reason_label}"
-                        if detail:
-                            combined = f"{combined} · {detail}"
-                        self._log_imap_console(combined, domain=normalized)
 
             if delay_seconds > 0:
                 time.sleep(delay_seconds)

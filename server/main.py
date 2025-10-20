@@ -5562,11 +5562,11 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     except (TypeError, ValueError):
                         pass
                 if purge_success_value is True:
-                    purge_label = "체크 전 스팸함 비우기 성공"
+                    purge_label = "확인용 발송 전 스팸함 비우기 성공"
                 elif purge_success_value is False:
-                    purge_label = "체크 전 스팸함 비우기 실패"
+                    purge_label = "확인용 발송 전 스팸함 비우기 실패"
                 else:
-                    purge_label = "체크 전 스팸함 비우기 실행"
+                    purge_label = "확인용 발송 전 스팸함 비우기 실행"
                 if purge_success_value is False and purge_reason_value:
                     purge_label = f"{purge_label}: {purge_reason_value}"
                 elif purge_success_value is True and purge_reason_value:
@@ -5576,7 +5576,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 reason_parts.append(purge_label)
                 if purge_success_value is False:
                     log_console(
-                        "[IMAP] 체크 전 스팸함 비우기 실패 · 디바이스 {} · 도메인 {} · {}".format(
+                        "[IMAP] 확인용 발송 전 스팸함 비우기 실패 · 디바이스 {} · 도메인 {} · {}".format(
                             device_id,
                             normalized_domain,
                             purge_reason_value or "사유 없음",
