@@ -28,7 +28,7 @@ DOMAINS = ("naver", "daum")
 DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
 
 IMAP_SENT_THRESHOLD_DEFAULT = 90
-MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${MAIL_DOMAIN}${HELO_SUFFIX}>"
+MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${HELO}>"
 OLD_MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소숫자:22}@auto.local>"
 
 DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
@@ -189,6 +189,13 @@ def _normalize_message_id_pattern(raw: Any) -> str:
         return MESSAGE_ID_PATTERN_DEFAULT
     if normalized == OLD_MESSAGE_ID_PATTERN_DEFAULT:
         return MESSAGE_ID_PATTERN_DEFAULT
+    migrated = normalized
+    if "${MAIL_DOMAIN}" in migrated or "${HELO_SUFFIX}" in migrated:
+        migrated = migrated.replace("${MAIL_DOMAIN}${HELO_SUFFIX}", "${HELO}")
+        migrated = migrated.replace("${MAIL_DOMAIN}", "${HELO}")
+        migrated = migrated.replace("${HELO_SUFFIX}", "")
+    if migrated != normalized:
+        normalized = migrated
     return normalized
 
 
@@ -199,19 +206,25 @@ def _resolve_reserved_token(name: str, field_ctx: Optional[Dict[str, Any]]) -> O
         domain = _extract_mail_domain(context.get("mail_from"))
         sanitized_domain = _sanitize_hostname_component(domain)
         return sanitized_domain or "mailsender"
+    if token_name == "HELO":
+        sanitized_helo = _sanitize_hostname_component(context.get("helo"))
+        if sanitized_helo:
+            return sanitized_helo
+        fallback_domain = _sanitize_hostname_component(_extract_mail_domain(context.get("mail_from")))
+        return fallback_domain or "mailsender"
     if token_name == "HELO_SUFFIX":
         return _build_helo_suffix(context.get("helo"))
     return None
 
 
 def _default_message_id_domain(mail_from: Optional[str], helo: Any) -> str:
+    sanitized_helo = _sanitize_hostname_component(helo)
+    if sanitized_helo:
+        return sanitized_helo
     base = _sanitize_hostname_component(_extract_mail_domain(mail_from))
-    if not base:
-        base = "mailsender"
-    suffix = _build_helo_suffix(helo)
-    if suffix:
-        return f"{base}{suffix}"
-    return base
+    if base:
+        return base
+    return "mailsender"
 
 
 def _build_message_id_value(
@@ -1624,6 +1637,27 @@ def _init_db() -> None:
         conn.execute(
             "UPDATE device_configs SET message_id_pattern=? WHERE message_id_pattern=?",
             (MESSAGE_ID_PATTERN_DEFAULT, OLD_MESSAGE_ID_PATTERN_DEFAULT),
+        )
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET message_id_pattern = REPLACE(message_id_pattern, '${MAIL_DOMAIN}${HELO_SUFFIX}', '${HELO}')
+            WHERE message_id_pattern LIKE '%${MAIL_DOMAIN}${HELO_SUFFIX}%'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET message_id_pattern = REPLACE(message_id_pattern, '${MAIL_DOMAIN}', '${HELO}')
+            WHERE message_id_pattern LIKE '%${MAIL_DOMAIN}%'
+            """
+        )
+        conn.execute(
+            """
+            UPDATE device_configs
+            SET message_id_pattern = REPLACE(message_id_pattern, '${HELO_SUFFIX}', '')
+            WHERE message_id_pattern LIKE '%${HELO_SUFFIX}%'
+            """
         )
         conn.execute(
             "UPDATE device_configs SET substitution_lock_mode='auto' WHERE substitution_lock_mode IS NULL OR substitution_lock_mode=''"

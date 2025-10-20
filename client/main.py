@@ -38,7 +38,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.78"
+APP_VERSION = "0.0.79"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -118,20 +118,13 @@ def _sanitize_hostname_component(value: Optional[str]) -> str:
     return ".".join(labels)
 
 
-def _build_helo_suffix(helo: Optional[str]) -> str:
-    sanitized = _sanitize_hostname_component(helo)
-    if not sanitized:
-        return ""
-    return f".{sanitized}"
-
-
 def _default_message_id_domain(mail_from: Optional[str], helo: Optional[str]) -> str:
+    helo_sanitized = _sanitize_hostname_component(helo)
+    if helo_sanitized:
+        return helo_sanitized
     base = _sanitize_hostname_component(_extract_mail_domain(mail_from))
     if not base:
         base = "mailsender"
-    suffix = _build_helo_suffix(helo)
-    if suffix:
-        return f"{base}{suffix}"
     return base
 
 

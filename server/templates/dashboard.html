@@ -2245,7 +2245,7 @@ button:not(:disabled):hover {
         <div class="global-form">
           <label class="field">
             <span>Message-ID 패턴</span>
-            <input type="text" id="globalMessageIdPattern" placeholder="<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${MAIL_DOMAIN}${HELO_SUFFIX}>" autocomplete="off" spellcheck="false">
+            <input type="text" id="globalMessageIdPattern" placeholder="<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${HELO}>" autocomplete="off" spellcheck="false">
           </label>
           <label class="inline-checkbox">
             <input type="checkbox" id="globalMessageIdAuto">
@@ -2542,7 +2542,7 @@ button:not(:disabled):hover {
 </div>
 
 <script>
-const MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${MAIL_DOMAIN}${HELO_SUFFIX}>";
+const MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${HELO}>";
 const GLOBAL_FIELD_LIST = [
   "active_domain",
   "helo",
@@ -8739,7 +8739,7 @@ function buildDeviceCard(device) {
         </label>
         <label class="field message-id-pattern-field">
           <span>Message-ID 패턴</span>
-          <input type="text" data-field="message_id_pattern" placeholder="<\${랜덤:영소:6}.\${랜덤:숫자:4}.\${랜덤:영소숫자:12}@\${MAIL_DOMAIN}\${HELO_SUFFIX}>" spellcheck="false" autocomplete="off">
+          <input type="text" data-field="message_id_pattern" placeholder="<\${랜덤:영소:6}.\${랜덤:숫자:4}.\${랜덤:영소숫자:12}@\${HELO}>" spellcheck="false" autocomplete="off">
         </label>
       </div>
       <div class="action-bar">

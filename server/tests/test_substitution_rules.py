@@ -205,10 +205,15 @@ class SubstitutionRuleTests(unittest.TestCase):
         expected = encode_substitution_value("테스트", "html_hex_min")
         self.assertEqual(response.results[0], expected)
 
-    def test_reserved_tokens_mail_domain_and_helo_suffix(self) -> None:
-        pattern = "<test@${MAIL_DOMAIN}${HELO_SUFFIX}>"
+    def test_reserved_token_helo_domain_preference(self) -> None:
+        pattern = "<test@${HELO}>"
         result = _build_message_id_value(pattern, "user@example.com", "smtp.mail.EXAMPLE.com")
-        self.assertEqual(result, "<test@example.com.smtp.mail.example.com>")
+        self.assertEqual(result, "<test@smtp.mail.example.com>")
+
+    def test_reserved_token_helo_falls_back_to_mail_domain(self) -> None:
+        pattern = "<test@${HELO}>"
+        result = _build_message_id_value(pattern, "user@example.com", None)
+        self.assertEqual(result, "<test@example.com>")
 
 
 class RandomLockModeTests(unittest.TestCase):
