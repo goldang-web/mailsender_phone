@@ -2536,6 +2536,7 @@ button:not(:disabled):hover {
       <button type="button" class="ghost" data-action="imap-cancel">취소</button>
       <button type="button" class="secondary" id="imapFetchLatestBtn" data-action="imap-fetch-latest">최신 메일 확인</button>
       <button type="button" class="secondary" id="imapTestBtn" data-action="imap-test">연결 테스트</button>
+      <button type="button" class="secondary" id="imapPurgeSpamBtn" data-action="imap-purge-spam">스팸함 비우기</button>
       <button type="button" id="imapSaveBtn" data-action="imap-save">저장</button>
     </div>
   </div>
@@ -2644,6 +2645,7 @@ const state = {
     card: null,
     testJobId: null,
     latestJobId: null,
+    purgeJobId: null,
   },
   pollingHandle: null,
   successCounters: {},
@@ -7074,6 +7076,9 @@ async function pollJobUntilDone(jobId, options = {}) {
     if (state.imapModal.latestJobId) {
       trackedJobIds.push(state.imapModal.latestJobId);
     }
+    if (state.imapModal.purgeJobId) {
+      trackedJobIds.push(state.imapModal.purgeJobId);
+    }
     if (trackedJobIds.length > 0 && !trackedJobIds.includes(jobId)) {
       return null;
     }
@@ -9403,6 +9408,7 @@ function openImapModal(card, device, domain, options = {}) {
   state.imapModal.card = card || null;
   state.imapModal.testJobId = null;
   state.imapModal.latestJobId = null;
+  state.imapModal.purgeJobId = null;
 
   document.getElementById("imapModalTitle").textContent = `${device.name} · 네이버 IMAP 설정`;
   document.getElementById("imapModalSubtitle").textContent = `ID: ${device.id}`;
@@ -9496,6 +9502,7 @@ function closeImapModal() {
   state.imapModal.card = null;
   state.imapModal.testJobId = null;
   state.imapModal.latestJobId = null;
+  state.imapModal.purgeJobId = null;
   setImapModalMessage("");
 }
 
@@ -9736,6 +9743,92 @@ async function submitImapTest() {
     if (testBtn) {
       testBtn.disabled = false;
       testBtn.textContent = "연결 테스트";
+    }
+  }
+}
+
+async function submitImapPurgeSpam() {
+  const { deviceId, domain, passwordSaved } = state.imapModal;
+  if (!deviceId || !domain) return;
+  const usernameInput = document.getElementById("imapUsername");
+  const passwordInput = document.getElementById("imapPassword");
+  const username = (usernameInput?.value || "").trim();
+  const rawPassword = passwordInput?.value || "";
+  if (!username) {
+    setImapModalMessage("네이버 계정 ID를 입력하세요.");
+    return;
+  }
+  const useSavedPassword = !rawPassword && passwordSaved;
+  if (!rawPassword && !useSavedPassword) {
+    setImapModalMessage("비밀번호를 입력하거나 기존 비밀번호를 먼저 저장하세요.");
+    return;
+  }
+  const payload = { username };
+  if (rawPassword) {
+    payload.password = rawPassword;
+  } else if (useSavedPassword) {
+    payload.use_saved_password = true;
+  }
+  const spamBtn = document.getElementById("imapPurgeSpamBtn");
+  const originalText = spamBtn ? spamBtn.textContent : "";
+  if (spamBtn) {
+    spamBtn.disabled = true;
+    spamBtn.textContent = "비우는 중...";
+  }
+  state.imapModal.purgeJobId = null;
+  setImapModalMessage("스팸함을 정리하는 중입니다...");
+  try {
+    const response = await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/imap/purge-spam`, {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    const jobId = response?.job?.id;
+    if (!jobId) {
+      throw new Error("스팸함 비우기 작업 ID를 받지 못했습니다.");
+    }
+    state.imapModal.purgeJobId = jobId;
+    const job = await pollJobUntilDone(jobId, { timeout: 60000, interval: 1500 });
+    if (!job) {
+      setImapModalMessage("스팸함 비우기 결과를 아직 받지 못했습니다. 잠시 후 다시 확인하세요.");
+      return;
+    }
+    const status = (job.status || "").toLowerCase();
+    const result = job.result || {};
+    const folder = result.folder || "Junk";
+    const deleted = typeof result.deleted_count === "number" ? result.deleted_count : result.deleted;
+    const remaining = typeof result.remaining_count === "number" ? result.remaining_count : null;
+    const total = typeof result.total_count === "number" ? result.total_count : result.total;
+    const elapsed = typeof result.elapsed_seconds === "number" ? result.elapsed_seconds : null;
+    const usedSaved = Boolean(result.used_saved_password);
+    const detailParts = [];
+    if (typeof total === "number") detailParts.push(`총 ${total}건`);
+    if (typeof deleted === "number") detailParts.push(`삭제 ${deleted}건`);
+    if (typeof remaining === "number") detailParts.push(`남은 ${remaining}건`);
+    if (typeof elapsed === "number") detailParts.push(`소요 ${elapsed.toFixed(1)}초`);
+    if (usedSaved) detailParts.push("저장된 비밀번호 사용");
+    let message =
+      job.message ||
+      (status === "success"
+        ? `${folder} 메일함을 비웠습니다.`
+        : `${folder} 메일함을 비우지 못했습니다.`);
+    if (detailParts.length) {
+      message = `${message} (${detailParts.join(" · ")})`;
+    }
+    if (status !== "success" && result.reason) {
+      message = `${message} · ${result.reason}`;
+    }
+    setImapModalMessage(message, status === "success" ? "success" : "error");
+    if (state.imapModal.card) {
+      setNotice(state.imapModal.card, message, status === "success" ? "success" : "error");
+    }
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setImapModalMessage(err.message || "스팸함 비우기 요청에 실패했습니다.");
+  } finally {
+    state.imapModal.purgeJobId = null;
+    if (spamBtn) {
+      spamBtn.disabled = false;
+      spamBtn.textContent = originalText || "스팸함 비우기";
     }
   }
 }
@@ -10544,7 +10637,14 @@ const imapFetchBtn = document.querySelector('[data-action="imap-fetch-latest"]')
 if (imapFetchBtn) {
   imapFetchBtn.addEventListener("click", submitImapFetchLatest);
 }
-document.querySelector('[data-action="imap-test"]').addEventListener("click", submitImapTest);
+const imapTestBtn = document.querySelector('[data-action="imap-test"]');
+if (imapTestBtn) {
+  imapTestBtn.addEventListener("click", submitImapTest);
+}
+const imapPurgeBtn = document.querySelector('[data-action="imap-purge-spam"]');
+if (imapPurgeBtn) {
+  imapPurgeBtn.addEventListener("click", submitImapPurgeSpam);
+}
 document.querySelector('[data-action="imap-cancel"]').addEventListener("click", () => {
   closeImapModal();
 });

@@ -2694,7 +2694,7 @@ def sanitize_job_payload_for_output(job_type: str, payload: Optional[Dict[str, A
     if not isinstance(payload, dict):
         return None
     sanitized = dict(payload)
-    if job_type in {"imap_test", "imap_fetch_latest"}:
+    if job_type in {"imap_test", "imap_fetch_latest", "imap_purge_spam"}:
         sanitized.pop("password", None)
         if not sanitized.get("use_saved_password"):
             sanitized.pop("use_saved_password", None)
@@ -2864,7 +2864,7 @@ def handle_job_completion(
                 ),
             )
             prune_device_logs(conn, job_row["device_id"])
-    elif job_row["job_type"] in {"imap_test", "imap_fetch_latest"}:
+    elif job_row["job_type"] in {"imap_test", "imap_fetch_latest", "imap_purge_spam"}:
         sanitized_payload = sanitize_job_payload_for_output(job_row["job_type"], payload)
         conn.execute(
             "UPDATE jobs SET payload=? WHERE id=?",
@@ -3128,6 +3128,12 @@ class ImapFetchLatestRequest(ImapTestRequest):
         le=10,
         description="가져올 최신 메일 개수 (현재 1개만 사용)",
     )
+
+
+class ImapPurgeSpamRequest(ImapTestRequest):
+    """스팸함 비우기 작업 요청"""
+
+    pass
 
 
 class ImapManualCheckRequest(BaseModel):
@@ -4407,6 +4413,59 @@ def enqueue_imap_fetch_latest(device_id: str, domain: str, payload: ImapFetchLat
             chat_id=chat_id,
         )
         job = create_job(conn, device_id, normalized, "imap_fetch_latest", job_payload)
+        conn.commit()
+    public_job = dict(job)
+    public_job["payload"] = sanitize_job_payload_for_output(job["job_type"], job.get("payload"))
+    return {"job": public_job}
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/imap/purge-spam")
+def enqueue_imap_purge_spam(device_id: str, domain: str, payload: ImapPurgeSpamRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="네이버 도메인에서만 스팸함 비우기를 지원합니다.")
+    username = normalize_imap_username(payload.username)
+    if not username:
+        raise HTTPException(status_code=400, detail="IMAP 계정 ID를 입력하세요.")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        config_row = conn.execute(
+            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        ).fetchone()
+        if not config_row:
+            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        config_data = to_dict(config_row)
+        global_config = load_global_config(conn=conn)
+        bot_token, chat_id = extract_telegram_credentials(global_config)
+        saved_password = config_data.get("imap_password") or ""
+        use_saved = bool(payload.use_saved_password)
+        password_value = (
+            normalize_imap_password(payload.password)
+            if payload.password is not None
+            else ""
+        )
+        if not password_value and not use_saved:
+            raise HTTPException(status_code=400, detail="비밀번호를 입력하거나 저장된 비밀번호 사용을 선택하세요.")
+        if use_saved and not saved_password and not password_value:
+            raise HTTPException(status_code=400, detail="저장된 비밀번호가 없어 사용할 수 없습니다.")
+        folder_value = (payload.folder or "Junk").strip() or "Junk"
+        job_payload: Dict[str, Any] = {
+            "username": username,
+            "folder": folder_value,
+        }
+        if password_value:
+            job_payload["password"] = password_value
+        else:
+            job_payload["use_saved_password"] = True
+        job_payload = attach_telegram_credentials(
+            job_payload,
+            bot_token=bot_token,
+            chat_id=chat_id,
+        )
+        job = create_job(conn, device_id, normalized, "imap_purge_spam", job_payload)
         conn.commit()
     public_job = dict(job)
     public_job["payload"] = sanitize_job_payload_for_output(job["job_type"], job.get("payload"))

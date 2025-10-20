@@ -35,6 +35,7 @@ from lib.naver_imap import (
     probe_imap_connection,
     verify_delivery,
     fetch_latest_message_summary,
+    purge_imap_folder,
 )
 
 
@@ -3720,6 +3721,8 @@ class MailClient:
             return self.handle_imap_test(domain, payload, job_id)
         if job_type == "imap_fetch_latest":
             return self.handle_imap_fetch_latest(domain, payload, job_id)
+        if job_type == "imap_purge_spam":
+            return self.handle_imap_purge_spam(domain, payload, job_id)
         if job_type == "imap_manual_check":
             return self.handle_imap_manual_check(domain, payload, job_id)
         if job_type == "change_ip":
@@ -5684,6 +5687,128 @@ class MailClient:
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
 
         error_message = reason or "최신 메일을 가져오지 못했습니다."
+        self._log_imap_console(f"실패 - {error_message}", domain=normalized)
+        return JobResult(
+            job_id=job_id,
+            status="failed",
+            message=error_message,
+            result=result_payload,
+            error=error_message,
+        )
+
+    def handle_imap_purge_spam(
+        self,
+        domain: Optional[str],
+        payload: Dict[str, object],
+        job_id: str,
+    ) -> JobResult:
+        normalized = (domain or "naver").lower()
+        if normalized != "naver":
+            message = "네이버 도메인에서만 스팸함 비우기를 지원합니다."
+            self._log_imap_console(message, domain=normalized)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        payload = payload or {}
+        settings = self._imap_settings_for_domain(normalized)
+        if not bool(settings.get("enabled")):
+            message = "IMAP 확인이 비활성화되어 있어 스팸함 비우기를 실행하지 않습니다."
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        username = normalize_imap_string(payload.get("username")) or normalize_imap_string(
+            settings.get("username")
+        )
+        if not username:
+            message = "IMAP 계정 ID가 설정되지 않았습니다."
+            self._log_imap_console(message, domain=normalized)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        use_saved_password = bool(payload.get("use_saved_password"))
+        password = str(payload.get("password") or "")
+        used_saved_password = False
+        if not password and use_saved_password:
+            password = settings.get("password") or ""
+            used_saved_password = bool(password)
+        if not password:
+            message = "IMAP 비밀번호를 확인할 수 없습니다."
+            self._log_imap_console(message, domain=normalized)
+            return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        folder = str(payload.get("folder") or "Junk").strip() or "Junk"
+        chunk_size = payload.get("chunk_size")
+        try:
+            chunk_value = int(chunk_size) if chunk_size is not None else 100
+        except (TypeError, ValueError):
+            chunk_value = 100
+        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 스팸함 비우기 시작", domain=normalized)
+        summary = purge_imap_folder(username, password, folder=folder, chunk_size=chunk_value)
+        success = bool(summary.get("success"))
+        reason = summary.get("reason")
+        total_count_raw = summary.get("total_count", summary.get("total"))
+        deleted_count_raw = summary.get("deleted_count", summary.get("deleted"))
+        remaining_count_raw = summary.get("remaining_count", summary.get("remaining"))
+        elapsed_raw = summary.get("elapsed_seconds", summary.get("elapsed"))
+
+        def _coerce_int(value: object) -> Optional[int]:
+            try:
+                if isinstance(value, bool):
+                    return int(value)
+                if value is None:
+                    return None
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _coerce_float(value: object) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        total_count = _coerce_int(total_count_raw)
+        deleted_count = _coerce_int(deleted_count_raw)
+        remaining_count = _coerce_int(remaining_count_raw)
+        elapsed_seconds = _coerce_float(elapsed_raw)
+
+        self._log_imap_console(
+            "스팸함 비우기 결과 · "
+            f"성공 {success} · "
+            f"총 {total_count if total_count is not None else '-'}건 · "
+            f"삭제 {deleted_count if deleted_count is not None else '-'}건 · "
+            f"남은 {remaining_count if remaining_count is not None else '-'}건",
+            domain=normalized,
+        )
+        if reason:
+            self._log_imap_console(f"  ↳ 사유: {reason}", domain=normalized)
+        detail_parts: List[str] = []
+        if total_count is not None:
+            detail_parts.append(f"총 {total_count}건")
+        if deleted_count is not None:
+            detail_parts.append(f"삭제 {deleted_count}건")
+        if remaining_count is not None:
+            detail_parts.append(f"남은 {remaining_count}건")
+        if elapsed_seconds is not None:
+            detail_parts.append(f"소요 {elapsed_seconds:.1f}초")
+        if used_saved_password:
+            detail_parts.append("저장된 비밀번호 사용")
+
+        result_payload: Dict[str, object] = {
+            "username": username,
+            "folder": folder,
+            "success": success,
+            "total_count": total_count,
+            "deleted_count": deleted_count,
+            "remaining_count": remaining_count,
+            "elapsed_seconds": elapsed_seconds,
+            "reason": reason,
+            "used_saved_password": used_saved_password,
+        }
+
+        if success:
+            message = f"{folder} 메일함 비우기 완료"
+            if detail_parts:
+                message = f"{message} · {' · '.join(detail_parts)}"
+            self._log_imap_console(f"성공 - {message}", domain=normalized)
+            return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
+
+        error_message = reason or f"{folder} 메일함을 비우지 못했습니다."
         self._log_imap_console(f"실패 - {error_message}", domain=normalized)
         return JobResult(
             job_id=job_id,

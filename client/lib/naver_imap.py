@@ -145,6 +145,129 @@ def fetch_latest_message_summary(email_id: str, password: str, *, folder: str = 
                 pass
 
 
+def purge_imap_folder(email_id: str, password: str, *, folder: str = "Junk", chunk_size: int = 100) -> dict:
+    """지정한 IMAP 폴더의 모든 메일을 삭제하고 정리합니다."""
+    if not email_id or not password:
+        return {"success": False, "reason": "IMAP 계정 정보가 필요합니다.", "folder": (folder or "Junk") or "Junk"}
+    try:
+        chunk_value = int(chunk_size or 100)
+    except (TypeError, ValueError):
+        chunk_value = 100
+    chunk_value = max(1, min(500, chunk_value))
+    target_folder = (folder or "Junk").strip() or "Junk"
+    mail = None
+    started = time.monotonic()
+    deleted_total = 0
+    total_messages = 0
+    try:
+        mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=30)
+        mail.login(email_id, password)
+        status, _ = mail.select(target_folder, readonly=False)
+        if status != "OK":
+            return {
+                "success": False,
+                "reason": f"{target_folder} 메일함을 열 수 없습니다.",
+                "folder": target_folder,
+            }
+        status, messages = mail.search(None, "ALL")
+        if status != "OK":
+            return {
+                "success": False,
+                "reason": "메일 목록을 가져오지 못했습니다.",
+                "folder": target_folder,
+            }
+        ids_raw = messages[0].split() if messages and messages[0] else []
+        total_messages = len(ids_raw)
+        if total_messages == 0:
+            elapsed_empty = time.monotonic() - started
+            return {
+                "success": True,
+                "folder": target_folder,
+                "total_count": 0,
+                "deleted_count": 0,
+                "remaining_count": 0,
+                "elapsed_seconds": elapsed_empty,
+            }
+        for index in range(0, total_messages, chunk_value):
+            chunk = ids_raw[index : index + chunk_value]
+            message_set_parts = []
+            for item in chunk:
+                if not item:
+                    continue
+                if isinstance(item, bytes):
+                    try:
+                        message_set_parts.append(item.decode())
+                    except Exception:
+                        message_set_parts.append(item.decode("latin-1", errors="ignore"))
+                else:
+                    message_set_parts.append(str(item))
+            if not message_set_parts:
+                continue
+            message_set = " ".join(message_set_parts)
+            status, _ = mail.store(message_set, "+FLAGS", "\\Deleted")
+            if status != "OK":
+                return {
+                    "success": False,
+                    "reason": "메일에 삭제 플래그를 지정하지 못했습니다.",
+                    "folder": target_folder,
+                    "total_count": total_messages,
+                    "deleted_count": deleted_total,
+                }
+            deleted_total += len(message_set_parts)
+        status, _ = mail.expunge()
+        if status != "OK":
+            return {
+                "success": False,
+                "reason": "메일 영구 삭제(EXPUNGE)에 실패했습니다.",
+                "folder": target_folder,
+                "total_count": total_messages,
+                "deleted_count": deleted_total,
+            }
+        status, remaining_messages = mail.search(None, "ALL")
+        if status == "OK":
+            remaining_ids = remaining_messages[0].split() if remaining_messages and remaining_messages[0] else []
+            remaining_count = len(remaining_ids)
+        else:
+            remaining_count = None
+        elapsed = time.monotonic() - started
+        return {
+            "success": True,
+            "folder": target_folder,
+            "total_count": total_messages,
+            "deleted_count": deleted_total,
+            "remaining_count": remaining_count if remaining_count is not None else max(0, total_messages - deleted_total),
+            "elapsed_seconds": elapsed,
+        }
+    except imaplib.IMAP4.error as exc:
+        return {
+            "success": False,
+            "reason": f"IMAP 인증 실패: {exc}",
+            "folder": target_folder,
+        }
+    except (socket.timeout, ssl.SSLError) as exc:
+        return {
+            "success": False,
+            "reason": f"IMAP 네트워크 오류: {exc}",
+            "folder": target_folder,
+        }
+    except Exception as exc:  # pylint: disable=broad-except
+        return {
+            "success": False,
+            "reason": f"스팸함 비우기 중 오류: {exc}",
+            "folder": target_folder,
+        }
+    finally:
+        if mail is not None:
+            try:
+                mail.close()
+            except Exception:
+                pass
+            try:
+                mail.logout()
+            except Exception:
+                pass
+
+
 def probe_imap_connection(email_id: str, password: str, *, folder: str = "Junk", timeout: int = 30) -> dict:
     """네이버 IMAP 서버 연결 및 폴더 선택을 검사합니다."""
     if not email_id or not password:
