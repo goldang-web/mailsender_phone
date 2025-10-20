@@ -17,6 +17,7 @@ from server.main import (
     canonicalize_substitution_rules,
     apply_substitutions_to_config,
     substitute_tokens,
+    _build_message_id_value,
     SubstitutionRule,
     SubstitutionPreviewItem,
     SubstitutionPreviewRequest,
@@ -203,6 +204,11 @@ class SubstitutionRuleTests(unittest.TestCase):
         self.assertEqual(len(response.results), 1)
         expected = encode_substitution_value("테스트", "html_hex_min")
         self.assertEqual(response.results[0], expected)
+
+    def test_reserved_tokens_mail_domain_and_helo_suffix(self) -> None:
+        pattern = "<test@${MAIL_DOMAIN}${HELO_SUFFIX}>"
+        result = _build_message_id_value(pattern, "user@example.com", "smtp.mail.EXAMPLE.com")
+        self.assertEqual(result, "<test@example.com.smtp.mail.example.com>")
 
 
 class RandomLockModeTests(unittest.TestCase):

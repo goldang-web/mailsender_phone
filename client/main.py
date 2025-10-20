@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import hashlib
 import json
+import random
 import re
 import sqlite3
 import sys
@@ -10,12 +11,13 @@ import os
 import threading
 import socket
 import ssl
+import string
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from email import policy
 from email.parser import Parser
-from email.utils import format_datetime, make_msgid
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
 from datetime import datetime, timezone, timedelta
@@ -36,7 +38,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.77"
+APP_VERSION = "0.0.78"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -89,6 +91,73 @@ def to_utc_iso(dt: datetime) -> str:
     else:
         dt = dt.astimezone(timezone.utc)
     return dt.isoformat().replace("+00:00", "Z")
+
+
+def _extract_mail_domain(mail_from: Optional[str]) -> Optional[str]:
+    if not mail_from or "@" not in mail_from:
+        return None
+    _, domain_part = mail_from.rsplit("@", 1)
+    candidate = domain_part.strip().strip(">")
+    candidate = candidate.strip().strip(".")
+    if not candidate:
+        return None
+    return candidate.lower()
+
+
+def _sanitize_hostname_component(value: Optional[str]) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    normalized = re.sub(r"[^a-z0-9.-]+", "-", raw)
+    normalized = re.sub(r"-{2,}", "-", normalized)
+    normalized = re.sub(r"\.{2,}", ".", normalized)
+    normalized = normalized.strip(".-")
+    if not normalized:
+        return ""
+    labels = [label.strip("-") for label in normalized.split(".") if label.strip("-")]
+    return ".".join(labels)
+
+
+def _build_helo_suffix(helo: Optional[str]) -> str:
+    sanitized = _sanitize_hostname_component(helo)
+    if not sanitized:
+        return ""
+    return f".{sanitized}"
+
+
+def _default_message_id_domain(mail_from: Optional[str], helo: Optional[str]) -> str:
+    base = _sanitize_hostname_component(_extract_mail_domain(mail_from))
+    if not base:
+        base = "mailsender"
+    suffix = _build_helo_suffix(helo)
+    if suffix:
+        return f"{base}{suffix}"
+    return base
+
+
+def _generate_default_message_id(helo: Optional[str], mail_from: Optional[str]) -> str:
+    rng = random.SystemRandom()
+    segment_letters = "".join(rng.choice(string.ascii_lowercase) for _ in range(6))
+    segment_digits = "".join(rng.choice(string.digits) for _ in range(4))
+    segment_mix = "".join(rng.choice(string.ascii_lowercase + string.digits) for _ in range(12))
+    domain = _default_message_id_domain(mail_from, helo)
+    return f"<{segment_letters}.{segment_digits}.{segment_mix}@{domain}>"
+
+
+MESSAGE_ID_HEADER_PATTERN = re.compile(r"(?im)^(?P<indent>[ \t]*)Message-ID\s*:(?P<value>.*(?:\n[ \t].*)*)")
+
+
+def _extract_message_id_from_text(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return None
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    match = MESSAGE_ID_HEADER_PATTERN.search(normalized)
+    if not match:
+        return None
+    raw_value = match.group("value") or ""
+    parts = [part.strip() for part in raw_value.replace("\r", "\n").split("\n")]
+    combined = "".join(parts).strip()
+    return combined or None
 
 DEFAULT_CONFIG: Dict[str, object] = {
     "server_url": "http://127.0.0.1:8000",
@@ -1951,7 +2020,9 @@ class MailClient:
         probe_started = utc_now()
         date_header = format_datetime(probe_started.astimezone(timezone.utc))
         subject = f"[IMAP 체크] Sent 누적 확인 {probe_started.astimezone().strftime('%H:%M:%S')}"
-        message_id_value = message_id or make_msgid(domain=mail_from.split("@")[-1] if "@" in mail_from else "mailsender")
+        header_message_id = _extract_message_id_from_text(header_text or header_override)
+        base_message_id = message_id or header_message_id or _generate_default_message_id(helo_name, mail_from)
+        message_id_value = base_message_id
         if header_text:
             payload_header = header_text
         else:
@@ -2016,6 +2087,7 @@ class MailClient:
                 status_line="SMTP 설정 없음",
                 detail_line="확인 메일 발송을 위한 SMTP 설정이 비어 있습니다.",
             )
+        helo_value = str(smtp_context.get("helo") or "")
         if not mail_from:
             self._log_imap_console("IMAP 발송 · MAIL FROM 누락", domain=normalized)
             return SentProbeResult(
@@ -2051,8 +2123,8 @@ class MailClient:
             newline_hint = "\r\n" if "\r\n" in decoded_header else "\n"
 
         probe_reference = utc_now()
-        message_id_value = make_msgid(domain=mail_from.split("@")[-1] if "@" in mail_from else "mailsender")
-        message_id_pattern = re.compile(r"(?im)^(?P<indent>[ \t]*)Message-ID\s*:(?P<value>.*(?:\n[ \t].*)*)")
+        header_message_id = _extract_message_id_from_text(header_template)
+        message_id_value = header_message_id or _generate_default_message_id(helo_value, mail_from)
 
         def build_probe_header(msg_id: str) -> str:
             if header_template:
@@ -2071,7 +2143,7 @@ class MailClient:
                 else:
                     header_section = normalized_template
                     body_section = None
-                match = message_id_pattern.search(header_section)
+                match = MESSAGE_ID_HEADER_PATTERN.search(header_section)
                 if match:
                     indent = match.group("indent") or ""
                     start, end = match.span()
