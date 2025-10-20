@@ -22,11 +22,13 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from encoding_utils import encode_substitution_value, normalize_encoding_name
+from email.utils import make_msgid
 
 DOMAINS = ("naver", "daum")
 DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
 
 IMAP_SENT_THRESHOLD_DEFAULT = 90
+MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소숫자:22}@auto.local>"
 
 DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "helo": "",
@@ -75,6 +77,8 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "imap_last_received_at": None,
     "substitution_lock_mode": "auto",
     "substitution_snapshot": {"fields": {}, "missing_tokens": []},
+    "message_id_auto": True,
+    "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
 }
 
 IMAP_DELAY_MIN_SECONDS = 5
@@ -109,11 +113,13 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "substitution_rules": [],
     "telegram_bot_token": "",
     "telegram_chat_id": "",
+    "message_id_auto": True,
+    "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
 }
-GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count")
+GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count", "message_id_auto", "message_id_pattern")
 MAX_DEVICE_LOG_HISTORY = 10
 SUBSTITUTION_PATTERN = re.compile(r"\$\{([^{}]+)\}")
-SUBSTITUTION_TARGET_FIELDS = ("helo", "mail_from", "header", "rcpt_to", "anchor_email")
+SUBSTITUTION_TARGET_FIELDS = ("helo", "mail_from", "header", "rcpt_to", "anchor_email", "message_id_pattern")
 RANDOM_TOKEN_PATTERN = re.compile(r"^랜덤:([^:]+):(\d+(?:-\d+)?)$")
 LIST_TOKEN_PATTERN = re.compile(r"^목록:(.+)$")
 RANDOM_TOKEN_CHARSETS = {
@@ -129,8 +135,99 @@ RANDOM_TOKEN_MAX_LENGTH = 128
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 5.0
 SUBSTITUTION_LOCK_MODES = {"auto", "lock"}
-SNAPSHOT_FIELD_KEYS = ("helo", "mail_from", "header", "anchor_email", "rcpt_to")
+SNAPSHOT_FIELD_KEYS = ("helo", "mail_from", "header", "anchor_email", "rcpt_to", "message_id_pattern")
 EMPTY_SUBSTITUTION_SNAPSHOT: Dict[str, Any] = {"fields": {}, "missing_tokens": [], "source_device_id": None}
+MESSAGE_ID_HEADER_PATTERN = re.compile(r"(?im)^(?P<indent>[ \t]*)Message-ID\s*:(?P<value>.*(?:\n[ \t].*)*)")
+
+
+def _extract_mail_domain(mail_from: Optional[str]) -> Optional[str]:
+    if not mail_from or "@" not in mail_from:
+        return None
+    _, domain_part = mail_from.rsplit("@", 1)
+    candidate = domain_part.strip().strip(">")
+    candidate = candidate.strip().strip(".")
+    if not candidate:
+        return None
+    return candidate.lower()
+
+
+def _build_message_id_value(pattern_value: Optional[str], mail_from: Optional[str]) -> str:
+    fallback_domain = _extract_mail_domain(mail_from) or "mailsender"
+    candidate = (pattern_value or "").strip()
+    if candidate:
+        candidate = candidate.replace("\r", "").replace("\n", "")
+        if candidate:
+            if candidate[0] != "<":
+                candidate = f"<{candidate}"
+            if candidate[-1] != ">":
+                candidate = f"{candidate}>"
+            inner = candidate[1:-1]
+            if inner and "@" in inner and not any(ch.isspace() for ch in inner):
+                return candidate
+    return make_msgid(domain=fallback_domain)
+
+
+def ensure_message_id_header(
+    header_value: Optional[str],
+    *,
+    auto_enabled: bool,
+    pattern_value: Optional[str],
+    mail_from: Optional[str],
+) -> str:
+    header_text = header_value if isinstance(header_value, str) else ""
+    if not auto_enabled:
+        return header_text
+    normalized_newlines = header_text.replace("\r\n", "\n").replace("\r", "\n")
+    separator_index = normalized_newlines.find("\n\n")
+    if separator_index >= 0:
+        separator_end = separator_index + 2
+        length = len(normalized_newlines)
+        while separator_end < length and normalized_newlines[separator_end] == "\n":
+            separator_end += 1
+        header_section = normalized_newlines[:separator_index]
+        separator_block = normalized_newlines[separator_index:separator_end]
+        body_section = normalized_newlines[separator_end:]
+    else:
+        header_section = normalized_newlines
+        separator_block = "\n\n"
+        body_section = None
+    if MESSAGE_ID_HEADER_PATTERN.search(header_section):
+        return header_text
+    message_id_value = _build_message_id_value(pattern_value, mail_from)
+    newline_hint = "\r\n" if "\r\n" in header_text else "\n"
+    if header_section:
+        header_section = f"{header_section}\nMessage-ID: {message_id_value}"
+    else:
+        header_section = f"Message-ID: {message_id_value}"
+    if body_section is not None:
+        rebuilt = f"{header_section}{separator_block}{body_section}"
+    else:
+        rebuilt = header_section
+    rebuilt = rebuilt.replace("\n", newline_hint)
+    if header_text.endswith(("\r\n", "\n")) and not rebuilt.endswith(newline_hint):
+        rebuilt = f"{rebuilt}{newline_hint}"
+    return rebuilt
+
+
+def resolve_message_id_settings(config: Dict[str, Any]) -> Tuple[bool, str]:
+    raw_auto = config.get("message_id_auto")
+    if raw_auto is None:
+        auto_enabled = bool(DEFAULT_DOMAIN_CONFIG.get("message_id_auto", True))
+    else:
+        try:
+            auto_enabled = bool(int(raw_auto))
+        except (TypeError, ValueError):
+            auto_enabled = bool(raw_auto)
+    pattern_raw = config.get("message_id_pattern")
+    if isinstance(pattern_raw, bytes):
+        try:
+            pattern_value = pattern_raw.decode("utf-8")
+        except UnicodeDecodeError:
+            pattern_value = pattern_raw.decode("latin-1", errors="ignore")
+    else:
+        pattern_value = str(pattern_raw or "")
+    pattern_value = pattern_value.strip() or MESSAGE_ID_PATTERN_DEFAULT
+    return auto_enabled, pattern_value
 
 
 def ensure_storage_root() -> None:
@@ -827,6 +924,23 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized["substitution_rules"] = sanitize_substitution_rules(raw.get("substitution_rules"))
     sanitized["telegram_bot_token"] = sanitize_telegram_bot_token(raw.get("telegram_bot_token"))
     sanitized["telegram_chat_id"] = sanitize_telegram_chat_id(raw.get("telegram_chat_id"))
+    raw_message_auto = raw.get("message_id_auto")
+    if isinstance(raw_message_auto, str):
+        lowered = raw_message_auto.strip().lower()
+        sanitized["message_id_auto"] = lowered in {"1", "true", "yes", "on"}
+    elif raw_message_auto is None:
+        sanitized["message_id_auto"] = bool(DEFAULT_DOMAIN_CONFIG.get("message_id_auto", True))
+    else:
+        sanitized["message_id_auto"] = bool(raw_message_auto)
+    pattern_candidate = raw.get("message_id_pattern")
+    if isinstance(pattern_candidate, bytes):
+        try:
+            pattern_value = pattern_candidate.decode("utf-8")
+        except UnicodeDecodeError:
+            pattern_value = pattern_candidate.decode("latin-1", errors="ignore")
+    else:
+        pattern_value = str(pattern_candidate or "")
+    sanitized["message_id_pattern"] = pattern_value.strip() or MESSAGE_ID_PATTERN_DEFAULT
     return sanitized
 
 
@@ -1138,10 +1252,14 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_last_status, imap_last_checked_at, imap_last_latency,
                 imap_last_error, imap_last_mail_from, imap_last_sent_at,
                 imap_last_received_at, 'auto' AS substitution_lock_mode,
-                '{{}}' AS substitution_snapshot, updated_at
+                '{{}}' AS substitution_snapshot, 1 AS message_id_auto,
+                '{pattern_default}' AS message_id_pattern, updated_at
             FROM device_configs_legacy
             """
-        ).format(threshold_default=IMAP_SENT_THRESHOLD_DEFAULT)
+        ).format(
+            threshold_default=IMAP_SENT_THRESHOLD_DEFAULT,
+            pattern_default=MESSAGE_ID_PATTERN_DEFAULT.replace("'", "''"),
+        )
         conn.execute("DROP TABLE device_configs_legacy")
     finally:
         conn.execute("PRAGMA foreign_keys=ON")
@@ -1414,6 +1532,23 @@ def _init_db() -> None:
             conn.execute(
                 "UPDATE device_configs SET substitution_snapshot='{}' WHERE substitution_snapshot IS NULL OR substitution_snapshot=''"
             )
+        if "message_id_auto" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN message_id_auto INTEGER NOT NULL DEFAULT 1"
+            )
+        if "message_id_pattern" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN message_id_pattern TEXT DEFAULT ''"
+            )
+            conn.execute(
+                "UPDATE device_configs SET message_id_pattern=? WHERE message_id_pattern IS NULL OR message_id_pattern=''",
+                (MESSAGE_ID_PATTERN_DEFAULT,),
+            )
+        else:
+            conn.execute(
+                "UPDATE device_configs SET message_id_pattern=? WHERE message_id_pattern IS NULL OR message_id_pattern=''",
+                (MESSAGE_ID_PATTERN_DEFAULT,),
+            )
         conn.execute(
             "UPDATE device_configs SET substitution_lock_mode='auto' WHERE substitution_lock_mode IS NULL OR substitution_lock_mode=''"
         )
@@ -1472,10 +1607,11 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     imap_last_status, imap_last_checked_at, imap_last_latency, imap_last_error, imap_last_mail_from,
                     imap_last_sent_at, imap_last_received_at,
                     substitution_lock_mode, substitution_snapshot,
+                    message_id_auto, message_id_pattern,
                     updated_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(device_id, domain) DO NOTHING
                 """,
@@ -1522,6 +1658,8 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG["imap_last_received_at"],
                     DEFAULT_DOMAIN_CONFIG["substitution_lock_mode"],
                     json.dumps(DEFAULT_DOMAIN_CONFIG["substitution_snapshot"], ensure_ascii=False),
+                    1 if DEFAULT_DOMAIN_CONFIG["message_id_auto"] else 0,
+                    DEFAULT_DOMAIN_CONFIG["message_id_pattern"],
                     now,
                 ),
             )
@@ -1612,6 +1750,23 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     lock_mode = sanitize_substitution_lock_mode(row.get("substitution_lock_mode"))
     snapshot_payload = decode_substitution_snapshot(row.get("substitution_snapshot"))
     password_raw = row.get("imap_password") or ""
+    message_id_auto_value = row.get("message_id_auto")
+    if message_id_auto_value is None:
+        message_id_enabled = bool(DEFAULT_DOMAIN_CONFIG.get("message_id_auto", True))
+    else:
+        try:
+            message_id_enabled = bool(int(message_id_auto_value))
+        except (TypeError, ValueError):
+            message_id_enabled = bool(message_id_auto_value)
+    pattern_raw = row.get("message_id_pattern")
+    if isinstance(pattern_raw, bytes):
+        try:
+            message_id_pattern = pattern_raw.decode("utf-8")
+        except UnicodeDecodeError:
+            message_id_pattern = pattern_raw.decode("latin-1", errors="ignore")
+    else:
+        message_id_pattern = str(pattern_raw or "")
+    message_id_pattern = message_id_pattern.strip() or MESSAGE_ID_PATTERN_DEFAULT
     if include_secret:
         imap_password = password_raw
     else:
@@ -1623,6 +1778,8 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "smtp_port": row.get("smtp_port", 25),
         "mail_from": row.get("mail_from", ""),
         "header": row.get("header", ""),
+        "message_id_auto": message_id_enabled,
+        "message_id_pattern": message_id_pattern,
         "session_count": session_value,
         "bcc_count": clamp_bcc_count(row.get("bcc_count", 0)),
         "anchor_interval": clamp_anchor_interval(row.get("anchor_interval", 0)),
@@ -2231,7 +2388,7 @@ def resolve_substitution_outputs(
                 detail="고정 모드를 사용 중이지만 저장된 고정 값이 없습니다. '다시 뽑기'로 값을 만들거나 고정을 해제하세요.",
             )
         for field in SUBSTITUTION_TARGET_FIELDS:
-            if field in overrides and field != "rcpt_to":
+            if field in overrides and field not in {"rcpt_to", "message_id_pattern"}:
                 if field_contains_tokens(working.get(field)):
                     raise HTTPException(
                         status_code=409,
@@ -2241,7 +2398,7 @@ def resolve_substitution_outputs(
             locked_value = locked_fields.get(field)
             if locked_value is not None and field != "rcpt_to":
                 working[field] = locked_value
-            elif field != "rcpt_to" and field_contains_tokens(working.get(field)):
+            elif field not in {"rcpt_to", "message_id_pattern"} and field_contains_tokens(working.get(field)):
                 raise HTTPException(
                     status_code=409,
                     detail=f"고정 모드에서 {field.upper()} 값을 계산할 수 없습니다. '다시 뽑기'로 고정값을 만든 뒤 잠그거나 고정을 해제하세요.",
@@ -2715,6 +2872,8 @@ class DeviceConfigPayload(BaseModel):
     smtp_port: Optional[int] = 25
     mail_from: Optional[str] = ""
     header: Optional[str] = ""
+    message_id_auto: Optional[bool] = True
+    message_id_pattern: Optional[str] = MESSAGE_ID_PATTERN_DEFAULT
     session_count: Optional[int] = 1
     bcc_count: Optional[int] = 0
     anchor_interval: Optional[int] = 0
@@ -2917,6 +3076,15 @@ def preview_single_header(device_id: str, domain: str, payload: HeaderPreviewReq
         rcpt_override=rcpt_override,
         override_fields=set(overrides.keys()) if overrides else None,
     )
+    auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
+    resolved_config["message_id_auto"] = auto_enabled
+    resolved_config["message_id_pattern"] = pattern_value
+    resolved_config["header"] = ensure_message_id_header(
+        resolved_config.get("header"),
+        auto_enabled=auto_enabled,
+        pattern_value=pattern_value,
+        mail_from=resolved_config.get("mail_from"),
+    )
     rcpt_value = resolved_rcpt if resolved_rcpt is not None else (rcpt_source or "")
     generated_marker = snapshot_meta.get("generated_at") if snapshot_meta else None
     return HeaderPreviewResponse(
@@ -3012,6 +3180,8 @@ class GlobalConfigPayload(BaseModel):
     substitution_rules: Optional[List[SubstitutionRule]] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
+    message_id_auto: Optional[bool] = None
+    message_id_pattern: Optional[str] = None
 
 
 class GlobalConfigResponse(BaseModel):
@@ -3029,6 +3199,8 @@ class GlobalConfigResponse(BaseModel):
     substitution_rules: List[SubstitutionRule] = Field(default_factory=list)
     telegram_bot_token: str
     telegram_chat_id: str
+    message_id_auto: bool
+    message_id_pattern: str
 
 
 class GlobalBatchRequest(BaseModel):
@@ -3153,6 +3325,23 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
     schedule_enabled = sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled"))
     if schedule_enabled and not schedule_time:
         schedule_enabled = False
+    raw_message_auto = config.get("message_id_auto")
+    if isinstance(raw_message_auto, str):
+        lowered = raw_message_auto.strip().lower()
+        message_id_auto = lowered in {"1", "true", "yes", "on"}
+    elif raw_message_auto is None:
+        message_id_auto = bool(DEFAULT_DOMAIN_CONFIG.get("message_id_auto", True))
+    else:
+        message_id_auto = bool(raw_message_auto)
+    pattern_candidate = config.get("message_id_pattern")
+    if isinstance(pattern_candidate, bytes):
+        try:
+            message_id_pattern = pattern_candidate.decode("utf-8")
+        except UnicodeDecodeError:
+            message_id_pattern = pattern_candidate.decode("latin-1", errors="ignore")
+    else:
+        message_id_pattern = str(pattern_candidate or "")
+    message_id_pattern = message_id_pattern.strip() or MESSAGE_ID_PATTERN_DEFAULT
     return GlobalConfigResponse(
         helo=config.get("helo", ""),
         mail_from=config.get("mail_from", ""),
@@ -3171,6 +3360,8 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
         ],
         telegram_bot_token=sanitize_telegram_bot_token(config.get("telegram_bot_token")),
         telegram_chat_id=sanitize_telegram_chat_id(config.get("telegram_chat_id")),
+        message_id_auto=message_id_auto,
+        message_id_pattern=message_id_pattern,
     )
 
 
@@ -3215,11 +3406,25 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
             elif field == "session_count":
                 value_to_apply = sanitize_session_count(raw_value)
                 should_apply = raw_value is not None
+            elif field == "message_id_auto":
+                if raw_value is None:
+                    continue
+                value_to_apply = 1 if raw_value else 0
+                should_apply = True
+            elif field == "message_id_pattern":
+                if raw_value is None:
+                    continue
+                candidate_pattern = str(raw_value or "").strip() or MESSAGE_ID_PATTERN_DEFAULT
+                value_to_apply = candidate_pattern
+                should_apply = True
             else:
                 continue
             if should_apply:
                 apply_values[field] = value_to_apply
-                stored_config[field] = value_to_apply
+                if field == "message_id_auto":
+                    stored_config[field] = bool(value_to_apply)
+                else:
+                    stored_config[field] = value_to_apply
                 applied_fields.append(field)
         current_schedule_enabled = sanitize_stop_schedule_enabled(stored_config.get("stop_schedule_enabled"))
         current_schedule_time = sanitize_stop_schedule_time(stored_config.get("stop_schedule_time"))
@@ -3533,18 +3738,36 @@ def copy_device_lock(payload: DeviceLockCopyRequest) -> Dict[str, Any]:
         raise HTTPException(status_code=400, detail="복사할 대상 디바이스를 선택하세요.")
     with db_lock, get_conn() as conn:
         source_row = conn.execute(
-            "SELECT substitution_lock_mode, substitution_snapshot FROM device_configs WHERE device_id=? AND domain=?",
+            "SELECT substitution_lock_mode, substitution_snapshot, message_id_auto, message_id_pattern FROM device_configs WHERE device_id=? AND domain=?",
             (source_device_id, normalized_domain),
         ).fetchone()
         if not source_row:
             raise HTTPException(status_code=404, detail="원본 디바이스 도메인 설정을 찾을 수 없습니다.")
-        source_mode = sanitize_substitution_lock_mode(source_row["substitution_lock_mode"])
+        source_data = to_dict(source_row)
+        source_mode = sanitize_substitution_lock_mode(source_data.get("substitution_lock_mode"))
         if source_mode != "lock":
             raise HTTPException(status_code=409, detail="원본 카드가 고정 모드가 아닙니다.")
-        source_snapshot = decode_substitution_snapshot(source_row["substitution_snapshot"])
+        source_snapshot = decode_substitution_snapshot(source_data.get("substitution_snapshot"))
         locked_fields = source_snapshot.get("fields") or {}
         if not locked_fields:
             raise HTTPException(status_code=409, detail="원본 카드에 고정된 값이 없습니다.")
+        source_message_auto_raw = source_data.get("message_id_auto")
+        if source_message_auto_raw is None:
+            source_message_auto = 1
+        else:
+            try:
+                source_message_auto = 1 if int(source_message_auto_raw) else 0
+            except (TypeError, ValueError):
+                source_message_auto = 1 if source_message_auto_raw else 0
+        pattern_candidate = source_data.get("message_id_pattern")
+        if isinstance(pattern_candidate, bytes):
+            try:
+                source_message_pattern = pattern_candidate.decode("utf-8")
+            except UnicodeDecodeError:
+                source_message_pattern = pattern_candidate.decode("latin-1", errors="ignore")
+        else:
+            source_message_pattern = str(pattern_candidate or "")
+        source_message_pattern = source_message_pattern.strip() or MESSAGE_ID_PATTERN_DEFAULT
         updated_entries: List[Dict[str, Any]] = []
         now = now_ts()
         for target_id in target_ids:
@@ -3571,10 +3794,12 @@ def copy_device_lock(payload: DeviceLockCopyRequest) -> Dict[str, Any]:
                 UPDATE device_configs
                 SET substitution_lock_mode='lock',
                     substitution_snapshot=?,
+                    message_id_auto=?,
+                    message_id_pattern=?,
                     updated_at=?
                 WHERE device_id=? AND domain=?
                 """,
-                (snapshot_json, now, target_id, normalized_domain),
+                (snapshot_json, source_message_auto, source_message_pattern, now, target_id, normalized_domain),
             )
             updated_row = conn.execute(
                 "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
@@ -3680,10 +3905,23 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
         sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
         sanitized_interval = clamp_anchor_interval(payload.anchor_interval or 0)
         sanitized_anchor = normalize_anchor_email(payload.anchor_email or "")
+        if payload.message_id_auto is None:
+            message_id_auto_flag = 1 if config_data.get("message_id_auto", 1) else 0
+        else:
+            message_id_auto_flag = 1 if payload.message_id_auto else 0
+        pattern_candidate = payload.message_id_pattern if payload.message_id_pattern is not None else config_data.get("message_id_pattern")
+        if isinstance(pattern_candidate, bytes):
+            try:
+                sanitized_pattern = pattern_candidate.decode("utf-8")
+            except UnicodeDecodeError:
+                sanitized_pattern = pattern_candidate.decode("latin-1", errors="ignore")
+        else:
+            sanitized_pattern = str(pattern_candidate or "")
+        sanitized_pattern = sanitized_pattern.strip() or MESSAGE_ID_PATTERN_DEFAULT
         conn.execute(
             """
             UPDATE device_configs
-            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
+            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, message_id_auto=?, message_id_pattern=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
                 updated_at=?
             WHERE device_id=? AND domain=?
             """,
@@ -3693,6 +3931,8 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
                 int(payload.smtp_port or 25),
                 payload.mail_from or "",
                 payload.header or "",
+                message_id_auto_flag,
+                sanitized_pattern,
                 max(1, int(payload.session_count or 1)),
                 sanitized_bcc,
                 sanitized_interval,
@@ -3993,6 +4233,15 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
             context=context,
             random_generator=rng,
         )
+        auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
+        resolved_config["message_id_auto"] = auto_enabled
+        resolved_config["message_id_pattern"] = pattern_value
+        resolved_config["header"] = ensure_message_id_header(
+            resolved_config.get("header"),
+            auto_enabled=auto_enabled,
+            pattern_value=pattern_value,
+            mail_from=resolved_config.get("mail_from"),
+        )
         minimal_config = {
             "smtp_host": resolved_config.get("smtp_host"),
             "smtp_port": resolved_config.get("smtp_port"),
@@ -4116,12 +4365,31 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
     session_count = max(1, session_count)
     anchor_interval = clamp_anchor_interval(base.get("anchor_interval", 0))
     anchor_email = normalize_anchor_email(base.get("anchor_email", ""))
+    message_id_auto_raw = base.get("message_id_auto", DEFAULT_DOMAIN_CONFIG.get("message_id_auto"))
+    if message_id_auto_raw is None:
+        message_id_auto = bool(DEFAULT_DOMAIN_CONFIG.get("message_id_auto", True))
+    else:
+        try:
+            message_id_auto = bool(int(message_id_auto_raw))
+        except (TypeError, ValueError):
+            message_id_auto = bool(message_id_auto_raw)
+    pattern_raw = base.get("message_id_pattern")
+    if isinstance(pattern_raw, bytes):
+        try:
+            message_id_pattern = pattern_raw.decode("utf-8")
+        except UnicodeDecodeError:
+            message_id_pattern = pattern_raw.decode("latin-1", errors="ignore")
+    else:
+        message_id_pattern = str(pattern_raw or "")
+    message_id_pattern = message_id_pattern.strip() or MESSAGE_ID_PATTERN_DEFAULT
     return {
         "helo": base.get("helo", ""),
         "smtp_host": base.get("smtp_host", ""),
         "smtp_port": base.get("smtp_port", 25),
         "mail_from": base.get("mail_from", ""),
         "header": base.get("header", ""),
+        "message_id_auto": message_id_auto,
+        "message_id_pattern": message_id_pattern,
         "session_count": session_count,
         "bcc_count": bcc_count,
         "anchor_interval": anchor_interval,
@@ -4130,19 +4398,25 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
     }
 
 
-PREVIEW_OVERRIDE_FIELDS = ("helo", "mail_from", "header", "anchor_email")
+PREVIEW_OVERRIDE_FIELDS = ("helo", "mail_from", "header", "anchor_email", "message_id_pattern", "message_id_auto")
 
 
-def sanitize_preview_override(raw: Any) -> Dict[str, str]:
+def sanitize_preview_override(raw: Any) -> Dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
-    sanitized: Dict[str, str] = {}
+    sanitized: Dict[str, Any] = {}
     for field in PREVIEW_OVERRIDE_FIELDS:
         if field not in raw:
             continue
         value = raw.get(field)
         if field == "anchor_email":
             sanitized[field] = normalize_anchor_email(value)
+        elif field == "message_id_auto":
+            if isinstance(value, str):
+                lowered = value.strip().lower()
+                sanitized[field] = lowered in {"1", "true", "yes", "on"}
+            else:
+                sanitized[field] = bool(value)
         else:
             sanitized[field] = str(value or "")
     return sanitized
@@ -4180,6 +4454,15 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                 lock_snapshot,
                 context=context,
                 random_generator=rng,
+            )
+            auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
+            resolved_config["message_id_auto"] = auto_enabled
+            resolved_config["message_id_pattern"] = pattern_value
+            resolved_config["header"] = ensure_message_id_header(
+                resolved_config.get("header"),
+                auto_enabled=auto_enabled,
+                pattern_value=pattern_value,
+                mail_from=resolved_config.get("mail_from"),
             )
             job_payload = attach_telegram_credentials(
                 {"config": resolved_config},
@@ -4240,6 +4523,15 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             rcpt_source=rcpt_to,
             rcpt_override=bool(payload.rcpt_to),
             override_fields=override_fields,
+        )
+        auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
+        resolved_config["message_id_auto"] = auto_enabled
+        resolved_config["message_id_pattern"] = pattern_value
+        resolved_config["header"] = ensure_message_id_header(
+            resolved_config.get("header"),
+            auto_enabled=auto_enabled,
+            pattern_value=pattern_value,
+            mail_from=resolved_config.get("mail_from"),
         )
         substituted_rcpt = resolved_rcpt or rcpt_to
         force_imap_check = bool(payload.force_imap_check)

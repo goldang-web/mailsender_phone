@@ -2242,6 +2242,16 @@ button:not(:disabled):hover {
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
           </div>
         </div>
+        <div class="global-form">
+          <label class="field">
+            <span>Message-ID 패턴</span>
+            <input type="text" id="globalMessageIdPattern" placeholder="<${랜덤:영소숫자:22}@auto.local>" autocomplete="off" spellcheck="false">
+          </label>
+          <label class="inline-checkbox">
+            <input type="checkbox" id="globalMessageIdAuto">
+            <span>Message-ID 자동 삽입</span>
+          </label>
+        </div>
       </div>
       <div class="global-split">
         <div class="global-section">
@@ -2532,6 +2542,7 @@ button:not(:disabled):hover {
 </div>
 
 <script>
+const MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소숫자:22}@auto.local>";
 const GLOBAL_FIELD_LIST = [
   "active_domain",
   "helo",
@@ -2543,6 +2554,8 @@ const GLOBAL_FIELD_LIST = [
   "stop_schedule_time",
   "telegram_bot_token",
   "telegram_chat_id",
+  "message_id_auto",
+  "message_id_pattern",
 ];
 const GLOBAL_DEFAULTS = {
   active_domain: "naver",
@@ -2556,6 +2569,8 @@ const GLOBAL_DEFAULTS = {
   substitution_rules: [],
   telegram_bot_token: "",
   telegram_chat_id: "",
+  message_id_auto: true,
+  message_id_pattern: MESSAGE_ID_PATTERN_DEFAULT,
 };
 const GLOBAL_INPUT_IDS = {
   active_domain: "globalActiveDomainGroup",
@@ -2568,6 +2583,8 @@ const GLOBAL_INPUT_IDS = {
   stop_schedule_time: "globalStopScheduleTime",
   telegram_bot_token: "globalTelegramBotToken",
   telegram_chat_id: "globalTelegramChatId",
+  message_id_auto: "globalMessageIdAuto",
+  message_id_pattern: "globalMessageIdPattern",
 };
 
 const IMAP_DEFAULT_ALLOWED_LATENCY = 20;
@@ -2651,6 +2668,8 @@ const state = {
     stop_schedule_time: false,
     telegram_bot_token: false,
     telegram_chat_id: false,
+    message_id_auto: false,
+    message_id_pattern: false,
   },
   globalStatusTimer: null,
   telegramStatusTimer: null,
@@ -2911,7 +2930,8 @@ function createEmptyListRule() {
   };
 }
 
-const CONFIG_FIELDS = ["helo", "mail_from", "header", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
+const CONFIG_FIELDS = ["helo", "mail_from", "header", "message_id_pattern", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
+const CONFIG_TOGGLE_FIELDS = ["message_id_auto"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 6;
@@ -3162,6 +3182,8 @@ function initialFieldValues(config) {
     helo: config?.helo || "",
     mail_from: config?.mail_from || "",
     header: config?.header || "",
+    message_id_pattern: config?.message_id_pattern || MESSAGE_ID_PATTERN_DEFAULT,
+    message_id_auto: typeof config?.message_id_auto === "boolean" ? config.message_id_auto : Boolean(config?.message_id_auto ?? true),
     session_count: sanitizeSessionValue(config?.session_count ?? "1"),
     bcc_count: formatBccValue(config?.bcc_count ?? 0),
     anchor_interval: formatAnchorValue(config?.anchor_interval ?? 0),
@@ -3220,12 +3242,20 @@ function collectConfigPayload(card, currentDevice, domain) {
   const anchorEmailInput = card.querySelector('[data-field="anchor_email"]');
   const anchorEmailValue = anchorEmailInput?.value?.trim() ?? "";
 
+  const messageIdAutoInput = card.querySelector('[data-field="message_id_auto"]');
+  const messageIdAutoValue = Boolean(messageIdAutoInput?.checked);
+  const messageIdPatternInput = card.querySelector('[data-field="message_id_pattern"]');
+  let messageIdPatternValue = messageIdPatternInput?.value ?? "";
+  messageIdPatternValue = messageIdPatternValue.trim() || MESSAGE_ID_PATTERN_DEFAULT;
+
   return {
     payload: {
       helo: card.querySelector('[data-field="helo"]').value.trim(),
       smtp_host: (currentDevice.configs?.[domain]?.smtp_host || "").trim(),
       mail_from: card.querySelector('[data-field="mail_from"]').value.trim(),
       header: card.querySelector('[data-field="header"]').value,
+      message_id_auto: messageIdAutoValue,
+      message_id_pattern: messageIdPatternValue,
       session_count: Number(sessionValue) || 1,
       bcc_count: parseBccInput(bccValue),
       anchor_interval: parseAnchorInput(anchorIntervalValue),
@@ -3253,6 +3283,8 @@ function prepareSinglePreviewRequest(card, currentDevice, domain) {
     mail_from: payload.mail_from,
     header: payload.header,
     anchor_email: payload.anchor_email,
+    message_id_pattern: payload.message_id_pattern,
+    message_id_auto: payload.message_id_auto,
   };
   const overrides = lockActive ? {} : rawOverrides;
   const rawRcpt = (payload.rcpt_to || "").trim();
@@ -3265,6 +3297,8 @@ function prepareSinglePreviewRequest(card, currentDevice, domain) {
       rcpt = "";
     }
   }
+  config_snapshot.message_id_pattern = payload.message_id_pattern;
+  config_snapshot.message_id_auto = payload.message_id_auto;
   const fallback = {
     helo: lockActive
       ? (snapshotFields.helo ?? baseConfig.helo ?? "")
@@ -4265,6 +4299,13 @@ function normalizeGlobalFieldValue(field, value) {
   }
   if (field === "stop_schedule_time") {
     return sanitizeScheduleTime(value ?? "");
+  }
+  if (field === "message_id_auto") {
+    return Boolean(value ?? true);
+  }
+  if (field === "message_id_pattern") {
+    const pattern = typeof value === "string" ? value : String(value ?? "");
+    return pattern.trim() || MESSAGE_ID_PATTERN_DEFAULT;
   }
   if (value === undefined || value === null) {
     return GLOBAL_DEFAULTS[field];
@@ -5937,6 +5978,13 @@ function initGlobalForm() {
       });
       return;
     }
+    if (field === "message_id_auto") {
+      input.addEventListener("change", () => {
+        state.globalDirty[field] = true;
+        state.globalDraft[field] = Boolean(input.checked);
+      });
+      return;
+    }
     if (field === "stop_schedule_time") {
       input.addEventListener("input", () => {
         const formatted = formatScheduleInputValue(input.value);
@@ -5987,6 +6035,16 @@ function initGlobalForm() {
           input.value = sanitized;
         }
         state.globalDraft[field] = sanitized;
+        state.globalDirty[field] = true;
+      });
+    } else if (field === "message_id_pattern") {
+      input.addEventListener("blur", () => {
+        const trimmed = (input.value || "").trim();
+        const normalizedPattern = trimmed || MESSAGE_ID_PATTERN_DEFAULT;
+        if (input.value !== normalizedPattern) {
+          input.value = normalizedPattern;
+        }
+        state.globalDraft[field] = normalizedPattern;
         state.globalDirty[field] = true;
       });
     }
@@ -7048,6 +7106,8 @@ function bestConfig(device, domain) {
     smtp_port: 25,
     mail_from: "",
     header: "",
+    message_id_auto: true,
+    message_id_pattern: MESSAGE_ID_PATTERN_DEFAULT,
     session_count: 1,
     bcc_count: 0,
     rcpt_to: "",
@@ -7887,6 +7947,10 @@ function populateConfigForm(card, device, domain) {
   if (mailInput && document.activeElement !== mailInput) mailInput.value = cache.values.mail_from;
   const headerInput = card.querySelector('[data-field="header"]');
   if (headerInput && document.activeElement !== headerInput) headerInput.value = cache.values.header;
+  const messageIdPatternInput = card.querySelector('[data-field="message_id_pattern"]');
+  if (messageIdPatternInput && document.activeElement !== messageIdPatternInput) messageIdPatternInput.value = cache.values.message_id_pattern;
+  const messageIdAutoInput = card.querySelector('[data-field="message_id_auto"]');
+  if (messageIdAutoInput) messageIdAutoInput.checked = Boolean(cache.values.message_id_auto);
   const sessionInput = card.querySelector('[data-field="session_count"]');
   if (sessionInput && document.activeElement !== sessionInput) sessionInput.value = cache.values.session_count;
   const bccInput = card.querySelector('[data-field="bcc_count"]');
@@ -8051,6 +8115,18 @@ function attachCardEvents(card) {
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       markFieldDirty(currentDevice.id, domain, fieldName, event.target.value);
+    });
+  });
+
+  CONFIG_TOGGLE_FIELDS.forEach((fieldName) => {
+    const el = card.querySelector(`[data-field="${fieldName}"]`);
+    if (!el) {
+      return;
+    }
+    el.addEventListener("change", (event) => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, fieldName, Boolean(event.target.checked));
     });
   });
 
@@ -8224,6 +8300,8 @@ function attachCardEvents(card) {
         header: payload.header,
         session_count: payload.session_count,
         bcc_count: payload.bcc_count,
+        message_id_auto: payload.message_id_auto,
+        message_id_pattern: payload.message_id_pattern,
       });
       setGlobalStatus("선택한 카드 설정을 전체 기기에 적용합니다...", "info");
       copyGlobalBtn.disabled = true;
@@ -8237,6 +8315,8 @@ function attachCardEvents(card) {
             header: payload.header,
             session_count: payload.session_count,
             bcc_count: payload.bcc_count,
+            message_id_auto: payload.message_id_auto,
+            message_id_pattern: payload.message_id_pattern,
           },
         });
       } finally {
@@ -8654,6 +8734,16 @@ function buildDeviceCard(device) {
         </span>
         <textarea data-field="header" placeholder="헤더를 입력하세요"></textarea>
       </label>
+      <div class="field-row message-id-row">
+        <label class="inline-checkbox">
+          <input type="checkbox" data-field="message_id_auto">
+          <span>Message-ID 자동 삽입</span>
+        </label>
+        <label class="field message-id-pattern-field">
+          <span>Message-ID 패턴</span>
+          <input type="text" data-field="message_id_pattern" placeholder="<${랜덤:영소숫자:22}@auto.local>" spellcheck="false" autocomplete="off">
+        </label>
+      </div>
       <div class="action-bar">
         <label class="field rcpt-field">
           <span>단일 발송 RCPT TO</span>
@@ -9921,6 +10011,8 @@ async function handleGlobalApply(options = {}) {
   const headerInput = document.getElementById("globalHeader");
   const sessionInput = document.getElementById("globalSessionCount");
   const bccInput = document.getElementById("globalBccCount");
+  const messageIdAutoInput = document.getElementById("globalMessageIdAuto");
+  const messageIdPatternInput = document.getElementById("globalMessageIdPattern");
   const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
   const scheduleToggle = document.getElementById("globalStopScheduleToggle");
   const scheduleTimeInput = document.getElementById("globalStopScheduleTime");
@@ -9934,6 +10026,8 @@ async function handleGlobalApply(options = {}) {
   const hasHeaderOverride = Object.prototype.hasOwnProperty.call(overrides, "header");
   const hasSessionOverride = Object.prototype.hasOwnProperty.call(overrides, "session_count");
   const hasBccOverride = Object.prototype.hasOwnProperty.call(overrides, "bcc_count");
+  const hasMessageIdAutoOverride = Object.prototype.hasOwnProperty.call(overrides, "message_id_auto");
+  const hasMessageIdPatternOverride = Object.prototype.hasOwnProperty.call(overrides, "message_id_pattern");
 
   let activeDomainValue;
   if (hasActiveDomainOverride) {
@@ -10020,6 +10114,32 @@ async function handleGlobalApply(options = {}) {
     }
     state.globalDraft.bcc_count = bccValue;
   }
+  let messageIdAutoValue;
+  if (hasMessageIdAutoOverride) {
+    messageIdAutoValue = Boolean(overrides.message_id_auto);
+  } else if (messageIdAutoInput) {
+    messageIdAutoValue = Boolean(messageIdAutoInput.checked);
+  } else {
+    messageIdAutoValue = Boolean(state.globalDraft.message_id_auto ?? GLOBAL_DEFAULTS.message_id_auto);
+  }
+  state.globalDraft.message_id_auto = messageIdAutoValue;
+  if (messageIdAutoInput) {
+    messageIdAutoInput.checked = messageIdAutoValue;
+  }
+
+  let messageIdPatternValue;
+  if (hasMessageIdPatternOverride) {
+    messageIdPatternValue = (overrides.message_id_pattern ?? "").toString();
+  } else if (messageIdPatternInput) {
+    messageIdPatternValue = messageIdPatternInput.value ?? state.globalDraft.message_id_pattern ?? MESSAGE_ID_PATTERN_DEFAULT;
+  } else {
+    messageIdPatternValue = state.globalDraft.message_id_pattern ?? MESSAGE_ID_PATTERN_DEFAULT;
+  }
+  messageIdPatternValue = (messageIdPatternValue || "").trim() || MESSAGE_ID_PATTERN_DEFAULT;
+  state.globalDraft.message_id_pattern = messageIdPatternValue;
+  if (messageIdPatternInput && messageIdPatternInput.value !== messageIdPatternValue) {
+    messageIdPatternInput.value = messageIdPatternValue;
+  }
   const telegramTokenValue = telegramTokenInput?.value.trim() ?? "";
   const telegramChatValue = telegramChatInput?.value.trim() ?? "";
   if (telegramTokenInput && telegramTokenInput.value !== telegramTokenValue) {
@@ -10079,6 +10199,12 @@ async function handleGlobalApply(options = {}) {
   if (bccValue !== undefined && (hasBccOverride || bccInput)) {
     payload.bcc_count = parseBccInput(bccValue);
   }
+  if (messageIdAutoValue !== undefined && (hasMessageIdAutoOverride || messageIdAutoInput)) {
+    payload.message_id_auto = Boolean(messageIdAutoValue);
+  }
+  if (messageIdPatternValue !== undefined && (hasMessageIdPatternOverride || messageIdPatternInput)) {
+    payload.message_id_pattern = messageIdPatternValue;
+  }
   payload.stop_schedule_enabled = toggleChecked && Boolean(sanitizedSchedule);
   payload.stop_schedule_time = sanitizedSchedule || "";
   payload.telegram_bot_token = telegramTokenValue;
@@ -10115,6 +10241,8 @@ async function handleGlobalApply(options = {}) {
         if (field === "header") return "HEADER";
         if (field === "session_count") return "세션 수";
         if (field === "bcc_count") return "BCC 수";
+        if (field === "message_id_auto") return "Message-ID 자동 삽입";
+        if (field === "message_id_pattern") return "Message-ID 패턴";
         if (field === "stop_schedule") return "자동 중지";
         if (field === "substitution_rules") return "치환 변수";
         if (field === "telegram_bot_token") return "텔레그램 봇 토큰";
