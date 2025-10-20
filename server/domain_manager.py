@@ -99,11 +99,10 @@ class DomainManager:
     # ------------------------------------------------------------------ #
     def _ensure_db(self, domain: str) -> None:
         path = self.root / domain / f"{domain}.db"
-        if path.exists():
-            return
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as conn:
             self._apply_schema(conn)
+            self._ensure_emails_table_allows_duplicates(conn, domain)
             self._ensure_config_defaults(conn)
 
     @staticmethod
@@ -125,7 +124,7 @@ class DomainManager:
             """
             CREATE TABLE IF NOT EXISTS emails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL,
                 source_file TEXT,
                 version INTEGER,
                 status TEXT CHECK(status IN ('pending','reserved','sent','block','failed','removed')) NOT NULL DEFAULT 'pending',
@@ -173,6 +172,71 @@ class DomainManager:
             """
         )
         conn.commit()
+
+    @staticmethod
+    def _fetch_table_definition(conn: sqlite3.Connection, table: str) -> str:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if row is None:
+            return ""
+        if isinstance(row, sqlite3.Row):
+            return str(row["sql"] or "")
+        if isinstance(row, (list, tuple)):
+            return str(row[0] or "")
+        return str(row or "")
+
+    def _ensure_emails_table_allows_duplicates(self, conn: sqlite3.Connection, domain: str) -> None:
+        create_sql = self._fetch_table_definition(conn, "emails")
+        if not create_sql:
+            return
+        compact = "".join(create_sql.lower().split())
+        if "emailtextnotnullunique" not in compact and "unique(email)" not in compact:
+            return
+        print(f"[DomainManager] {domain} emails 테이블에서 UNIQUE 제약을 제거합니다.")
+        self._rebuild_emails_table(conn)
+        self._apply_schema(conn)
+
+    @staticmethod
+    def _rebuild_emails_table(conn: sqlite3.Connection) -> None:
+        columns = (
+            "id, email, source_file, version, status, priority, reserved_by, reserved_at, "
+            "next_retry_at, attempts, last_error, meta, created_at, updated_at"
+        )
+        create_sql = (
+            """
+            CREATE TABLE emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT NOT NULL,
+                source_file TEXT,
+                version INTEGER,
+                status TEXT CHECK(status IN ('pending','reserved','sent','block','failed','removed')) NOT NULL DEFAULT 'pending',
+                priority INTEGER DEFAULT 100,
+                reserved_by TEXT,
+                reserved_at TEXT,
+                next_retry_at TEXT,
+                attempts INTEGER DEFAULT 0,
+                last_error TEXT,
+                meta TEXT DEFAULT '{}',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        try:
+            conn.execute("PRAGMA foreign_keys=OFF")
+            conn.execute("BEGIN")
+            conn.execute("ALTER TABLE emails RENAME TO emails_backup")
+            conn.execute(create_sql)
+            conn.execute(
+                f"INSERT INTO emails ({columns}) SELECT {columns} FROM emails_backup"
+            )
+            conn.execute("DROP TABLE emails_backup")
+            conn.commit()
+        except sqlite3.DatabaseError:
+            conn.rollback()
+            raise
 
     @staticmethod
     def _connect(path: Path) -> sqlite3.Connection:
@@ -261,14 +325,14 @@ class DomainManager:
         files = self.list_files(domain)
         if not files:
             raise ValueError("업로드된 주소 파일이 없습니다.")
-        data_map: Dict[str, Dict[str, str]] = {}
+        entries: List[Tuple[str, str]] = []
         per_file_counts: Dict[str, int] = defaultdict(int)
         for info in files:
             path = self.files_dir(domain) / info.name
             lines = self._read_lines(path)
             for email in lines:
                 per_file_counts[info.name] += 1
-                data_map[email] = {"source_file": info.name}
+                entries.append((email, info.name))
 
         now = datetime.now(timezone.utc).isoformat()
         db_path = self.db_path(domain)
@@ -276,47 +340,70 @@ class DomainManager:
             with self._connect(db_path) as conn:
                 self._apply_schema(conn)
                 self._ensure_config_defaults(conn)
+                self._ensure_emails_table_allows_duplicates(conn, domain)
                 current_version = conn.execute("SELECT COALESCE(MAX(version), 0) FROM injection_meta").fetchone()[0] or 0
                 new_version = current_version + 1
                 existing_rows = conn.execute(
-                    "SELECT id, email, status, version FROM emails"
+                    "SELECT id, email, status, source_file FROM emails ORDER BY id ASC"
                 ).fetchall()
 
-                existing_map = {row["email"]: row for row in existing_rows}
-
                 inserts: List[Tuple] = []
+                refresh_rows: List[Tuple] = []
+                replacement_rows: List[Tuple] = []
                 revive_ids: List[int] = []
                 remove_ids: List[int] = []
-                update_rows: List[Tuple] = []
 
-                for email, row in existing_map.items():
-                    if email in data_map:
-                        source_file = data_map[email]["source_file"]
-                        update_rows.append((source_file, new_version, now, row["id"]))
-                        if row["status"] == "removed":
+                existing_count = len(existing_rows)
+                new_count = len(entries)
+                min_count = min(existing_count, new_count)
+
+                for idx in range(min_count):
+                    row = existing_rows[idx]
+                    email, source_file = entries[idx]
+                    row_email = row["email"]
+                    row_source = row["source_file"]
+                    row_status = row["status"]
+
+                    if row_email == email and row_source == source_file:
+                        refresh_rows.append((source_file, new_version, now, row["id"]))
+                        if row_status == "removed":
                             revive_ids.append(row["id"])
-                        del data_map[email]
-                    else:
-                        remove_ids.append(row["id"])
+                        continue
 
-                for email, meta in data_map.items():
-                    inserts.append(
+                    replacement_rows.append(
                         (
                             email,
-                            meta["source_file"],
+                            source_file,
                             new_version,
-                            "pending",
                             DEFAULT_PRIORITIES["pending"],
-                            None,
-                            None,
-                            None,
-                            0,
-                            None,
-                            "{}",
                             now,
-                            now,
+                            row["id"],
                         )
                     )
+
+                if new_count > existing_count:
+                    for email, source_file in entries[min_count:]:
+                        inserts.append(
+                            (
+                                email,
+                                source_file,
+                                new_version,
+                                "pending",
+                                DEFAULT_PRIORITIES["pending"],
+                                None,
+                                None,
+                                None,
+                                0,
+                                None,
+                                "{}",
+                                now,
+                                now,
+                            )
+                        )
+
+                if existing_count > new_count:
+                    for row in existing_rows[min_count:]:
+                        remove_ids.append(row["id"])
 
                 if inserts:
                     conn.executemany(
@@ -340,7 +427,7 @@ class DomainManager:
                         inserts,
                     )
 
-                if update_rows:
+                if refresh_rows:
                     conn.executemany(
                         """
                         UPDATE emails
@@ -349,7 +436,28 @@ class DomainManager:
                             updated_at = ?
                         WHERE id = ?
                         """,
-                        update_rows,
+                        refresh_rows,
+                    )
+
+                if replacement_rows:
+                    conn.executemany(
+                        """
+                        UPDATE emails
+                        SET email = ?,
+                            source_file = ?,
+                            version = ?,
+                            status = 'pending',
+                            priority = ?,
+                            reserved_by = NULL,
+                            reserved_at = NULL,
+                            next_retry_at = NULL,
+                            attempts = 0,
+                            last_error = NULL,
+                            meta = '{}',
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        replacement_rows,
                     )
 
                 if revive_ids:

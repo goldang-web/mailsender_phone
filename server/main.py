@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import copy
 import hashlib
 import logging
 import json
@@ -292,20 +293,49 @@ def ensure_message_id_header(
         header_section = normalized_newlines
         separator_block = "\n\n"
         body_section = None
-    if MESSAGE_ID_HEADER_PATTERN.search(header_section):
-        return header_text
     message_id_value = _build_message_id_value(pattern_value, mail_from, helo)
-    newline_hint = "\r\n" if "\r\n" in header_text else "\n"
-    if header_section:
-        header_section = f"{header_section}\nMessage-ID: {message_id_value}"
+    match = MESSAGE_ID_HEADER_PATTERN.search(header_section)
+    if match:
+        indent = match.group("indent") or ""
+        start, end = match.span()
+        header_section = f"{header_section[:start]}{indent}Message-ID: {message_id_value}{header_section[end:]}"
     else:
-        header_section = f"Message-ID: {message_id_value}"
+        if header_section:
+            header_section = f"{header_section}\nMessage-ID: {message_id_value}"
+        else:
+            header_section = f"Message-ID: {message_id_value}"
+    newline_hint = "\r\n" if "\r\n" in header_text else "\n"
     if body_section is not None:
         rebuilt = f"{header_section}{separator_block}{body_section}"
     else:
         rebuilt = header_section
     rebuilt = rebuilt.replace("\n", newline_hint)
     if header_text.endswith(("\r\n", "\n")) and not rebuilt.endswith(newline_hint):
+        rebuilt = f"{rebuilt}{newline_hint}"
+    return rebuilt
+
+
+def _strip_message_id_header(header_value: Optional[str]) -> str:
+    if not isinstance(header_value, str) or not header_value:
+        return header_value if isinstance(header_value, str) else ""
+    original = header_value
+    normalized = original.replace("\r\n", "\n").replace("\r", "\n")
+    lines = normalized.split("\n")
+    result_lines: List[str] = []
+    skipping_continuation = False
+    for line in lines:
+        if skipping_continuation:
+            if line.startswith((" ", "\t")):
+                continue
+            skipping_continuation = False
+        if line.lstrip().lower().startswith("message-id:"):
+            skipping_continuation = True
+            continue
+        result_lines.append(line)
+    normalized_result = "\n".join(result_lines)
+    newline_hint = "\r\n" if "\r\n" in original else "\n"
+    rebuilt = normalized_result.replace("\n", newline_hint)
+    if original.endswith(("\r\n", "\n")) and rebuilt and not rebuilt.endswith(newline_hint):
         rebuilt = f"{rebuilt}{newline_hint}"
     return rebuilt
 
@@ -320,7 +350,37 @@ def resolve_message_id_settings(config: Dict[str, Any]) -> Tuple[bool, str]:
         except (TypeError, ValueError):
             auto_enabled = bool(raw_auto)
     pattern_value = _normalize_message_id_pattern(config.get("message_id_pattern"))
+    if auto_enabled and pattern_value and "${" not in pattern_value and pattern_value.startswith("<") and pattern_value.endswith(">"):
+        inner = pattern_value[1:-1]
+        if "@" in inner and not any(ch.isspace() for ch in inner):
+            pattern_value = MESSAGE_ID_PATTERN_DEFAULT
     return auto_enabled, pattern_value
+
+
+def _snapshot_with_preview_header(
+    snapshot: Optional[Dict[str, Any]],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    response_snapshot = copy.deepcopy(snapshot or {})
+    if not isinstance(response_snapshot, dict):
+        response_snapshot = {"fields": {}, "missing_tokens": []}
+    fields = response_snapshot.get("fields")
+    if not isinstance(fields, dict):
+        fields = {}
+        response_snapshot["fields"] = fields
+    auto_enabled, pattern_value = resolve_message_id_settings(config)
+    if auto_enabled:
+        header_source = fields.get("header")
+        if not isinstance(header_source, str):
+            header_source = str(header_source or "")
+        fields["header"] = ensure_message_id_header(
+            header_source,
+            auto_enabled=True,
+            pattern_value=pattern_value,
+            mail_from=config.get("mail_from"),
+            helo=config.get("helo"),
+        )
+    return response_snapshot
 
 
 def ensure_storage_root() -> None:
@@ -2533,6 +2593,8 @@ def resolve_substitution_outputs(
                 detail="고정 모드를 사용 중이지만 저장된 고정 값이 없습니다. '다시 뽑기'로 값을 만들거나 고정을 해제하세요.",
             )
         for field in SUBSTITUTION_TARGET_FIELDS:
+            if field == "message_id_pattern":
+                continue
             if field in overrides and field not in {"rcpt_to", "message_id_pattern"}:
                 if field_contains_tokens(working.get(field)):
                     raise HTTPException(
@@ -2566,6 +2628,13 @@ def resolve_substitution_outputs(
                         detail="고정 모드에서 RCPT TO 랜덤 값을 계산할 수 없습니다. '다시 뽑기' 후 고정을 유지하거나 고정을 해제하세요.",
                     )
                 rcpt_result = rcpt_source
+        auto_enabled, pattern_value = resolve_message_id_settings(working)
+        working["message_id_auto"] = auto_enabled
+        working["message_id_pattern"] = pattern_value
+        if auto_enabled:
+            locked_header = working.get("header")
+            if isinstance(locked_header, str) and locked_header:
+                working["header"] = _strip_message_id_header(locked_header)
         missing_tokens = set(snapshot_payload.get("missing_tokens") or [])
         return working, rcpt_result, missing_tokens, snapshot_payload
     rng = random_generator or random.SystemRandom()
@@ -3670,6 +3739,8 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
 def _sanitize_lock_fields(payload: DeviceLockRequest) -> Dict[str, str]:
     fields: Dict[str, str] = {}
     for key in SNAPSHOT_FIELD_KEYS:
+        if key == "message_id_pattern":
+            continue
         value = getattr(payload, key, None)
         if value is None:
             continue
@@ -3690,14 +3761,6 @@ def set_device_lock(device_id: str, domain: str, payload: DeviceLockRequest) -> 
     if not lock_fields:
         raise HTTPException(status_code=400, detail="고정할 필드 값을 최소 1개 이상 전달하세요.")
     missing_tokens = sorted({str(token).strip() for token in (payload.missing_tokens or []) if token})
-    snapshot_payload: Dict[str, Any] = {
-        "fields": lock_fields,
-        "missing_tokens": missing_tokens,
-        "generated_at": now_ts(),
-        "device_id": device_id,
-        "domain": normalized,
-        "source_device_id": device_id,
-    }
     with db_lock, get_conn() as conn:
         device = get_device(device_id, conn=conn)
         if not device:
@@ -3708,6 +3771,18 @@ def set_device_lock(device_id: str, domain: str, payload: DeviceLockRequest) -> 
         ).fetchone()
         if not config_row:
             raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        config_data = to_dict(config_row)
+        auto_enabled, _ = resolve_message_id_settings(config_data)
+        if auto_enabled and "header" in lock_fields:
+            lock_fields["header"] = _strip_message_id_header(lock_fields["header"])
+        snapshot_payload: Dict[str, Any] = {
+            "fields": lock_fields,
+            "missing_tokens": missing_tokens,
+            "generated_at": now_ts(),
+            "device_id": device_id,
+            "domain": normalized,
+            "source_device_id": device_id,
+        }
         snapshot_json = encode_substitution_snapshot(snapshot_payload)
         now = now_ts()
         conn.execute(
@@ -3727,11 +3802,17 @@ def set_device_lock(device_id: str, domain: str, payload: DeviceLockRequest) -> 
         ).fetchone()
     if not updated_row:
         raise HTTPException(status_code=500, detail="고정 값을 저장하지 못했습니다.")
+    config_response = serialize_config(to_dict(updated_row), include_secret=False)
+    response_snapshot = _snapshot_with_preview_header(
+        config_response.get("substitution_snapshot"),
+        config_response,
+    )
+    config_response["substitution_snapshot"] = response_snapshot
     return {
         "device_id": device_id,
         "domain": normalized,
-        "snapshot": snapshot_payload,
-        "config": serialize_config(to_dict(updated_row), include_secret=False),
+        "snapshot": response_snapshot,
+        "config": config_response,
     }
 
 
@@ -3774,6 +3855,13 @@ def refresh_device_lock(device_id: str, domain: str, payload: DeviceLockRefreshR
             rcpt_override=payload.rcpt_to is not None,
             override_fields=override_fields,
         )
+        auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
+        resolved_config["message_id_auto"] = auto_enabled
+        resolved_config["message_id_pattern"] = pattern_value
+        if auto_enabled:
+            header_candidate = resolved_config.get("header")
+            if isinstance(header_candidate, str) and header_candidate:
+                resolved_config["header"] = _strip_message_id_header(header_candidate)
         if missing_tokens:
             unresolved = ", ".join(sorted(missing_tokens))
             raise HTTPException(
@@ -3816,11 +3904,17 @@ def refresh_device_lock(device_id: str, domain: str, payload: DeviceLockRefreshR
         ).fetchone()
     if not updated_row:
         raise HTTPException(status_code=500, detail="고정 값을 저장하지 못했습니다.")
+    config_response = serialize_config(to_dict(updated_row), include_secret=False)
+    response_snapshot = _snapshot_with_preview_header(
+        config_response.get("substitution_snapshot"),
+        config_response,
+    )
+    config_response["substitution_snapshot"] = response_snapshot
     return {
         "device_id": device_id,
         "domain": normalized,
-        "snapshot": snapshot_payload,
-        "config": serialize_config(to_dict(updated_row), include_secret=False),
+        "snapshot": response_snapshot,
+        "config": config_response,
     }
 
 
@@ -4697,9 +4791,19 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             substitution_rules,
             lock_mode,
             lock_snapshot,
-                context=context,
-                random_generator=rng,
-            )
+            context=context,
+            random_generator=rng,
+        )
+        auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
+        resolved_config["message_id_auto"] = auto_enabled
+        resolved_config["message_id_pattern"] = pattern_value
+        resolved_config["header"] = ensure_message_id_header(
+            resolved_config.get("header"),
+            auto_enabled=auto_enabled,
+            pattern_value=pattern_value,
+            mail_from=resolved_config.get("mail_from"),
+            helo=resolved_config.get("helo"),
+        )
         job_payload = attach_telegram_credentials(
             {"config": resolved_config},
             bot_token=bot_token,

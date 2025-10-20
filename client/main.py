@@ -38,7 +38,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.79"
+APP_VERSION = "0.0.80"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -182,7 +182,7 @@ OFFLINE_HEALTH_PATH = "/health"
 DOMAIN_DB_SCHEMA = """
 CREATE TABLE IF NOT EXISTS emails (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL UNIQUE,
+    email TEXT NOT NULL,
     source_file TEXT,
     version INTEGER,
     status TEXT CHECK(status IN ('pending','reserved','sent','block','failed','nouser','removed')) NOT NULL DEFAULT 'pending',
@@ -2596,36 +2596,50 @@ class MailClient:
 
     def _upgrade_domain_schemas(self) -> None:
         for domain, db_path in self.domain_paths.items():
-            self._ensure_emails_table_supports_nouser(domain, db_path)
+            self._ensure_emails_table_schema(domain, db_path)
 
-    def _ensure_emails_table_supports_nouser(self, domain: str, db_path: Path) -> None:
+    def _ensure_emails_table_schema(self, domain: str, db_path: Path) -> None:
         if not db_path.exists():
             return
         try:
             with sqlite3.connect(db_path) as conn:
                 conn.row_factory = sqlite3.Row
-                row = conn.execute(
-                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='emails'"
-                ).fetchone()
-                create_sql = ""
-                if row is None:
-                    return
-                if isinstance(row, sqlite3.Row):
-                    create_sql = row["sql"]
-                elif isinstance(row, (list, tuple)):
-                    create_sql = row[0]
-                else:
-                    create_sql = str(row)
-                if create_sql and "nouser" in create_sql:
-                    return
+                create_sql = self._fetch_table_definition(conn, "emails")
                 if not create_sql:
                     return
-                print(f"[DB] {domain} emails 테이블을 nouser 상태 지원하도록 갱신합니다.")
-                self._migrate_emails_table_add_nouser(conn)
+                normalized = " ".join(create_sql.lower().split())
+                compact = "".join(create_sql.lower().split())
+                needs_rebuild = False
+                reasons: List[str] = []
+                if "nouser" not in normalized:
+                    needs_rebuild = True
+                    reasons.append("nouser 상태 추가")
+                if "emailtextnotnullunique" in compact or "unique(email)" in compact:
+                    needs_rebuild = True
+                    reasons.append("email UNIQUE 제약 제거")
+                if not needs_rebuild:
+                    return
+                reason_label = ", ".join(reasons) if reasons else "스키마 재구성"
+                print(f"[DB] {domain} emails 테이블을 재구성합니다. ({reason_label})")
+                self._rebuild_emails_table(conn)
         except sqlite3.DatabaseError as exc:
             print(f"[DB] {domain} 스키마 확인 실패: {exc}")
 
-    def _migrate_emails_table_add_nouser(self, conn: sqlite3.Connection) -> None:
+    @staticmethod
+    def _fetch_table_definition(conn: sqlite3.Connection, table: str) -> str:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
+        ).fetchone()
+        if row is None:
+            return ""
+        if isinstance(row, sqlite3.Row):
+            return str(row["sql"] or "")
+        if isinstance(row, (list, tuple)):
+            return str(row[0] or "")
+        return str(row or "")
+
+    def _rebuild_emails_table(self, conn: sqlite3.Connection) -> None:
         columns = (
             "id, email, source_file, version, status, priority, reserved_by, reserved_at, "
             "next_retry_at, attempts, last_error, meta, created_at, updated_at"
@@ -2634,7 +2648,7 @@ class MailClient:
             """
             CREATE TABLE emails (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                email TEXT NOT NULL UNIQUE,
+                email TEXT NOT NULL,
                 source_file TEXT,
                 version INTEGER,
                 status TEXT CHECK(status IN ('pending','reserved','sent','block','failed','nouser','removed')) NOT NULL DEFAULT 'pending',
@@ -2662,7 +2676,7 @@ class MailClient:
             conn.commit()
         except sqlite3.DatabaseError as exc:
             conn.rollback()
-            print(f"[DB] emails 테이블 갱신 실패: {exc}")
+            print(f"[DB] emails 테이블 재구성 실패: {exc}")
             raise
 
     def _reset_sent_sequences(self, domains: Optional[Iterable[str]] = None) -> None:
@@ -5692,14 +5706,11 @@ class MailClient:
         else:
             text = data.decode("utf-8", errors="ignore")
 
-        seen = set()
         emails: List[str] = []
         for line in text.splitlines():
             for match in EMAIL_PATTERN.findall(line):
                 email = match.strip(" <>\"'.,;:\t")
-                key = email.lower()
-                if email and key not in seen:
-                    seen.add(key)
+                if email:
                     emails.append(email)
         return emails
 

@@ -18,6 +18,10 @@ from server.main import (
     apply_substitutions_to_config,
     substitute_tokens,
     _build_message_id_value,
+    ensure_message_id_header,
+    MESSAGE_ID_PATTERN_DEFAULT,
+    resolve_message_id_settings,
+    _snapshot_with_preview_header,
     SubstitutionRule,
     SubstitutionPreviewItem,
     SubstitutionPreviewRequest,
@@ -314,6 +318,98 @@ class RandomLockModeTests(unittest.TestCase):
                 rcpt_source="${랜덤:영소:3}",
                 rcpt_override=True,
             )
+
+    def test_lock_mode_ignores_locked_message_id_pattern(self) -> None:
+        locked_snapshot = {
+            "fields": {
+                "header": "From: sender@example.com\nMessage-ID: <locked@example.com>\nSubject: Test",
+                "message_id_pattern": "<locked@example.com>",
+            },
+            "missing_tokens": [],
+        }
+        config_snapshot = {
+            "header": "From: sender@example.com\nMessage-ID: <locked@example.com>\nSubject: Test",
+            "mail_from": "sender@example.com",
+            "helo": "smtp.sender.example.com",
+            "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
+        }
+        resolved_config, _, missing_tokens, _ = resolve_substitution_outputs(
+            dict(config_snapshot),
+            [],
+            "lock",
+            locked_snapshot,
+        )
+        self.assertFalse(missing_tokens)
+        self.assertEqual(resolved_config.get("message_id_pattern"), MESSAGE_ID_PATTERN_DEFAULT)
+        rebuilt_header = ensure_message_id_header(
+            resolved_config.get("header"),
+            auto_enabled=True,
+            pattern_value=resolved_config.get("message_id_pattern"),
+            mail_from=resolved_config.get("mail_from"),
+            helo=resolved_config.get("helo"),
+        )
+        self.assertIn("Message-ID:", rebuilt_header)
+        self.assertNotIn("<locked@example.com>", rebuilt_header)
+
+
+class MessageIdHeaderTests(unittest.TestCase):
+    def test_resolve_message_id_settings_fallback_for_literal_pattern(self) -> None:
+        auto_enabled, pattern_value = resolve_message_id_settings(
+            {
+                "message_id_auto": True,
+                "message_id_pattern": "<locked@example.com>",
+            }
+        )
+        self.assertTrue(auto_enabled)
+        self.assertEqual(pattern_value, MESSAGE_ID_PATTERN_DEFAULT)
+
+    def test_snapshot_with_preview_header_adds_message_id(self) -> None:
+        snapshot = {
+            "fields": {
+                "header": "From: sender@example.com\nSubject: Test",
+            },
+            "missing_tokens": [],
+        }
+        config = {
+            "mail_from": "sender@example.com",
+            "helo": "smtp.sender.example.com",
+            "message_id_auto": True,
+            "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
+        }
+        preview_snapshot = _snapshot_with_preview_header(snapshot, config)
+        header_value = preview_snapshot.get("fields", {}).get("header", "")
+        self.assertIsInstance(header_value, str)
+        self.assertIn("Message-ID:", header_value)
+
+    def test_auto_enabled_replaces_existing_message_id(self) -> None:
+        original_header = (
+            "From: sender@example.com\n"
+            "Message-ID: <old@example.com>\n"
+            "Subject: Test\n"
+            "X-Extra: Value"
+        )
+        result = ensure_message_id_header(
+            original_header,
+            auto_enabled=True,
+            pattern_value="<fresh@example.com>",
+            mail_from="sender@example.com",
+            helo="smtp.sender.example.com",
+        )
+        self.assertIn("Message-ID: <fresh@example.com>", result)
+        self.assertNotIn("Message-ID: <old@example.com>", result)
+
+    def test_auto_enabled_appends_when_missing(self) -> None:
+        original_header = "From: sender@example.com\nSubject: Test"
+        result = ensure_message_id_header(
+            original_header,
+            auto_enabled=True,
+            pattern_value="<fresh@example.com>",
+            mail_from="sender@example.com",
+            helo="smtp.sender.example.com",
+        )
+        self.assertIn("From: sender@example.com", result)
+        self.assertIn("Subject: Test", result)
+        self.assertIn("Message-ID: <fresh@example.com>", result)
 
 
 if __name__ == "__main__":
