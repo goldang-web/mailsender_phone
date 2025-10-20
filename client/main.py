@@ -36,7 +36,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.76"
+APP_VERSION = "0.0.77"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
