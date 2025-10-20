@@ -19,7 +19,7 @@ from email import policy
 from email.parser import Parser
 from email.utils import format_datetime
 from pathlib import Path
-from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 from datetime import datetime, timezone, timedelta
 
 import requests
