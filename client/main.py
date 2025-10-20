@@ -39,7 +39,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.81"
+APP_VERSION = "0.0.82"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -867,6 +867,7 @@ class MailClient:
                 "allowed_latency_seconds": allowed_latency,
                 "failure_action": sanitize_imap_failure_action(entry.get("failure_action")),
                 "notify_before_stop_all": sanitize_bool_flag(entry.get("notify_before_stop_all")),
+                "purge_before_check": sanitize_bool_flag(entry.get("purge_before_check")),
                 "sent_threshold": sent_threshold,
                 "sent_since_last_check": sent_since_last_check,
                 "sent_last_reset_at": entry.get("sent_last_reset_at"),
@@ -1361,6 +1362,7 @@ class MailClient:
                 ),
                 "failure_action": sanitize_imap_failure_action(settings.get("failure_action")),
                 "notify_before_stop_all": sanitize_bool_flag(settings.get("notify_before_stop_all")),
+                "purge_before_check": sanitize_bool_flag(settings.get("purge_before_check")),
                 "sent_threshold": sent_threshold,
                 "sent_since_last_check": sent_since,
                 "sent_last_reset_at": settings.get("sent_last_reset_at"),
@@ -1950,6 +1952,7 @@ class MailClient:
                 "allowed_latency_seconds": IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
                 "failure_action": "none",
                 "notify_before_stop_all": False,
+                "purge_before_check": False,
                 "sent_threshold": IMAP_DEFAULT_SENT_THRESHOLD,
                 "sent_since_last_check": 0,
                 "sent_last_reset_at": None,
@@ -2101,6 +2104,9 @@ class MailClient:
         settings["failure_action"] = sanitize_imap_failure_action(payload.get("imap_failure_action"))
         settings["notify_before_stop_all"] = sanitize_bool_flag(
             payload.get("imap_notify_before_stop_all")
+        )
+        settings["purge_before_check"] = sanitize_bool_flag(
+            payload.get("imap_purge_before_check")
         )
         settings["sent_threshold"] = sanitize_imap_sent_threshold(
             payload.get("imap_sent_threshold"),
@@ -2558,6 +2564,7 @@ class MailClient:
         sent_at_iso = to_utc_iso(sent_at_value)
         failure_action_value = sanitize_imap_failure_action(settings.get("failure_action"))
         notify_before_stop = sanitize_bool_flag(settings.get("notify_before_stop_all"))
+        purge_before_check_enabled = sanitize_bool_flag(settings.get("purge_before_check"))
         threshold_value = sanitize_imap_sent_threshold(
             sent_threshold if sent_threshold is not None else settings.get("sent_threshold"),
             default=IMAP_DEFAULT_SENT_THRESHOLD,
@@ -2573,6 +2580,24 @@ class MailClient:
         if retry_wait_seconds <= 0:
             retry_wait_seconds = 3.0
 
+        def _safe_int(value: object) -> Optional[int]:
+            try:
+                if value is None:
+                    return None
+                if isinstance(value, bool):
+                    return int(value)
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        def _safe_float(value: object) -> Optional[float]:
+            try:
+                if value is None:
+                    return None
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
         def task() -> Dict[str, object]:
             nonlocal sent_at_value, sent_at_iso
             mode_label = "수동" if manual_force else "자동"
@@ -2585,6 +2610,8 @@ class MailClient:
             ]
             if sent_window_count is not None and sent_window_count > 0:
                 components.append(f"Sent {sent_window_count}건")
+            if purge_before_check_enabled:
+                components.append("스팸함 비우기 선행")
             self._log_imap_console(" · ".join(components), domain=normalized)
 
             probe_mail_sent = bool(passed_probe_result and passed_probe_result.success)
@@ -2603,6 +2630,58 @@ class MailClient:
             ip_after_change = passed_probe_result.ip_after_change if passed_probe_result else None
             throttle_marker = passed_probe_result.throttle_marker if passed_probe_result else None
             throttle_detail = passed_probe_result.throttle_detail if passed_probe_result else None
+
+            purge_attempted = False
+            purge_success: Optional[bool] = None
+            purge_reason_text = ""
+            purge_total_count: Optional[int] = None
+            purge_deleted_count: Optional[int] = None
+            purge_remaining_count: Optional[int] = None
+            purge_elapsed_seconds: Optional[float] = None
+            purge_folder = "Junk"
+            if purge_before_check_enabled:
+                purge_attempted = True
+                self._log_imap_console(
+                    f"IMAP 확인 전 스팸함 비우기 실행 · 폴더 {purge_folder}",
+                    domain=normalized,
+                )
+                try:
+                    purge_summary = purge_imap_folder(username, password, folder=purge_folder)
+                except Exception as exc:  # pylint: disable=broad-except
+                    purge_success = False
+                    purge_reason_text = f"예외: {exc}"
+                    self._log_imap_console(
+                        f"IMAP 확인 전 스팸함 비우기 실패 - {purge_reason_text}",
+                        domain=normalized,
+                    )
+                else:
+                    purge_success = bool(purge_summary.get("success"))
+                    purge_reason_text = str(purge_summary.get("reason") or "")
+                    purge_total_count = _safe_int(purge_summary.get("total_count", purge_summary.get("total")))
+                    purge_deleted_count = _safe_int(purge_summary.get("deleted_count", purge_summary.get("deleted")))
+                    purge_remaining_count = _safe_int(purge_summary.get("remaining_count", purge_summary.get("remaining")))
+                    purge_elapsed_seconds = _safe_float(purge_summary.get("elapsed_seconds", purge_summary.get("elapsed")))
+                    detail_parts: List[str] = []
+                    if purge_total_count is not None:
+                        detail_parts.append(f"총 {purge_total_count}건")
+                    if purge_deleted_count is not None:
+                        detail_parts.append(f"삭제 {purge_deleted_count}건")
+                    if purge_remaining_count is not None:
+                        detail_parts.append(f"남은 {purge_remaining_count}건")
+                    if purge_elapsed_seconds is not None:
+                        detail_parts.append(f"소요 {purge_elapsed_seconds:.1f}s")
+                    if purge_success:
+                        message = "IMAP 확인 전 스팸함 비우기 완료"
+                        if detail_parts:
+                            message = f"{message} · {' · '.join(detail_parts)}"
+                        self._log_imap_console(message, domain=normalized)
+                    else:
+                        reason_label = purge_reason_text or "사유 정보 없음"
+                        detail = " · ".join(detail_parts) if detail_parts else ""
+                        combined = f"IMAP 확인 전 스팸함 비우기 실패 - {reason_label}"
+                        if detail:
+                            combined = f"{combined} · {detail}"
+                        self._log_imap_console(combined, domain=normalized)
 
             if delay_seconds > 0:
                 time.sleep(delay_seconds)
@@ -2781,6 +2860,13 @@ class MailClient:
                 "probe_attempts": probe_attempts,
                 "check_attempts": len(attempt_history),
                 "check_max_attempts": max_check_attempts,
+                "purged_before_check": purge_attempted,
+                "purge_success": purge_success if purge_attempted else None,
+                "purge_reason": purge_reason_text if purge_attempted else "",
+                "purge_total_count": purge_total_count if purge_attempted else None,
+                "purge_deleted_count": purge_deleted_count if purge_attempted else None,
+                "purge_remaining_count": purge_remaining_count if purge_attempted else None,
+                "purge_elapsed_seconds": purge_elapsed_seconds if purge_attempted else None,
             }
             self._queue_imap_report(report)
             return report

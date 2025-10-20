@@ -67,6 +67,7 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "imap_allowed_latency_seconds": 20,
     "imap_failure_action": "none",
     "imap_notify_before_stop_all": False,
+    "imap_purge_before_check": False,
     "imap_sent_threshold": IMAP_SENT_THRESHOLD_DEFAULT,
     "imap_sent_since_last_check": 0,
     "imap_sent_last_reset_at": None,
@@ -729,6 +730,10 @@ def sanitize_imap_notify_before_stop_all(value: Any) -> bool:
     return sanitize_stop_schedule_enabled(value)
 
 
+def sanitize_imap_purge_before_check(value: Any) -> bool:
+    return sanitize_stop_schedule_enabled(value)
+
+
 def sanitize_imap_status(value: Any) -> str:
     if value is None:
         return ""
@@ -1335,6 +1340,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_allowed_latency_seconds INTEGER NOT NULL DEFAULT 20,
                 imap_failure_action TEXT NOT NULL DEFAULT 'none',
                 imap_notify_before_stop_all INTEGER NOT NULL DEFAULT 0,
+                imap_purge_before_check INTEGER NOT NULL DEFAULT 0,
                 imap_sent_threshold INTEGER NOT NULL DEFAULT 90,
                 imap_sent_since_last_check INTEGER NOT NULL DEFAULT 0,
                 imap_sent_last_reset_at TEXT,
@@ -1369,6 +1375,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_allowed_latency_seconds,
                 imap_failure_action,
                 imap_notify_before_stop_all,
+                imap_purge_before_check,
                 imap_sent_threshold,
                 imap_sent_since_last_check,
                 imap_sent_last_reset_at,
@@ -1391,6 +1398,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_delay_seconds AS imap_allowed_latency_seconds,
                 'none' AS imap_failure_action,
                 0 AS imap_notify_before_stop_all,
+                0 AS imap_purge_before_check,
                 {threshold_default} AS imap_sent_threshold,
                 0 AS imap_sent_since_last_check,
                 NULL AS imap_sent_last_reset_at,
@@ -1622,6 +1630,10 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_notify_before_stop_all INTEGER NOT NULL DEFAULT 0"
             )
+        if "imap_purge_before_check" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_purge_before_check INTEGER NOT NULL DEFAULT 0"
+            )
         if "imap_sent_threshold" not in config_columns:
             conn.execute(
                 f"ALTER TABLE device_configs ADD COLUMN imap_sent_threshold INTEGER NOT NULL DEFAULT {IMAP_SENT_THRESHOLD_DEFAULT}"
@@ -1792,7 +1804,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
                     imap_enabled, imap_username, imap_password, imap_delay_seconds,
                     imap_single_delay_seconds, imap_allowed_latency_seconds,
-                    imap_failure_action, imap_notify_before_stop_all,
+                    imap_failure_action, imap_notify_before_stop_all, imap_purge_before_check,
                     imap_sent_threshold, imap_sent_since_last_check, imap_sent_last_reset_at,
                     imap_last_status, imap_last_checked_at, imap_last_latency, imap_last_error, imap_last_mail_from,
                     imap_last_sent_at, imap_last_received_at,
@@ -1801,7 +1813,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     updated_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(device_id, domain) DO NOTHING
                 """,
@@ -1843,6 +1855,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG["imap_allowed_latency_seconds"],
                     DEFAULT_DOMAIN_CONFIG["imap_failure_action"],
                     1 if DEFAULT_DOMAIN_CONFIG["imap_notify_before_stop_all"] else 0,
+                    1 if DEFAULT_DOMAIN_CONFIG["imap_purge_before_check"] else 0,
                     DEFAULT_DOMAIN_CONFIG["imap_sent_threshold"],
                     DEFAULT_DOMAIN_CONFIG["imap_sent_since_last_check"],
                     DEFAULT_DOMAIN_CONFIG["imap_sent_last_reset_at"],
@@ -1937,6 +1950,9 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     imap_notify_before_stop_all = sanitize_imap_notify_before_stop_all(
         row.get("imap_notify_before_stop_all")
     )
+    imap_purge_before_check = sanitize_imap_purge_before_check(
+        row.get("imap_purge_before_check")
+    )
     imap_status = sanitize_imap_status(row.get("imap_last_status"))
     imap_checked_at = row.get("imap_last_checked_at")
     imap_latency = sanitize_imap_latency(row.get("imap_last_latency"))
@@ -2001,6 +2017,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "imap_allowed_latency_seconds": imap_allowed_latency,
         "imap_failure_action": imap_failure_action,
         "imap_notify_before_stop_all": imap_notify_before_stop_all,
+        "imap_purge_before_check": imap_purge_before_check,
         "imap_sent_threshold": imap_sent_threshold,
         "imap_sent_since_last_check": sent_since_last_check,
         "imap_sent_last_reset_at": imap_sent_last_reset,
@@ -3108,6 +3125,7 @@ class ImapSettingsPayload(BaseModel):
     allowed_latency_seconds: Optional[int] = None
     failure_action: Optional[str] = None
     notify_before_stop_all: Optional[bool] = None
+    purge_before_check: Optional[bool] = None
     delay_seconds: Optional[int] = None  # legacy alias for allowed latency
 
 
@@ -3206,6 +3224,14 @@ class ImapReportPayload(BaseModel):
     probe_mail_error: Optional[str] = None
     probe_status_line: Optional[str] = None
     probe_detail_line: Optional[str] = None
+    probe_attempts: Optional[int] = None
+    purged_before_check: Optional[bool] = None
+    purge_success: Optional[bool] = None
+    purge_reason: Optional[str] = None
+    purge_total_count: Optional[int] = None
+    purge_deleted_count: Optional[int] = None
+    purge_remaining_count: Optional[int] = None
+    purge_elapsed_seconds: Optional[float] = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -4238,6 +4264,11 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
             if payload.notify_before_stop_all is not None
             else config.get("imap_notify_before_stop_all")
         )
+        purge_before_check_value = sanitize_imap_purge_before_check(
+            payload.purge_before_check
+            if payload.purge_before_check is not None
+            else config.get("imap_purge_before_check")
+        )
         if failure_action_value == "none":
             notify_before_stop_value = False
         if desired_enabled and (not username or not password):
@@ -4266,6 +4297,7 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 imap_allowed_latency_seconds=?,
                 imap_failure_action=?,
                 imap_notify_before_stop_all=?,
+                imap_purge_before_check=?,
                 imap_sent_threshold=?,
                 imap_last_status=?,
                 imap_last_checked_at=?,
@@ -4286,6 +4318,7 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 allowed_latency_value,
                 failure_action_value,
                 1 if notify_before_stop_value else 0,
+                1 if purge_before_check_value else 0,
                 sent_threshold_value,
                 status_value,
                 checked_at,
@@ -5508,6 +5541,47 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     reason_parts.append(ip_change_reason)
                 if ip_after_change:
                     reason_parts.append(f"새 IP {ip_after_change}")
+            purged_before_check = bool(getattr(report, "purged_before_check", False))
+            if purged_before_check:
+                purge_success_value = getattr(report, "purge_success", None)
+                purge_reason_value = (getattr(report, "purge_reason", "") or "").strip()
+                purge_total_value = getattr(report, "purge_total_count", None)
+                purge_deleted_value = getattr(report, "purge_deleted_count", None)
+                purge_remaining_value = getattr(report, "purge_remaining_count", None)
+                purge_elapsed_value = getattr(report, "purge_elapsed_seconds", None)
+                purge_detail_parts: List[str] = []
+                if purge_total_value is not None:
+                    purge_detail_parts.append(f"총 {purge_total_value}건")
+                if purge_deleted_value is not None:
+                    purge_detail_parts.append(f"삭제 {purge_deleted_value}건")
+                if purge_remaining_value is not None:
+                    purge_detail_parts.append(f"남은 {purge_remaining_value}건")
+                if purge_elapsed_value is not None:
+                    try:
+                        purge_detail_parts.append(f"소요 {float(purge_elapsed_value):.1f}s")
+                    except (TypeError, ValueError):
+                        pass
+                if purge_success_value is True:
+                    purge_label = "체크 전 스팸함 비우기 성공"
+                elif purge_success_value is False:
+                    purge_label = "체크 전 스팸함 비우기 실패"
+                else:
+                    purge_label = "체크 전 스팸함 비우기 실행"
+                if purge_success_value is False and purge_reason_value:
+                    purge_label = f"{purge_label}: {purge_reason_value}"
+                elif purge_success_value is True and purge_reason_value:
+                    purge_detail_parts.append(purge_reason_value)
+                if purge_detail_parts:
+                    purge_label = f"{purge_label} ({' · '.join(purge_detail_parts)})"
+                reason_parts.append(purge_label)
+                if purge_success_value is False:
+                    log_console(
+                        "[IMAP] 체크 전 스팸함 비우기 실패 · 디바이스 {} · 도메인 {} · {}".format(
+                            device_id,
+                            normalized_domain,
+                            purge_reason_value or "사유 없음",
+                        )
+                    )
             if probe_mail_sent:
                 if probe_status_line:
                     reason_parts.append(f"테스트 메일 응답: {probe_status_line}")

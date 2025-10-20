@@ -2529,6 +2529,10 @@ button:not(:disabled):hover {
             </label>
           </div>
         </div>
+        <label class="inline-checkbox field" id="imapPurgeBeforeCheckLabel" title="IMAP 확인을 시작하기 전에 네이버 스팸함을 비우고 진행합니다.">
+          <input type="checkbox" id="imapPurgeBeforeCheck">
+          <span>체크 전에 항상 스팸함 비우기</span>
+        </label>
         <p class="field-hint">단일 발송 확인 대기는 확인을 시작하기 전 지연을 의미하며, Sent 누적 간격은 발송 성공 건수가 기준에 도달할 때마다 IMAP 확인을 실행합니다. 허용 지연은 발송과 수신 사이의 최대 허용 간격이며, 실패 시 대응에 따라 중지 범위가 결정됩니다.</p>
       </form>
     </div>
@@ -7716,6 +7720,7 @@ function renderImapSection(card, device, domain) {
     block.dataset.imapSentLastReset = "";
     block.dataset.imapFailureAction = "none";
     block.dataset.imapNotifyBeforeStopAll = "0";
+    block.dataset.imapPurgeBeforeCheck = "0";
     block.dataset.imapPasswordSaved = "0";
     delete block.dataset.imapHoldStatus;
     delete block.dataset.imapHoldCheckedAt;
@@ -7905,6 +7910,7 @@ function renderImapSection(card, device, domain) {
       failureLine += notifyBeforeStop ? " · 텔레그램 알림 켜짐" : " · 텔레그램 알림 꺼짐";
     }
     summaryLines.push(failureLine);
+    summaryLines.push(`체크 전 스팸함 비우기: ${config.imap_purge_before_check ? "켜짐" : "꺼짐"}`);
     summaryLines.push(`대기 시간: 단일 ${imapSingleDelayValue}초`);
     summaryLines.push(`Sent 누적 확인: ${imapSentThresholdValue}건마다`);
     configMetaEl.textContent = summaryLines.join("\n");
@@ -7931,6 +7937,7 @@ function renderImapSection(card, device, domain) {
   block.dataset.imapSentLastReset = config.imap_sent_last_reset_at || "";
   block.dataset.imapFailureAction = failureActionValue;
   block.dataset.imapNotifyBeforeStopAll = config.imap_notify_before_stop_all ? "1" : "0";
+  block.dataset.imapPurgeBeforeCheck = config.imap_purge_before_check ? "1" : "0";
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
   block.dataset.imapLastCheckedAt = currentCheckedMarker;
   block.dataset.imapLastStatus = lastStatus || "";
@@ -8450,7 +8457,12 @@ function attachCardEvents(card) {
           markImapStatusChecking(card, { delaySeconds: singleDelaySeconds, kind: "single" });
           jobScheduled = true;
           applyScheduledSingleSendJob(card, currentDevice, result?.job);
-          setNotice(card, `IMAP 계정(${rcptTo})으로 수동 도착 확인 흐름을 시작했습니다.`);
+          const purgeEnabled = (imapBlock?.dataset?.imapPurgeBeforeCheck || "0") === "1";
+          const baseNotice = `IMAP 계정(${rcptTo})으로 수동 도착 확인 흐름을 시작했습니다.`;
+          const noticeMessage = purgeEnabled
+            ? `${baseNotice} (체크 전 스팸함 비우기 실행 예정)`
+            : baseNotice;
+          setNotice(card, noticeMessage);
           try {
             await loadDevices({ silent: true });
           } catch (refreshErr) {
@@ -9421,6 +9433,8 @@ function openImapModal(card, device, domain, options = {}) {
   const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
   const failureActionSelect = document.getElementById("imapFailureAction");
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
+  const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
+  const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
   const passwordToggle = document.querySelector('[data-action="imap-password-toggle"]');
 
   usernameInput.value = config.imap_username || "";
@@ -9436,6 +9450,7 @@ function openImapModal(card, device, domain, options = {}) {
   const blockAllowedLatency = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapAllowedLatency;
   const blockFailureAction = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapFailureAction;
   const blockNotifyRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapNotifyBeforeStopAll;
+  const blockPurgeRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapPurgeBeforeCheck;
   const allowedLatencyValue = clampNumber(
     blockAllowedLatency ?? config.imap_allowed_latency_seconds ?? IMAP_DEFAULT_ALLOWED_LATENCY,
     IMAP_ALLOWED_MIN,
@@ -9472,6 +9487,11 @@ function openImapModal(card, device, domain, options = {}) {
     const configNotify = Boolean(config.imap_notify_before_stop_all);
     const blockNotify = parseFlag(blockNotifyRaw);
     notifyCheckbox.checked = blockNotify ?? configNotify;
+  }
+  if (purgeCheckbox) {
+    const configPurge = Boolean(config.imap_purge_before_check);
+    const blockPurge = parseFlag(blockPurgeRaw);
+    purgeCheckbox.checked = blockPurge ?? configPurge;
   }
   updateImapNotifyControl(failureActionSelect?.value || "none");
 
@@ -9563,6 +9583,7 @@ async function submitImapModal() {
     notify_before_stop_all: Boolean(
       notifyCheckbox && !notifyCheckbox.disabled && notifyCheckbox.checked
     ),
+    purge_before_check: Boolean(purgeCheckbox && purgeCheckbox.checked),
   };
   if (rawPassword) {
     payload.password = rawPassword;
