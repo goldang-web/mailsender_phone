@@ -38,7 +38,7 @@ from lib.naver_imap import (
 )
 
 
-APP_VERSION = "0.0.80"
+APP_VERSION = "0.0.81"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -138,6 +138,226 @@ def _generate_default_message_id(helo: Optional[str], mail_from: Optional[str]) 
 
 
 MESSAGE_ID_HEADER_PATTERN = re.compile(r"(?im)^(?P<indent>[ \t]*)Message-ID\s*:(?P<value>.*(?:\n[ \t].*)*)")
+
+MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${HELO}>"
+OLD_MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소숫자:22}@auto.local>"
+MESSAGE_ID_TOKEN_PATTERN = re.compile(r"\$\{([^{}]+)\}")
+MESSAGE_ID_FIELD_TOKEN_PATTERN = re.compile(r"^필드:([A-Za-z0-9_]+)$")
+MESSAGE_ID_RANDOM_TOKEN_PATTERN = re.compile(r"^랜덤:([^:]+):(\d+(?:-\d+)?)$")
+MESSAGE_ID_RANDOM_CHARSETS = {
+    "영소": string.ascii_lowercase,
+    "영대": string.ascii_uppercase,
+    "숫자": string.digits,
+    "영문": string.ascii_letters,
+    "영소숫자": string.ascii_lowercase + string.digits,
+    "영대숫자": string.ascii_uppercase + string.digits,
+    "영숫자": string.ascii_letters + string.digits,
+}
+MESSAGE_ID_RANDOM_MAX_LENGTH = 128
+
+
+def _normalize_bool_flag(value: Optional[object], default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"", "0", "false", "no", "off"}:
+            return False
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+    return bool(value)
+
+
+def _normalize_message_id_pattern_value(raw: Optional[object]) -> str:
+    if raw is None:
+        return MESSAGE_ID_PATTERN_DEFAULT
+    if isinstance(raw, bytes):
+        try:
+            candidate = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            candidate = raw.decode("latin-1", errors="ignore")
+    else:
+        candidate = str(raw)
+    normalized = candidate.strip()
+    if not normalized:
+        return MESSAGE_ID_PATTERN_DEFAULT
+    if normalized == OLD_MESSAGE_ID_PATTERN_DEFAULT:
+        return MESSAGE_ID_PATTERN_DEFAULT
+    if "${MAIL_DOMAIN}" in normalized or "${HELO_SUFFIX}" in normalized:
+        normalized = normalized.replace("${MAIL_DOMAIN}${HELO_SUFFIX}", "${HELO}")
+        normalized = normalized.replace("${MAIL_DOMAIN}", "${HELO}")
+        normalized = normalized.replace("${HELO_SUFFIX}", "")
+    return normalized
+
+
+def _parse_message_id_random_length(spec: str) -> Tuple[int, int]:
+    cleaned = (spec or "").strip()
+    if not cleaned:
+        raise ValueError("길이 정보가 비어 있습니다.")
+    if "-" in cleaned:
+        start_value, end_value = cleaned.split("-", 1)
+    else:
+        start_value = cleaned
+        end_value = cleaned
+    min_len = int(start_value)
+    max_len = int(end_value)
+    if min_len <= 0 or max_len <= 0:
+        raise ValueError("길이는 1 이상이어야 합니다.")
+    if min_len > max_len:
+        raise ValueError("최소 길이가 최대 길이보다 큽니다.")
+    if max_len > MESSAGE_ID_RANDOM_MAX_LENGTH:
+        raise ValueError(f"최대 길이는 {MESSAGE_ID_RANDOM_MAX_LENGTH} 이하로 입력하세요.")
+    return min_len, max_len
+
+
+def _resolve_message_id_random_token(kind: str, length_spec: str, rng: random.Random) -> str:
+    charset = MESSAGE_ID_RANDOM_CHARSETS.get(kind) or MESSAGE_ID_RANDOM_CHARSETS.get(kind.lower())
+    if charset is None:
+        raise ValueError(f"지원하지 않는 랜덤 조합입니다: {kind or '?'}")
+    min_len, max_len = _parse_message_id_random_length(length_spec)
+    length = rng.randint(min_len, max_len)
+    if length <= 0:
+        return ""
+    return "".join(rng.choice(charset) for _ in range(length))
+
+
+def _resolve_reserved_message_id_token(token: str, mail_from: Optional[str], helo: Optional[str]) -> Optional[str]:
+    upper = (token or "").strip().upper()
+    if upper == "MAIL_DOMAIN":
+        sanitized_domain = _sanitize_hostname_component(_extract_mail_domain(mail_from))
+        return sanitized_domain or "mailsender"
+    if upper == "HELO":
+        sanitized_helo = _sanitize_hostname_component(helo)
+        if sanitized_helo:
+            return sanitized_helo
+        fallback_domain = _sanitize_hostname_component(_extract_mail_domain(mail_from))
+        return fallback_domain or "mailsender"
+    if upper == "HELO_SUFFIX":
+        sanitized_helo = _sanitize_hostname_component(helo)
+        return f".{sanitized_helo}" if sanitized_helo else ""
+    return None
+
+
+def _build_message_id_value(
+    pattern_value: Optional[object],
+    mail_from: Optional[str],
+    helo: Optional[str],
+) -> str:
+    normalized_pattern = _normalize_message_id_pattern_value(pattern_value)
+    fallback_domain = _default_message_id_domain(mail_from, helo)
+    rng = random.SystemRandom()
+    result = normalized_pattern
+    if "${" in normalized_pattern:
+        field_ctx = {"mail_from": mail_from or "", "helo": helo or ""}
+        max_iterations = max(5, len(normalized_pattern))
+        for _ in range(max_iterations):
+            changed = False
+
+            def replace(match: re.Match) -> str:
+                nonlocal changed
+                token_raw = match.group(1)
+                stripped = (token_raw or "").strip()
+                if not stripped:
+                    changed = True
+                    return ""
+                random_match = MESSAGE_ID_RANDOM_TOKEN_PATTERN.match(stripped)
+                if random_match:
+                    try:
+                        replacement = _resolve_message_id_random_token(random_match.group(1), random_match.group(2), rng)
+                    except ValueError:
+                        replacement = ""
+                    changed = True
+                    return replacement
+                reserved = _resolve_reserved_message_id_token(stripped, mail_from, helo)
+                if reserved is not None:
+                    changed = True
+                    return reserved
+                field_match = MESSAGE_ID_FIELD_TOKEN_PATTERN.match(stripped)
+                if field_match:
+                    key_name = field_match.group(1)
+                    changed = True
+                    return str(field_ctx.get(key_name, ""))
+                changed = True
+                return ""
+
+            new_result = MESSAGE_ID_TOKEN_PATTERN.sub(replace, result)
+            if new_result == result:
+                break
+            result = new_result
+            if "${" not in result:
+                break
+        candidate = result
+    else:
+        candidate = result
+    candidate = str(candidate or "").strip()
+    if not candidate:
+        return _generate_default_message_id(helo, mail_from)
+    candidate = candidate.replace("\r", "").replace("\n", "")
+    if not candidate:
+        return _generate_default_message_id(helo, mail_from)
+    if candidate[0] != "<":
+        candidate = f"<{candidate}"
+    if candidate[-1] != ">":
+        candidate = f"{candidate}>"
+    inner = candidate[1:-1]
+    if not inner or "@" not in inner or any(ch.isspace() for ch in inner):
+        return _generate_default_message_id(helo, mail_from)
+    local_part, domain_part = inner.rsplit("@", 1)
+    sanitized_domain = _sanitize_hostname_component(domain_part) or fallback_domain
+    if not sanitized_domain:
+        sanitized_domain = fallback_domain
+    return f"<{local_part}@{sanitized_domain}>"
+
+
+def _ensure_message_id_header(
+    header_value: Optional[str],
+    *,
+    auto_enabled: bool,
+    pattern_value: Optional[object],
+    mail_from: Optional[str],
+    helo: Optional[str],
+) -> str:
+    header_text = header_value if isinstance(header_value, str) else ""
+    if not auto_enabled:
+        return header_text
+    normalized_newlines = header_text.replace("\r\n", "\n").replace("\r", "\n")
+    separator_index = normalized_newlines.find("\n\n")
+    if separator_index >= 0:
+        separator_end = separator_index + 2
+        length = len(normalized_newlines)
+        while separator_end < length and normalized_newlines[separator_end] == "\n":
+            separator_end += 1
+        header_section = normalized_newlines[:separator_index]
+        separator_block = normalized_newlines[separator_index:separator_end]
+        body_section = normalized_newlines[separator_end:]
+    else:
+        header_section = normalized_newlines
+        separator_block = "\n\n"
+        body_section = None
+    message_id_value = _build_message_id_value(pattern_value, mail_from, helo)
+    match = MESSAGE_ID_HEADER_PATTERN.search(header_section)
+    if match:
+        indent = match.group("indent") or ""
+        start, end = match.span()
+        header_section = f"{header_section[:start]}{indent}Message-ID: {message_id_value}{header_section[end:]}"
+    else:
+        if header_section:
+            header_section = f"{header_section}\nMessage-ID: {message_id_value}"
+        else:
+            header_section = f"Message-ID: {message_id_value}"
+    newline_hint = "\r\n" if "\r\n" in header_text else "\n"
+    if body_section is not None:
+        rebuilt = f"{header_section}{separator_block}{body_section}"
+    else:
+        rebuilt = header_section
+    rebuilt = rebuilt.replace("\n", newline_hint)
+    if header_text.endswith(("\r\n", "\n")) and not rebuilt.endswith(newline_hint):
+        rebuilt = f"{rebuilt}{newline_hint}"
+    return rebuilt
 
 
 def _extract_message_id_from_text(text: Optional[str]) -> Optional[str]:
@@ -3835,13 +4055,23 @@ class MailClient:
         bcc_rows: List[sqlite3.Row] = []
         mail_from_value = self._effective_mail_from(normalized_domain, config)
         header_from_value = self._extract_header_from(config.get("header"), mail_from_value)
+        message_id_auto = _normalize_bool_flag(config.get("message_id_auto"), default=True)
+        message_id_pattern = config.get("message_id_pattern")
+        dispatch_header = _ensure_message_id_header(
+            config.get("header"),
+            auto_enabled=message_id_auto,
+            pattern_value=message_id_pattern,
+            mail_from=mail_from_value,
+            helo=config.get("helo"),
+        )
+
         success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
             smtp_port=int(config.get("smtp_port") or 25),
             helo=config.get("helo", ""),
             mail_from=mail_from_value,
             rcpt_to=rcpt_to,
-            header_text=config.get("header", ""),
+            header_text=dispatch_header,
             bcc_emails=bcc_emails,
             debug=self.telnet_debug_mode,
         )
@@ -4064,6 +4294,8 @@ class MailClient:
         threshold_deferred_notice = False
         anchor_email = self._sanitize_anchor_email(config.get("anchor_email"))
         anchor_enabled = bool(anchor_interval and anchor_email)
+        message_id_auto = _normalize_bool_flag(config.get("message_id_auto"), default=True)
+        message_id_pattern = config.get("message_id_pattern")
 
         processed = 0
         sent_count = 0
@@ -4518,13 +4750,20 @@ class MailClient:
                     if injected_emails:
                         payload_bcc.extend(injected_emails)
                     payload_bcc.extend(bcc_recipients)
+                    dispatch_header = _ensure_message_id_header(
+                        config.get("header"),
+                        auto_enabled=message_id_auto,
+                        pattern_value=message_id_pattern,
+                        mail_from=mail_from_value,
+                        helo=config.get("helo"),
+                    )
                     success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
                         smtp_host=config.get("smtp_host", ""),
                         smtp_port=int(config.get("smtp_port") or 25),
                         helo=config.get("helo", ""),
                         mail_from=mail_from_value,
                         rcpt_to=rcpt_to,
-                        header_text=config.get("header", ""),
+                        header_text=dispatch_header,
                         bcc_emails=payload_bcc,
                         anchor_emails=injected_emails,
                         debug=self.telnet_debug_mode,
