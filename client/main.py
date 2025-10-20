@@ -3837,6 +3837,8 @@ class MailClient:
             current_batch_success,
             accumulated_total,
             include_anchor=False,
+            recipient=rcpt_to,
+            extra_recipient_count=len(bcc_emails),
         )
         dispatch_logs: List[Dict[str, object]] = [
             {
@@ -3911,6 +3913,8 @@ class MailClient:
                 self._sent_log_progress(sequence_domain, current_sequence_total),
                 current_sequence_total,
                 include_anchor=False,
+                recipient=rcpt_to,
+                extra_recipient_count=len(bcc_emails),
             )
         )
         job_result = JobResult(
@@ -4938,11 +4942,15 @@ class MailClient:
                             anchor_retry_pending += anchor_retry_count
 
                     current_batch_success = self._sent_log_progress(normalized, sequence_total)
+                    extra_recipient_count = max(0, len(recipient_emails) - 1)
+                    primary_recipient = recipient_emails[0] if recipient_emails else None
                     log_line = self._format_dispatch_log_line(
                         "Sent" if session_success else "Fail",
                         current_batch_success,
                         sequence_total,
                         include_anchor=anchor_count > 0,
+                        recipient=primary_recipient,
+                        extra_recipient_count=extra_recipient_count,
                     )
                     dispatch_logs: List[Dict[str, object]] = [
                         {
@@ -5711,6 +5719,8 @@ class MailClient:
         accumulated_total: int,
         *,
         include_anchor: bool = False,
+        recipient: Optional[str] = None,
+        extra_recipient_count: int = 0,
     ) -> str:
         safe_label = "Sent" if (label or "").strip().lower() == "sent" else "Fail"
         batch_success = max(0, int(current_batch_success or 0))
@@ -5720,6 +5730,13 @@ class MailClient:
         line = f"{safe_label}({batch_success}/{total_value}) | {timestamp} | {device_label}"
         if include_anchor:
             line += " | 알박기 포함"
+        recipient_value = (recipient or "").strip()
+        if recipient_value:
+            extras = max(0, int(extra_recipient_count or 0))
+            if extras > 0:
+                line += f" | {recipient_value} 외 {extras}개"
+            else:
+                line += f" | {recipient_value}"
         return line
 
     @staticmethod

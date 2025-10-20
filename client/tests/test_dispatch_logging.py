@@ -20,7 +20,11 @@ spec.loader.exec_module(client_main)
 
 
 def _sent_log_pattern(label: str) -> re.Pattern[str]:
-    return re.compile(rf"^{label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| TestDevice(?: \| 알박기 포함)?$")
+    return re.compile(
+        rf"^{label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| TestDevice"
+        r"(?: \| 알박기 포함)?"
+        r"(?: \| .+)?$"
+    )
 
 def _extract_counts(entry: str) -> tuple[int, int]:
     match = re.match(r"^(Sent|Fail)\((\d+)/(\d+)\)", entry)
@@ -165,6 +169,23 @@ class DispatchLoggingTests(unittest.TestCase):
     def test_log_line_appends_anchor_tag(self) -> None:
         line = self.client._format_dispatch_log_line("Sent", current_batch_success=3, accumulated_total=15, include_anchor=True)
         self.assertIn("알박기 포함", line)
+
+    def test_log_line_includes_recipient_summary(self) -> None:
+        multiple = self.client._format_dispatch_log_line(
+            "Sent",
+            current_batch_success=2,
+            accumulated_total=10,
+            recipient="primary@example.com",
+            extra_recipient_count=24,
+        )
+        self.assertIn("primary@example.com 외 24개", multiple)
+        single = self.client._format_dispatch_log_line(
+            "Sent",
+            current_batch_success=1,
+            accumulated_total=5,
+            recipient="solo@example.com",
+        )
+        self.assertTrue(single.endswith(" | solo@example.com"))
 
     def test_single_send_passes_effective_mail_from_to_imap(self) -> None:
         captured_mail_from: list[str] = []
