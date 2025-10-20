@@ -1607,6 +1607,9 @@ class MailClient:
             reason_components.append(context_reason)
         reason_text = " · ".join(component for component in reason_components if component)
         delay_seconds_value = int(max(0, round(delay_seconds)))
+        stop_actions = {"stop_device", "stop_all"}
+        probe_success = bool(probe_result and probe_result.success and probe_result.message_id)
+        trigger_stop = failure_action in stop_actions and not probe_success
         report = {
             "domain": (domain or "").lower(),
             "status": "error",
@@ -1619,7 +1622,7 @@ class MailClient:
             "mail_from": mail_from,
             "header_from": header_from or "",
             "anchor": has_anchor,
-            "trigger_stop": False,
+            "trigger_stop": trigger_stop,
             "checked_at": checked_at_iso,
             "delay_seconds": delay_seconds_value,
             "allowed_latency_seconds": int(max(0, allowed_latency_seconds)),
@@ -3687,12 +3690,18 @@ class MailClient:
             latest_states = list(batch[-1][1]) if batch and batch[-1][1] else []
             batch_critical = any(item[2] for item in batch)
             try:
-                data = self.heartbeat(
-                    latest_states,
-                    reports_payload,
-                    critical=batch_critical,
-                    log_context="작업 보고",
-                )
+                try:
+                    data = self.heartbeat(
+                        latest_states,
+                        reports_payload,
+                        critical=batch_critical,
+                        log_context="작업 보고",
+                    )
+                except TypeError as exc:
+                    if "unexpected keyword argument" in str(exc):
+                        data = self.heartbeat(latest_states, reports_payload)
+                    else:
+                        raise
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"[경고] 작업 보고 실패: {exc}")
                 return
@@ -5118,7 +5127,7 @@ class MailClient:
                     threshold_check_request = {
                         "sent_at": sent_at,
                         "detail": detail_text,
-                        "mail_from": mail_from_value,
+                        "mail_from": mail_from_current or mail_from_value,
                         "allowed_latency": sanitize_imap_allowed_latency(
                             settings_local.get("allowed_latency_seconds"),
                             default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
@@ -5491,19 +5500,23 @@ class MailClient:
                             failed_count += effective_failed
                         last_error = failure_detail
 
+                    mail_from_current = outcome.mail_from or mail_from_value
+                    header_from_current = header_from_value
+                    if outcome.header_text:
+                        header_from_current = self._extract_header_from(
+                            outcome.header_text,
+                            mail_from_current,
+                        )
+                    if mail_from_current:
+                        mail_from_value = mail_from_current
+                    if header_from_current:
+                        header_from_value = header_from_current
+
                     if session_success and normalized == "naver":
-                        register_sent_success(outcome.sent_at, detail_for_log, success_increment, outcome.mail_from)
+                        register_sent_success(outcome.sent_at, detail_for_log, success_increment, mail_from_current)
                     elif not session_success and normalized == "naver":
                         current_sent_counter = max(0, sent_count - sent_reset_offset)
                         self._set_sent_counter(normalized, current_sent_counter)
-
-                    if outcome.mail_from:
-                        mail_from_value = outcome.mail_from
-                    if outcome.header_text:
-                        header_from_value = self._extract_header_from(
-                            outcome.header_text,
-                            outcome.mail_from or mail_from_value,
-                        )
 
                     if anchor_count:
                         if session_success:

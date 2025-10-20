@@ -1566,6 +1566,9 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN all_headers_unique INTEGER NOT NULL DEFAULT 0"
             )
+        conn.execute(
+            "UPDATE device_configs SET all_headers_unique=0 WHERE all_headers_unique IS NULL"
+        )
         if "client_reserved" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN client_reserved INTEGER DEFAULT 0"
@@ -1820,7 +1823,12 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     updated_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?
                 )
                 ON CONFLICT(device_id, domain) DO NOTHING
                 """,
@@ -3120,7 +3128,7 @@ class DeviceConfigPayload(BaseModel):
     smtp_port: Optional[int] = 25
     mail_from: Optional[str] = ""
     header: Optional[str] = ""
-     all_headers_unique: Optional[bool] = False
+    all_headers_unique: Optional[bool] = False
     message_id_auto: Optional[bool] = True
     message_id_pattern: Optional[str] = MESSAGE_ID_PATTERN_DEFAULT
     session_count: Optional[int] = 1
@@ -5705,42 +5713,6 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             else:
                 new_sent_since = existing_sent_since
                 sent_reset_at_value = config_snapshot.get("imap_sent_last_reset_at")
-            conn.execute(
-                """
-                UPDATE device_configs
-                SET imap_last_status=?,
-                    imap_last_checked_at=?,
-                    imap_last_latency=?,
-                    imap_last_error=?,
-                    imap_last_mail_from=?,
-                    imap_last_sent_at=?,
-                    imap_last_received_at=?,
-                    imap_delay_seconds=?,
-                    imap_allowed_latency_seconds=?,
-                    imap_sent_threshold=?,
-                    imap_sent_since_last_check=?,
-                    imap_sent_last_reset_at=?,
-                    updated_at=?
-                WHERE device_id=? AND domain=?
-                """,
-                (
-                    status_value,
-                    checked_at_value,
-                    latency_value,
-                    error_value,
-                    mail_from_value,
-                    sent_at_value,
-                    received_at_value,
-                    allowed_storage_value,
-                    allowed_storage_value,
-                    new_threshold_value,
-                    new_sent_since,
-                    sent_reset_at_value,
-                    now,
-                    device_id,
-                    normalized_domain,
-                ),
-            )
             failure_action = sanitize_imap_failure_action(config_snapshot.get("imap_failure_action"))
             notify_before_stop = sanitize_imap_notify_before_stop_all(
                 config_snapshot.get("imap_notify_before_stop_all")
@@ -5770,6 +5742,10 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             ):
                 should_stop = True
             if should_stop:
+                if new_sent_since != 0:
+                    new_sent_since = 0
+                if not sent_reset_at_value:
+                    sent_reset_at_value = checked_at_value or now
                 delay_seconds_value = getattr(report, "delay_seconds", None)
                 detail_parts: List[str] = []
                 if reason_text:
@@ -5826,6 +5802,42 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                         "notify_before": notify_before_stop,
                         "suppress_notification": suppress_auto_notification,
                     }
+            conn.execute(
+                """
+                UPDATE device_configs
+                SET imap_last_status=?,
+                    imap_last_checked_at=?,
+                    imap_last_latency=?,
+                    imap_last_error=?,
+                    imap_last_mail_from=?,
+                    imap_last_sent_at=?,
+                    imap_last_received_at=?,
+                    imap_delay_seconds=?,
+                    imap_allowed_latency_seconds=?,
+                    imap_sent_threshold=?,
+                    imap_sent_since_last_check=?,
+                    imap_sent_last_reset_at=?,
+                    updated_at=?
+                WHERE device_id=? AND domain=?
+                """,
+                (
+                    status_value,
+                    checked_at_value,
+                    latency_value,
+                    error_value,
+                    mail_from_value,
+                    sent_at_value,
+                    received_at_value,
+                    allowed_storage_value,
+                    allowed_storage_value,
+                    new_threshold_value,
+                    new_sent_since,
+                    sent_reset_at_value,
+                    now,
+                    device_id,
+                    normalized_domain,
+                ),
+            )
         device_stop_result: Optional[Dict[str, Any]] = None
         if device_stop_context is not None:
             device_stop_result = cancel_active_sends(
