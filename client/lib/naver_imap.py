@@ -204,7 +204,7 @@ def purge_imap_folder(email_id: str, password: str, *, folder: str = "Junk", chu
             if not message_set_parts:
                 continue
             message_set = " ".join(message_set_parts)
-            status, _ = mail.store(message_set, "+FLAGS", "\\Deleted")
+            status, _ = mail.store(message_set, "+FLAGS", "(\\Deleted)")
             if status != "OK":
                 return {
                     "success": False,
