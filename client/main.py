@@ -4057,13 +4057,17 @@ class MailClient:
         header_from_value = self._extract_header_from(config.get("header"), mail_from_value)
         message_id_auto = _normalize_bool_flag(config.get("message_id_auto"), default=True)
         message_id_pattern = config.get("message_id_pattern")
-        dispatch_header = _ensure_message_id_header(
-            config.get("header"),
-            auto_enabled=message_id_auto,
-            pattern_value=message_id_pattern,
-            mail_from=mail_from_value,
-            helo=config.get("helo"),
-        )
+        raw_header_value = config.get("header")
+        if message_id_auto:
+            dispatch_header = _ensure_message_id_header(
+                raw_header_value,
+                auto_enabled=True,
+                pattern_value=message_id_pattern,
+                mail_from=mail_from_value,
+                helo=config.get("helo"),
+            )
+        else:
+            dispatch_header = raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
 
         success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
@@ -4750,13 +4754,19 @@ class MailClient:
                     if injected_emails:
                         payload_bcc.extend(injected_emails)
                     payload_bcc.extend(bcc_recipients)
-                    dispatch_header = _ensure_message_id_header(
-                        config.get("header"),
-                        auto_enabled=message_id_auto,
-                        pattern_value=message_id_pattern,
-                        mail_from=mail_from_value,
-                        helo=config.get("helo"),
-                    )
+                    raw_header_value = config.get("header")
+                    if message_id_auto:
+                        dispatch_header = _ensure_message_id_header(
+                            raw_header_value,
+                            auto_enabled=True,
+                            pattern_value=message_id_pattern,
+                            mail_from=mail_from_value,
+                            helo=config.get("helo"),
+                        )
+                    else:
+                        dispatch_header = (
+                            raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
+                        )
                     success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
                         smtp_host=config.get("smtp_host", ""),
                         smtp_port=int(config.get("smtp_port") or 25),

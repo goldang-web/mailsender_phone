@@ -3293,13 +3293,17 @@ def preview_single_header(device_id: str, domain: str, payload: HeaderPreviewReq
     auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
     resolved_config["message_id_auto"] = auto_enabled
     resolved_config["message_id_pattern"] = pattern_value
-    resolved_config["header"] = ensure_message_id_header(
-        resolved_config.get("header"),
-        auto_enabled=auto_enabled,
-        pattern_value=pattern_value,
-        mail_from=resolved_config.get("mail_from"),
-        helo=resolved_config.get("helo"),
-    )
+    raw_header_value = resolved_config.get("header")
+    if auto_enabled:
+        resolved_config["header"] = ensure_message_id_header(
+            raw_header_value,
+            auto_enabled=True,
+            pattern_value=pattern_value,
+            mail_from=resolved_config.get("mail_from"),
+            helo=resolved_config.get("helo"),
+        )
+    elif not isinstance(raw_header_value, str):
+        resolved_config["header"] = str(raw_header_value or "")
     rcpt_value = resolved_rcpt if resolved_rcpt is not None else (rcpt_source or "")
     generated_marker = snapshot_meta.get("generated_at") if snapshot_meta else None
     return HeaderPreviewResponse(
@@ -4453,13 +4457,17 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
         auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
         resolved_config["message_id_auto"] = auto_enabled
         resolved_config["message_id_pattern"] = pattern_value
-        resolved_config["header"] = ensure_message_id_header(
-            resolved_config.get("header"),
-            auto_enabled=auto_enabled,
-            pattern_value=pattern_value,
-            mail_from=resolved_config.get("mail_from"),
-            helo=resolved_config.get("helo"),
-        )
+        raw_header_value = resolved_config.get("header")
+        if auto_enabled:
+            resolved_config["header"] = ensure_message_id_header(
+                raw_header_value,
+                auto_enabled=True,
+                pattern_value=pattern_value,
+                mail_from=resolved_config.get("mail_from"),
+                helo=resolved_config.get("helo"),
+            )
+        elif not isinstance(raw_header_value, str):
+            resolved_config["header"] = str(raw_header_value or "")
         minimal_config = {
             "smtp_host": resolved_config.get("smtp_host"),
             "smtp_port": resolved_config.get("smtp_port"),
@@ -4668,13 +4676,17 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
             auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
             resolved_config["message_id_auto"] = auto_enabled
             resolved_config["message_id_pattern"] = pattern_value
-            resolved_config["header"] = ensure_message_id_header(
-                resolved_config.get("header"),
-                auto_enabled=auto_enabled,
-                pattern_value=pattern_value,
-                mail_from=resolved_config.get("mail_from"),
-                helo=resolved_config.get("helo"),
-            )
+            raw_header_value = resolved_config.get("header")
+            if auto_enabled:
+                resolved_config["header"] = ensure_message_id_header(
+                    raw_header_value,
+                    auto_enabled=True,
+                    pattern_value=pattern_value,
+                    mail_from=resolved_config.get("mail_from"),
+                    helo=resolved_config.get("helo"),
+                )
+            elif not isinstance(raw_header_value, str):
+                resolved_config["header"] = str(raw_header_value or "")
             job_payload = attach_telegram_credentials(
                 {"config": resolved_config},
                 bot_token=bot_token,
@@ -4738,13 +4750,17 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
         resolved_config["message_id_auto"] = auto_enabled
         resolved_config["message_id_pattern"] = pattern_value
-        resolved_config["header"] = ensure_message_id_header(
-            resolved_config.get("header"),
-            auto_enabled=auto_enabled,
-            pattern_value=pattern_value,
-            mail_from=resolved_config.get("mail_from"),
-            helo=resolved_config.get("helo"),
-        )
+        raw_header_value = resolved_config.get("header")
+        if auto_enabled:
+            resolved_config["header"] = ensure_message_id_header(
+                raw_header_value,
+                auto_enabled=True,
+                pattern_value=pattern_value,
+                mail_from=resolved_config.get("mail_from"),
+                helo=resolved_config.get("helo"),
+            )
+        elif not isinstance(raw_header_value, str):
+            resolved_config["header"] = str(raw_header_value or "")
         substituted_rcpt = resolved_rcpt or rcpt_to
         force_imap_check = bool(payload.force_imap_check)
         base_payload = {
@@ -4797,13 +4813,17 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
         auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
         resolved_config["message_id_auto"] = auto_enabled
         resolved_config["message_id_pattern"] = pattern_value
-        resolved_config["header"] = ensure_message_id_header(
-            resolved_config.get("header"),
-            auto_enabled=auto_enabled,
-            pattern_value=pattern_value,
-            mail_from=resolved_config.get("mail_from"),
-            helo=resolved_config.get("helo"),
-        )
+        raw_header_value = resolved_config.get("header")
+        if auto_enabled:
+            resolved_config["header"] = ensure_message_id_header(
+                raw_header_value,
+                auto_enabled=True,
+                pattern_value=pattern_value,
+                mail_from=resolved_config.get("mail_from"),
+                helo=resolved_config.get("helo"),
+            )
+        elif not isinstance(raw_header_value, str):
+            resolved_config["header"] = str(raw_header_value or "")
         job_payload = attach_telegram_credentials(
             {"config": resolved_config},
             bot_token=bot_token,
