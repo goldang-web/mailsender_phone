@@ -38,6 +38,7 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "smtp_port": 25,
     "mail_from": "",
     "header": "",
+    "all_headers_unique": False,
     "session_count": 1,
     "bcc_count": 0,
     "anchor_interval": 0,
@@ -1310,6 +1311,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 smtp_port INTEGER DEFAULT 25,
                 mail_from TEXT DEFAULT '',
                 header TEXT DEFAULT '',
+                all_headers_unique INTEGER NOT NULL DEFAULT 0,
                 session_count INTEGER DEFAULT 1,
                 bcc_count INTEGER DEFAULT 0,
                 anchor_interval INTEGER DEFAULT 0,
@@ -1363,7 +1365,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
             """
             INSERT INTO device_configs (
                 device_id, domain, helo, smtp_host, smtp_port,
-                mail_from, header, session_count, bcc_count,
+                mail_from, header, all_headers_unique, session_count, bcc_count,
                 anchor_interval, anchor_email, rcpt_to,
                 client_db_version, client_total, client_pending,
                 client_sent, client_failed, client_block, client_removed,
@@ -1386,7 +1388,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
             )
             SELECT
                 device_id, domain, helo, smtp_host, smtp_port,
-                mail_from, header, session_count, bcc_count,
+                mail_from, header, 0 AS all_headers_unique, session_count, bcc_count,
                 anchor_interval, anchor_email, rcpt_to,
                 client_db_version, client_total, client_pending,
                 client_sent, client_failed, client_block, client_removed,
@@ -1443,6 +1445,7 @@ def _init_db() -> None:
                 smtp_port INTEGER DEFAULT 25,
                 mail_from TEXT DEFAULT '',
                 header TEXT DEFAULT '',
+                all_headers_unique INTEGER NOT NULL DEFAULT 0,
                 session_count INTEGER DEFAULT 1,
                 bcc_count INTEGER DEFAULT 0,
                 rcpt_to TEXT DEFAULT '',
@@ -1558,6 +1561,10 @@ def _init_db() -> None:
         if "anchor_email" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN anchor_email TEXT DEFAULT ''"
+            )
+        if "all_headers_unique" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN all_headers_unique INTEGER NOT NULL DEFAULT 0"
             )
         if "client_reserved" not in config_columns:
             conn.execute(
@@ -1794,7 +1801,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                 """
                 INSERT INTO device_configs (
                     device_id, domain, helo, smtp_host, smtp_port,
-                    mail_from, header, session_count, bcc_count,
+                    mail_from, header, all_headers_unique, session_count, bcc_count,
                     anchor_interval, anchor_email, rcpt_to,
                     client_db_version, client_total, client_pending,
                     client_sent, client_failed, client_block, client_removed,
@@ -1825,6 +1832,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG["smtp_port"],
                     DEFAULT_DOMAIN_CONFIG["mail_from"],
                     DEFAULT_DOMAIN_CONFIG["header"],
+                    1 if DEFAULT_DOMAIN_CONFIG["all_headers_unique"] else 0,
                     DEFAULT_DOMAIN_CONFIG["session_count"],
                     DEFAULT_DOMAIN_CONFIG["bcc_count"],
                     DEFAULT_DOMAIN_CONFIG["anchor_interval"],
@@ -1972,6 +1980,14 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         except (TypeError, ValueError):
             message_id_enabled = bool(message_id_auto_value)
     message_id_pattern = _normalize_message_id_pattern(row.get("message_id_pattern"))
+    all_headers_unique_raw = row.get("all_headers_unique")
+    if all_headers_unique_raw is None:
+        all_headers_unique = bool(DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
+    else:
+        try:
+            all_headers_unique = bool(int(all_headers_unique_raw))
+        except (TypeError, ValueError):
+            all_headers_unique = bool(all_headers_unique_raw)
     if include_secret:
         imap_password = password_raw
     else:
@@ -1983,6 +1999,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "smtp_port": row.get("smtp_port", 25),
         "mail_from": row.get("mail_from", ""),
         "header": row.get("header", ""),
+        "all_headers_unique": all_headers_unique,
         "message_id_auto": message_id_enabled,
         "message_id_pattern": message_id_pattern,
         "session_count": session_value,
@@ -3103,6 +3120,7 @@ class DeviceConfigPayload(BaseModel):
     smtp_port: Optional[int] = 25
     mail_from: Optional[str] = ""
     header: Optional[str] = ""
+     all_headers_unique: Optional[bool] = False
     message_id_auto: Optional[bool] = True
     message_id_pattern: Optional[str] = MESSAGE_ID_PATTERN_DEFAULT
     session_count: Optional[int] = 1
@@ -3825,6 +3843,7 @@ def set_device_lock(device_id: str, domain: str, payload: DeviceLockRequest) -> 
             """
             UPDATE device_configs
             SET substitution_lock_mode='lock',
+                all_headers_unique=0,
                 substitution_snapshot=?,
                 updated_at=?
             WHERE device_id=? AND domain=?
@@ -4053,6 +4072,7 @@ def copy_device_lock(payload: DeviceLockCopyRequest) -> Dict[str, Any]:
                 """
                 UPDATE device_configs
                 SET substitution_lock_mode='lock',
+                    all_headers_unique=0,
                     substitution_snapshot=?,
                     message_id_auto=?,
                     message_id_pattern=?,
@@ -4165,6 +4185,18 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
         sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
         sanitized_interval = clamp_anchor_interval(payload.anchor_interval or 0)
         sanitized_anchor = normalize_anchor_email(payload.anchor_email or "")
+        lock_mode = sanitize_substitution_lock_mode(config_data.get("substitution_lock_mode"))
+        if payload.all_headers_unique is None:
+            existing_flag = config_data.get("all_headers_unique", DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
+            requested_all_headers_unique = bool(existing_flag)
+        else:
+            requested_all_headers_unique = bool(payload.all_headers_unique)
+        if lock_mode == "lock" and requested_all_headers_unique:
+            raise HTTPException(
+                status_code=409,
+                detail="고정 모드에서는 '모든 헤더 개별화' 옵션을 사용할 수 없습니다. 고정을 해제하거나 옵션을 끄세요.",
+            )
+        all_headers_unique_flag = 1 if requested_all_headers_unique else 0
         if payload.message_id_auto is None:
             message_id_auto_flag = 1 if config_data.get("message_id_auto", 1) else 0
         else:
@@ -4174,7 +4206,7 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
         conn.execute(
             """
             UPDATE device_configs
-            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, message_id_auto=?, message_id_pattern=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
+            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, all_headers_unique=?, message_id_auto=?, message_id_pattern=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
                 updated_at=?
             WHERE device_id=? AND domain=?
             """,
@@ -4184,6 +4216,7 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
                 int(payload.smtp_port or 25),
                 payload.mail_from or "",
                 payload.header or "",
+                all_headers_unique_flag,
                 message_id_auto_flag,
                 sanitized_pattern,
                 max(1, int(payload.session_count or 1)),
@@ -4535,6 +4568,7 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
         config_snapshot = build_config_snapshot(configs, normalized)
         config_snapshot["bcc_count"] = 0
         config_snapshot["anchor_interval"] = 0
+        template_config = dict(config_snapshot)
         rng = random.SystemRandom()
         lock_mode = sanitize_substitution_lock_mode(config_data.get("substitution_lock_mode"))
         lock_snapshot = decode_substitution_snapshot(config_data.get("substitution_snapshot"))
@@ -4566,7 +4600,14 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
             "helo": resolved_config.get("helo"),
             "header": resolved_config.get("header"),
             "mail_from": resolved_config.get("mail_from"),
+            "all_headers_unique": bool(resolved_config.get("all_headers_unique")),
         }
+        substitution_payload: Optional[Dict[str, Any]] = None
+        if resolved_config.get("all_headers_unique"):
+            substitution_payload = {
+                "template": template_config,
+                "rules": substitution_rules,
+            }
         existing_job = conn.execute(
             """
             SELECT id
@@ -4585,6 +4626,8 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
             "config": minimal_config,
             "username": username_value,
         }
+        if substitution_payload:
+            job_payload["substitution"] = substitution_payload
         job_payload = attach_telegram_credentials(
             job_payload,
             bot_token=bot_token,
@@ -4692,12 +4735,21 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
         except (TypeError, ValueError):
             message_id_auto = bool(message_id_auto_raw)
     message_id_pattern = _normalize_message_id_pattern(base.get("message_id_pattern"))
+    all_headers_unique_raw = base.get("all_headers_unique", DEFAULT_DOMAIN_CONFIG.get("all_headers_unique"))
+    if all_headers_unique_raw is None:
+        all_headers_unique = bool(DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
+    else:
+        try:
+            all_headers_unique = bool(int(all_headers_unique_raw))
+        except (TypeError, ValueError):
+            all_headers_unique = bool(all_headers_unique_raw)
     return {
         "helo": base.get("helo", ""),
         "smtp_host": base.get("smtp_host", ""),
         "smtp_port": base.get("smtp_port", 25),
         "mail_from": base.get("mail_from", ""),
         "header": base.get("header", ""),
+        "all_headers_unique": all_headers_unique,
         "message_id_auto": message_id_auto,
         "message_id_pattern": message_id_pattern,
         "session_count": session_count,
@@ -4753,6 +4805,7 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
             domain = forced_domain or normalize_domain(active)
             configs = load_device_configs(device_id, conn=conn)
             config_snapshot = build_config_snapshot(configs, domain)
+            template_config = dict(config_snapshot)
             rng = random.SystemRandom()
             base_config = configs.get(domain) or {}
             lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
@@ -4779,8 +4832,14 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                 )
             elif not isinstance(raw_header_value, str):
                 resolved_config["header"] = str(raw_header_value or "")
+            substitution_payload: Optional[Dict[str, Any]] = None
+            if resolved_config.get("all_headers_unique"):
+                substitution_payload = {
+                    "template": template_config,
+                    "rules": substitution_rules,
+                }
             job_payload = attach_telegram_credentials(
-                {"config": resolved_config},
+                {"config": resolved_config, **({"substitution": substitution_payload} if substitution_payload else {})},
                 bot_token=bot_token,
                 chat_id=chat_id,
             )
@@ -4824,6 +4883,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         override_fields: Set[str] = set()
         if payload.header_override:
             override_fields.add("header")
+        template_config = dict(config_snapshot)
         rng = random.SystemRandom()
         base_config = configs.get(domain) or {}
         lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
@@ -4860,6 +4920,11 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             "config": resolved_config,
             "force_imap_check": force_imap_check,
         }
+        if resolved_config.get("all_headers_unique"):
+            base_payload["substitution"] = {
+                "template": template_config,
+                "rules": substitution_rules,
+            }
         job_payload = attach_telegram_credentials(
             base_payload,
             bot_token=bot_token,
@@ -4890,6 +4955,7 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
+        template_config = dict(config_snapshot)
         rng = random.SystemRandom()
         base_config = configs.get(domain) or {}
         lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
@@ -4916,8 +4982,14 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             )
         elif not isinstance(raw_header_value, str):
             resolved_config["header"] = str(raw_header_value or "")
+        payload_map: Dict[str, Any] = {"config": resolved_config}
+        if resolved_config.get("all_headers_unique"):
+            payload_map["substitution"] = {
+                "template": template_config,
+                "rules": substitution_rules,
+            }
         job_payload = attach_telegram_credentials(
-            {"config": resolved_config},
+            payload_map,
             bot_token=bot_token,
             chat_id=chat_id,
         )

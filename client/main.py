@@ -37,9 +37,10 @@ from lib.naver_imap import (
     fetch_latest_message_summary,
     purge_imap_folder,
 )
+from lib import substitution as substitution_lib
 
 
-APP_VERSION = "0.0.83"
+APP_VERSION = "0.0.84"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -750,6 +751,8 @@ class DispatchOutcome:
     rcpt_details: Optional[List[Dict[str, object]]] = None
     data_response_code: str = ""
     data_response_message: Optional[str] = None
+    mail_from: Optional[str] = None
+    header_text: Optional[str] = None
 
 
 @dataclass
@@ -2078,6 +2081,39 @@ class MailClient:
             return
         settings["last_mail_from"] = candidate
         self._imap_settings_dirty.add(normalized)
+
+    def _render_all_headers_unique_config(
+        self,
+        base_config: Dict[str, Any],
+        substitution_payload: Dict[str, Any],
+    ) -> Tuple[Dict[str, Any], Set[str]]:
+        template = substitution_payload.get("template")
+        rules = substitution_payload.get("rules")
+        if not isinstance(template, dict) or not isinstance(rules, list):
+            return dict(base_config), set()
+        rng = random.SystemRandom()
+        try:
+            resolved, missing = substitution_lib.resolve_config(template, rules, random_generator=rng)
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[경고] 치환 재계산 실패: {exc}")
+            return dict(base_config), {str(exc)}
+        merged = dict(base_config)
+        for key, value in resolved.items():
+            merged[key] = value
+        return merged, missing
+
+    def _log_substitution_missing(
+        self,
+        domain: str,
+        job_id: str,
+        missing: Set[str],
+        context: str,
+    ) -> None:
+        if not missing:
+            return
+        items = ", ".join(sorted(missing))
+        normalized = (domain or "").lower()
+        print(f"[경고] 치환 재계산 누락 항목({items}) · domain={normalized} · job={job_id} · context={context}")
 
     def _effective_mail_from(
         self,
@@ -4203,12 +4239,16 @@ class MailClient:
             )
 
     def handle_single_send(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
-        config = payload.get("config") or {}
+        config = dict(payload.get("config") or {})
+        substitution_payload = payload.get("substitution") if isinstance(payload.get("substitution"), dict) else None
         rcpt_to = payload.get("rcpt_to")
         force_imap_check = bool(payload.get("force_imap_check"))
         if not rcpt_to:
             return JobResult(job_id=job_id, status="failed", message="RCPT TO 정보가 없습니다.")
         normalized_domain = (domain or "").lower()
+        if substitution_payload and _normalize_bool_flag(config.get("all_headers_unique"), default=False):
+            config, missing_tokens = self._render_all_headers_unique_config(config, substitution_payload)
+            self._log_substitution_missing(normalized_domain, job_id, missing_tokens, "single")
         self._initialize_sent_log_base(normalized_domain)
         raw_bcc_entries = payload.get("bcc")
         if isinstance(raw_bcc_entries, str):
@@ -4236,6 +4276,7 @@ class MailClient:
             )
         else:
             dispatch_header = raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
+        config["header"] = dispatch_header
 
         success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
             smtp_host=config.get("smtp_host", ""),
@@ -4420,7 +4461,9 @@ class MailClient:
 
         self._initialize_sent_log_base(normalized)
 
-        config = payload.get("config") or {}
+        config = dict(payload.get("config") or {})
+        substitution_payload = payload.get("substitution") if isinstance(payload.get("substitution"), dict) else None
+        all_headers_unique = _normalize_bool_flag(config.get("all_headers_unique"), default=False)
         session_count = max(1, self._sanitize_session_count(config.get("session_count")))
         bcc_count = self._sanitize_bcc_count(config.get("bcc_count"))
         group_size = max(1, 1 + bcc_count)
@@ -4916,30 +4959,45 @@ class MailClient:
 
                 def deliver_group(group: DispatchGroup) -> DispatchOutcome:
                     rcpt_to = group.primary.email
+                    session_config = dict(config)
+                    session_missing: Set[str] = set()
+                    if all_headers_unique and substitution_payload:
+                        session_config, session_missing = self._render_all_headers_unique_config(
+                            config,
+                            substitution_payload,
+                        )
+                        self._log_substitution_missing(normalized, job_id, session_missing, "batch")
+                    session_mail_from = self._effective_mail_from(normalized, session_config)
                     injected_emails = [email for email in (group.injected or []) if email]
                     bcc_recipients = [item.email for item in group.bcc if item.email]
                     payload_bcc: List[str] = []
                     if injected_emails:
                         payload_bcc.extend(injected_emails)
                     payload_bcc.extend(bcc_recipients)
-                    raw_header_value = config.get("header")
-                    if message_id_auto:
+                    raw_header_value = session_config.get("header")
+                    session_message_id_auto = _normalize_bool_flag(
+                        session_config.get("message_id_auto"),
+                        default=True,
+                    )
+                    session_message_id_pattern = session_config.get("message_id_pattern")
+                    if session_message_id_auto:
                         dispatch_header = _ensure_message_id_header(
                             raw_header_value,
                             auto_enabled=True,
-                            pattern_value=message_id_pattern,
-                            mail_from=mail_from_value,
-                            helo=config.get("helo"),
+                            pattern_value=session_message_id_pattern,
+                            mail_from=session_mail_from,
+                            helo=session_config.get("helo"),
                         )
                     else:
                         dispatch_header = (
                             raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
                         )
+                    session_config["header"] = dispatch_header
                     success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
-                        smtp_host=config.get("smtp_host", ""),
-                        smtp_port=int(config.get("smtp_port") or 25),
-                        helo=config.get("helo", ""),
-                        mail_from=mail_from_value,
+                        smtp_host=session_config.get("smtp_host", ""),
+                        smtp_port=int(session_config.get("smtp_port") or 25),
+                        helo=session_config.get("helo", ""),
+                        mail_from=session_mail_from,
                         rcpt_to=rcpt_to,
                         header_text=dispatch_header,
                         bcc_emails=payload_bcc,
@@ -4960,6 +5018,8 @@ class MailClient:
                         rcpt_details=rcpt_details,
                         data_response_code=str((data_response or {}).get("code", "")),
                         data_response_message=(data_response or {}).get("message"),
+                        mail_from=session_mail_from,
+                        header_text=dispatch_header,
                     )
 
                 def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
@@ -5016,14 +5076,19 @@ class MailClient:
                     dispatched_db_total = end_total
                     return group
 
-                def register_sent_success(sent_at: datetime, detail_text: Optional[str], increment: int) -> None:
+                def register_sent_success(
+                    sent_at: datetime,
+                    detail_text: Optional[str],
+                    increment: int,
+                    mail_from_current: Optional[str],
+                ) -> None:
                     nonlocal current_sent_counter, threshold_check_request
                     if increment <= 0:
                         return
                     if not self._imap_enabled(normalized):
                         return
-                    if mail_from_value:
-                        self._remember_last_mail_from(normalized, mail_from_value)
+                    if mail_from_current:
+                        self._remember_last_mail_from(normalized, mail_from_current)
                     visible_sent = max(0, sent_count - sent_reset_offset)
                     visible_from_sequence = self._visible_sent_counter(normalized)
                     if visible_from_sequence > visible_sent:
@@ -5276,6 +5341,7 @@ class MailClient:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
                     nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
                     nonlocal anchor_retry_pending, current_sent_counter, nouser_count
+                    nonlocal mail_from_value, header_from_value
                     try:
                         outcome = future.result()
                     except Exception as exc:  # pylint: disable=broad-except
@@ -5426,10 +5492,18 @@ class MailClient:
                         last_error = failure_detail
 
                     if session_success and normalized == "naver":
-                        register_sent_success(outcome.sent_at, detail_for_log, success_increment)
+                        register_sent_success(outcome.sent_at, detail_for_log, success_increment, outcome.mail_from)
                     elif not session_success and normalized == "naver":
                         current_sent_counter = max(0, sent_count - sent_reset_offset)
                         self._set_sent_counter(normalized, current_sent_counter)
+
+                    if outcome.mail_from:
+                        mail_from_value = outcome.mail_from
+                    if outcome.header_text:
+                        header_from_value = self._extract_header_from(
+                            outcome.header_text,
+                            outcome.mail_from or mail_from_value,
+                        )
 
                     if anchor_count:
                         if session_success:
@@ -5988,23 +6062,41 @@ class MailClient:
             message = "도메인 정보가 없어 수동 도착 확인을 실행할 수 없습니다."
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         normalized = domain.lower()
-        config_payload = payload.get("config") or {}
+        config_payload = dict(payload.get("config") or {})
+        substitution_payload = payload.get("substitution") if isinstance(payload.get("substitution"), dict) else None
         if not isinstance(config_payload, dict):
             message = "SMTP 설정이 비어 있어 수동 도착 확인을 실행할 수 없습니다."
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         if not self._imap_enabled(normalized):
             message = "IMAP 확인이 비활성화되어 있어 수동 도착 확인을 실행하지 않습니다."
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        if substitution_payload and _normalize_bool_flag(config_payload.get("all_headers_unique"), default=False):
+            config_payload, missing_tokens = self._render_all_headers_unique_config(config_payload, substitution_payload)
+            self._log_substitution_missing(normalized, job_id, missing_tokens, "imap_manual_check")
         mail_from_value = self._effective_mail_from(normalized, config_payload)
         if mail_from_value:
             self._remember_last_mail_from(normalized, mail_from_value)
-        header_from_value = self._extract_header_from(config_payload.get("header"), mail_from_value)
+        message_id_auto = _normalize_bool_flag(config_payload.get("message_id_auto"), default=True)
+        message_id_pattern = config_payload.get("message_id_pattern")
+        raw_header_value = config_payload.get("header")
+        if message_id_auto:
+            header_text = _ensure_message_id_header(
+                raw_header_value,
+                auto_enabled=True,
+                pattern_value=message_id_pattern,
+                mail_from=mail_from_value,
+                helo=config_payload.get("helo"),
+            )
+        else:
+            header_text = raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
+        config_payload["header"] = header_text
+        header_from_value = self._extract_header_from(header_text, mail_from_value)
         context_reason = str(payload.get("context_reason") or "사용자 수동 도착 확인")
         smtp_context = {
             "smtp_host": config_payload.get("smtp_host"),
             "smtp_port": config_payload.get("smtp_port"),
             "helo": config_payload.get("helo"),
-            "header": config_payload.get("header"),
+            "header": header_text,
         }
         settings_snapshot = self._imap_settings_for_domain(normalized)
         single_delay_seconds = sanitize_imap_delay(

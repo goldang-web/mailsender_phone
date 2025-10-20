@@ -2937,7 +2937,7 @@ function createEmptyListRule() {
 }
 
 const CONFIG_FIELDS = ["helo", "mail_from", "header", "message_id_pattern", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
-const CONFIG_TOGGLE_FIELDS = ["message_id_auto"];
+const CONFIG_TOGGLE_FIELDS = ["message_id_auto", "all_headers_unique"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 6;
@@ -3190,6 +3190,7 @@ function initialFieldValues(config) {
     header: config?.header || "",
     message_id_pattern: config?.message_id_pattern || MESSAGE_ID_PATTERN_DEFAULT,
     message_id_auto: typeof config?.message_id_auto === "boolean" ? config.message_id_auto : Boolean(config?.message_id_auto ?? true),
+    all_headers_unique: Boolean(config?.all_headers_unique),
     session_count: sanitizeSessionValue(config?.session_count ?? "1"),
     bcc_count: formatBccValue(config?.bcc_count ?? 0),
     anchor_interval: formatAnchorValue(config?.anchor_interval ?? 0),
@@ -3253,6 +3254,8 @@ function collectConfigPayload(card, currentDevice, domain) {
   const messageIdPatternInput = card.querySelector('[data-field="message_id_pattern"]');
   let messageIdPatternValue = messageIdPatternInput?.value ?? "";
   messageIdPatternValue = messageIdPatternValue.trim() || MESSAGE_ID_PATTERN_DEFAULT;
+  const allHeadersUniqueInput = card.querySelector('[data-field="all_headers_unique"]');
+  const allHeadersUniqueValue = Boolean(allHeadersUniqueInput?.checked);
 
   return {
     payload: {
@@ -3262,6 +3265,7 @@ function collectConfigPayload(card, currentDevice, domain) {
       header: card.querySelector('[data-field="header"]').value,
       message_id_auto: messageIdAutoValue,
       message_id_pattern: messageIdPatternValue,
+      all_headers_unique: allHeadersUniqueValue,
       session_count: Number(sessionValue) || 1,
       bcc_count: parseBccInput(bccValue),
       anchor_interval: parseAnchorInput(anchorIntervalValue),
@@ -4022,6 +4026,11 @@ function updateCardLockUI(card, config, domain) {
       badge.classList.add("hidden");
       badge.removeAttribute("title");
     }
+  }
+  const allHeadersCheckbox = card.querySelector('[data-field="all_headers_unique"]');
+  if (allHeadersCheckbox) {
+    allHeadersCheckbox.disabled = locked;
+    allHeadersCheckbox.title = locked ? "고정 모드에서는 사용할 수 없습니다." : "";
   }
   const originLabel = card.querySelector('[data-role="lockOrigin"]');
   if (originLabel) {
@@ -6999,7 +7008,8 @@ function renderDomainSummary(card, device, domain) {
   );
   if (summaryEl) {
     const label = DOMAIN_LABELS[domain] || domain;
-    summaryEl.textContent = `${label} · 총 ${formatCount(activeTotal)}건 · 잔여 ${formatCount(activeRemaining)}건`;
+    const headerFlag = activeConfig?.all_headers_unique ? "켬" : "끔";
+    summaryEl.textContent = `${label} · 총 ${formatCount(activeTotal)}건 · 잔여 ${formatCount(activeRemaining)}건 · 헤더 개별화: ${headerFlag}`;
   }
   if (cycleEl) {
     cycleEl.innerHTML = "";
@@ -7114,6 +7124,7 @@ function bestConfig(device, domain) {
     mail_from: "",
     header: "",
     message_id_auto: true,
+    all_headers_unique: false,
     message_id_pattern: MESSAGE_ID_PATTERN_DEFAULT,
     session_count: 1,
     bcc_count: 0,
@@ -7961,6 +7972,8 @@ function populateConfigForm(card, device, domain) {
   if (messageIdPatternInput && document.activeElement !== messageIdPatternInput) messageIdPatternInput.value = cache.values.message_id_pattern;
   const messageIdAutoInput = card.querySelector('[data-field="message_id_auto"]');
   if (messageIdAutoInput) messageIdAutoInput.checked = Boolean(cache.values.message_id_auto);
+  const allHeadersUniqueInput = card.querySelector('[data-field="all_headers_unique"]');
+  if (allHeadersUniqueInput) allHeadersUniqueInput.checked = Boolean(cache.values.all_headers_unique);
   const sessionInput = card.querySelector('[data-field="session_count"]');
   if (sessionInput && document.activeElement !== sessionInput) sessionInput.value = cache.values.session_count;
   const bccInput = card.querySelector('[data-field="bcc_count"]');
@@ -8137,6 +8150,13 @@ function attachCardEvents(card) {
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       markFieldDirty(currentDevice.id, domain, fieldName, Boolean(event.target.checked));
+      if (fieldName === "all_headers_unique") {
+        if (event.target.checked) {
+          setNotice(card, "모든 헤더 개별화를 켰습니다. 고정 모드에서는 사용할 수 없습니다.");
+        } else {
+          setNotice(card, "모든 헤더 개별화를 끈 상태로 저장합니다.", "info");
+        }
+      }
     });
   });
 
@@ -8753,6 +8773,10 @@ function buildDeviceCard(device) {
         <label class="inline-checkbox">
           <input type="checkbox" data-field="message_id_auto">
           <span>Message-ID 자동 삽입</span>
+        </label>
+        <label class="inline-checkbox">
+          <input type="checkbox" data-field="all_headers_unique">
+          <span>모든 헤더 개별화</span>
         </label>
         <label class="field message-id-pattern-field">
           <span>Message-ID 패턴</span>
@@ -10355,6 +10379,7 @@ async function handleGlobalApply(options = {}) {
         if (field === "bcc_count") return "BCC 수";
         if (field === "message_id_auto") return "Message-ID 자동 삽입";
         if (field === "message_id_pattern") return "Message-ID 패턴";
+        if (field === "all_headers_unique") return "모든 헤더 개별화";
         if (field === "stop_schedule") return "자동 중지";
         if (field === "substitution_rules") return "치환 변수";
         if (field === "telegram_bot_token") return "텔레그램 봇 토큰";
