@@ -13,6 +13,7 @@ import threading
 import socket
 import ssl
 import string
+import math
 from collections import deque
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
@@ -3015,7 +3016,38 @@ class MailClient:
                 sent_at_iso = to_utc_iso(sent_at_value)
 
                 if delay_seconds > 0:
-                    time.sleep(delay_seconds)
+                    total_delay = max(0.0, float(delay_seconds))
+                    deadline = time.monotonic() + total_delay
+                    last_display: Optional[int] = None
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            break
+                        display_seconds = max(1, int(math.ceil(remaining)))
+                        if last_display is None:
+                            self._log_imap_console(
+                                f"[IMAP-확인대기] {display_seconds}초 대기합니다.",
+                                domain=normalized,
+                                tag="IMAP-확인대기",
+                            )
+                        elif display_seconds != last_display:
+                            self._log_imap_console(
+                                f"[IMAP-확인대기] 남은 {display_seconds}초",
+                                domain=normalized,
+                                tag="IMAP-확인대기",
+                            )
+                        last_display = display_seconds
+                        threshold = remaining - (display_seconds - 1)
+                        sleep_duration = min(1.0, threshold) if threshold > 0 else min(1.0, remaining)
+                        if sleep_duration > 0:
+                            time.sleep(sleep_duration)
+                        else:
+                            break
+                    self._log_imap_console(
+                        "[IMAP-확인대기] 대기 완료",
+                        domain=normalized,
+                        tag="IMAP-확인대기",
+                    )
 
                 attempt_status = "error"
                 attempt_reason: Optional[str] = None
