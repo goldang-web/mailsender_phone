@@ -4999,6 +4999,43 @@ class MailClient:
         cancel_requested = False
         stop_reason: Optional[str] = None
         fatal_error: Optional[str] = None
+        batch_halt_markers: Set[str] = set()
+
+        def emit_batch_halt_marker(
+            code: str,
+            detail: str,
+            *,
+            severity: str = "info",
+            allow_repeat: bool = False,
+        ) -> None:
+            if not allow_repeat and code in batch_halt_markers:
+                return
+            if not allow_repeat:
+                batch_halt_markers.add(code)
+            tag = f"[배치중단:{code}]"
+            message_text = f"{tag} {detail}"
+            print(message_text)
+            if not job_id:
+                return
+            try:
+                self.send_job_report(
+                    JobResult(
+                        job_id=job_id,
+                        status="running",
+                        message=message_text,
+                        result={
+                            "logs": [
+                                {
+                                    "log": message_text,
+                                    "delivery_status": severity,
+                                }
+                            ]
+                        },
+                    ),
+                    critical=False,
+                )
+            except Exception:
+                pass
 
         def check_schedule_trigger() -> None:
             nonlocal stop_requested, cancel_requested, stop_reason
@@ -5008,6 +5045,7 @@ class MailClient:
                 stop_requested = True
                 cancel_requested = True
                 stop_reason = "예약된 자동 정지 실행"
+                emit_batch_halt_marker("SCHEDULE_STOP", stop_reason, severity="warning")
 
         check_schedule_trigger()
 
@@ -5239,6 +5277,11 @@ class MailClient:
                     while not pending_queue:
                         newly_reserved = reserve_candidates(fetch_batch_size)
                         if not newly_reserved:
+                            emit_batch_halt_marker(
+                                "JOB_QUEUE_EMPTY",
+                                "큐에 대기 중인 메일이 없습니다.",
+                                severity="info",
+                            )
                             return None
                         pending_queue.extend(newly_reserved)
                     primary_email = pending_queue.popleft()
@@ -5475,6 +5518,11 @@ class MailClient:
                         threshold_check_request["substitution"] = substitution_clone
                     if config_snapshot_clone:
                         threshold_check_request["config_snapshot"] = config_snapshot_clone
+                    emit_batch_halt_marker(
+                        "SENT_GUARD_REQUEST",
+                        f"Sent 임계치 {threshold_value}건 도달 (배수 {next_multiple})",
+                        severity="info",
+                    )
 
                 def ensure_threshold_check() -> None:
                     nonlocal threshold_check_request, current_sent_counter, threshold_deferred_notice, stop_requested, fatal_error, stop_reason
@@ -5490,6 +5538,11 @@ class MailClient:
                                 domain=normalized,
                             )
                             threshold_deferred_notice = True
+                            emit_batch_halt_marker(
+                                "IMAP_WAIT_INFLIGHT",
+                                f"Sent 임계치 확인 대기 중 · 진행 {len(inflight)}건",
+                                severity="info",
+                            )
                         return
                     if threshold_deferred_notice:
                         threshold_deferred_notice = False
@@ -5555,6 +5608,11 @@ class MailClient:
                         prep_lines,
                         domain=normalized,
                     )
+                    emit_batch_halt_marker(
+                        "SENT_GUARD_EXEC",
+                        f"Sent 임계치 {threshold_value}건 확인 실행 (배수 {target_multiple})",
+                        severity="info",
+                    )
                     mail_from_candidate = str(request.get("mail_from") or mail_from_value)
                     raw_header_from = request.get("header_from")
                     if isinstance(raw_header_from, str) and raw_header_from.strip():
@@ -5593,6 +5651,11 @@ class MailClient:
                             ["IMAP 확인 작업을 실행하지 못했습니다."],
                             domain=normalized,
                         )
+                        emit_batch_halt_marker(
+                            "IMAP_GUARD_FAIL",
+                            "IMAP 확인 작업을 실행하지 못했습니다.",
+                            severity="error",
+                        )
                         return
                     status_value = str(report_payload.get("status") or "")
                     latency_value = report_payload.get("latency")
@@ -5627,6 +5690,11 @@ class MailClient:
                             "IMAP 확인 실패",
                             [fatal_error],
                             domain=normalized,
+                        )
+                        emit_batch_halt_marker(
+                            "IMAP_NETWORK_ERROR",
+                            fatal_error,
+                            severity="error",
                         )
                         return
                     else:
@@ -5664,6 +5732,11 @@ class MailClient:
                         fatal_error = failure_summary
                         stop_reason = failure_summary
                         stop_requested = True
+                        emit_batch_halt_marker(
+                            "IMAP_FAILURE",
+                            failure_summary,
+                            severity="error",
+                        )
                         return
                     next_multiple = self._get_last_threshold_multiple(normalized) + 1
                     next_target = threshold_value * next_multiple if threshold_value > 0 else 0
@@ -5869,10 +5942,15 @@ class MailClient:
                         recipient=primary_recipient,
                         extra_recipient_count=extra_recipient_count,
                     )
+                    log_display = log_line
+                    if not session_success:
+                        failure_summary_line = (failure_detail or "-").strip() or "-"
+                        log_display = f"{log_line}\n  SMTP 응답: {failure_summary_line}"
                     dispatch_logs: List[Dict[str, object]] = [
                         {
-                            "log": log_line,
-                            "display": log_line,
+                            "log": log_display,
+                            "display": log_display,
+                            "log_compact": log_line,
                             "email": recipient_emails[0] if recipient_emails else None,
                             "sequence": sequence_total,
                             "delivery_status": delivery_status_payload,
@@ -5896,7 +5974,7 @@ class MailClient:
                             "tags": (["nouser"] if db_nouser_count else []),
                         }
                     ]
-                    print(log_line)
+                    print(log_display)
                     if throttle_detected:
                         throttle_notice = matched_message or "네이버 발송 제한 응답 감지"
                         info_message = f"{throttle_notice} · IP 변경 시도"
@@ -5943,12 +6021,22 @@ class MailClient:
                             fatal_error = f"{throttle_notice} · {ip_message}"
                             stop_reason = fatal_error
                             stop_requested = True
+                            emit_batch_halt_marker(
+                                "SMTP_THROTTLE",
+                                fatal_error,
+                                severity="error",
+                            )
                         else:
                             emit_progress(force=True)
                     elif matched_message:
                         fatal_error = matched_message
                         stop_reason = fatal_error
                         stop_requested = True
+                        emit_batch_halt_marker(
+                            "SMTP_FATAL",
+                            fatal_error,
+                            severity="error",
+                        )
                     emit_progress()
                     if dispatch_logs:
                         summary_snapshot = build_summary()
@@ -5971,7 +6059,20 @@ class MailClient:
                             if not stop_requested:
                                 while len(inflight) < session_count:
                                     ensure_threshold_check()
-                                    if threshold_check_request is not None or self._is_sent_guard_paused(normalized):
+                                    guard_paused = self._is_sent_guard_paused(normalized)
+                                    if threshold_check_request is not None or guard_paused:
+                                        if threshold_check_request is not None:
+                                            emit_batch_halt_marker(
+                                                "SENT_GUARD_PENDING",
+                                                "IMAP 확인 예약 처리 대기 중",
+                                                severity="info",
+                                            )
+                                        if guard_paused:
+                                            emit_batch_halt_marker(
+                                                "IMAP_RECHECK_WAIT",
+                                                "IMAP 재확인 작업 완료 대기",
+                                                severity="info",
+                                            )
                                         break
                                     group = next_group()
                                     if not group:
@@ -5988,6 +6089,11 @@ class MailClient:
                                         stop_requested = True
                                         cancel_requested = True
                                         stop_reason = "사용자 중지 요청"
+                                        emit_batch_halt_marker(
+                                            "USER_CANCEL",
+                                            stop_reason,
+                                            severity="warning",
+                                        )
                                     check_schedule_trigger()
                                     maybe_poll_updates()
                                     continue
