@@ -42,7 +42,7 @@ from lib.naver_imap import (
 from lib import substitution as substitution_lib
 
 
-APP_VERSION = "0.0.86"
+APP_VERSION = "0.0.87"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -890,6 +890,7 @@ class MailClient:
                 "failure_action": sanitize_imap_failure_action(entry.get("failure_action")),
                 "notify_before_stop_all": sanitize_bool_flag(entry.get("notify_before_stop_all")),
                 "purge_before_check": sanitize_bool_flag(entry.get("purge_before_check")),
+                "reroll_on_retry": sanitize_bool_flag(entry.get("reroll_on_retry")),
                 "sent_threshold": sent_threshold,
                 "sent_since_last_check": sent_since_last_check,
                 "sent_last_reset_at": entry.get("sent_last_reset_at"),
@@ -1385,6 +1386,7 @@ class MailClient:
                 "failure_action": sanitize_imap_failure_action(settings.get("failure_action")),
                 "notify_before_stop_all": sanitize_bool_flag(settings.get("notify_before_stop_all")),
                 "purge_before_check": sanitize_bool_flag(settings.get("purge_before_check")),
+                "reroll_on_retry": sanitize_bool_flag(settings.get("reroll_on_retry")),
                 "sent_threshold": sent_threshold,
                 "sent_since_last_check": sent_since,
                 "sent_last_reset_at": settings.get("sent_last_reset_at"),
@@ -2105,6 +2107,7 @@ class MailClient:
                 "failure_action": "none",
                 "notify_before_stop_all": False,
                 "purge_before_check": False,
+                "reroll_on_retry": False,
                 "recheck_attempts": IMAP_DEFAULT_RECHECK_ATTEMPTS,
                 "sent_threshold": IMAP_DEFAULT_SENT_THRESHOLD,
                 "sent_since_last_check": 0,
@@ -2293,6 +2296,9 @@ class MailClient:
         )
         settings["purge_before_check"] = sanitize_bool_flag(
             payload.get("imap_purge_before_check")
+        )
+        settings["reroll_on_retry"] = sanitize_bool_flag(
+            payload.get("imap_reroll_on_retry")
         )
         settings["sent_threshold"] = sanitize_imap_sent_threshold(
             payload.get("imap_sent_threshold"),
@@ -2848,6 +2854,19 @@ class MailClient:
             sent_threshold if sent_threshold is not None else settings.get("sent_threshold"),
             default=IMAP_DEFAULT_SENT_THRESHOLD,
         )
+        smtp_context = dict(smtp_context or {})
+        smtp_context_base = copy.deepcopy(smtp_context)
+        substitution_payload_base = (
+            copy.deepcopy(smtp_context_base.get("substitution"))
+            if isinstance(smtp_context_base.get("substitution"), dict)
+            else None
+        )
+        config_snapshot_base = (
+            copy.deepcopy(smtp_context_base.get("config_snapshot"))
+            if isinstance(smtp_context_base.get("config_snapshot"), dict)
+            else None
+        )
+        reroll_on_retry_enabled = sanitize_bool_flag(settings.get("reroll_on_retry"))
 
         passed_probe_result = probe_result
         stop_actions = {"stop_device", "stop_all"}
@@ -2954,8 +2973,90 @@ class MailClient:
             current_purge_context = purge_context
             final_probe_result = probe_current
 
+            def perform_reroll(sequence_index: int) -> bool:
+                nonlocal mail_from, header_from, smtp_context, sent_message_id, smtp_context_base, config_snapshot_base
+                if not reroll_on_retry_enabled:
+                    return False
+                substitution_payload = (
+                    copy.deepcopy(substitution_payload_base)
+                    if isinstance(substitution_payload_base, dict)
+                    else None
+                )
+                if not substitution_payload:
+                    self._log_imap_console(
+                        f"IMAP 재시도 {sequence_index}차 · 재롤 생략 (치환 규칙 없음)",
+                        domain=normalized,
+                        tag="IMAP-메일헤더재롤",
+                    )
+                    return False
+                base_config = (
+                    copy.deepcopy(config_snapshot_base)
+                    if isinstance(config_snapshot_base, dict)
+                    else {
+                        "smtp_host": smtp_context_base.get("smtp_host"),
+                        "smtp_port": smtp_context_base.get("smtp_port"),
+                        "helo": smtp_context_base.get("helo"),
+                        "mail_from": smtp_context_base.get("mail_from") or mail_from,
+                        "header": smtp_context_base.get("header"),
+                    }
+                )
+                refreshed_config, missing_tokens = self._render_all_headers_unique_config(
+                    base_config,
+                    substitution_payload,
+                )
+                if missing_tokens:
+                    self._log_substitution_missing(
+                        normalized,
+                        job_id or "",
+                        missing_tokens,
+                        f"imap_retry_{sequence_index}",
+                    )
+                new_mail_from = str(refreshed_config.get("mail_from") or mail_from or "").strip()
+                if not new_mail_from:
+                    new_mail_from = mail_from
+                raw_header_value = refreshed_config.get("header")
+                if raw_header_value is None:
+                    raw_header_value = smtp_context_base.get("header")
+                if isinstance(raw_header_value, bytes):
+                    try:
+                        header_text_candidate = raw_header_value.decode("utf-8")
+                    except UnicodeDecodeError:
+                        header_text_candidate = raw_header_value.decode("latin-1", errors="ignore")
+                elif raw_header_value is not None:
+                    header_text_candidate = str(raw_header_value)
+                else:
+                    header_text_candidate = ""
+                smtp_context["smtp_host"] = refreshed_config.get("smtp_host", smtp_context_base.get("smtp_host"))
+                smtp_context["smtp_port"] = refreshed_config.get("smtp_port", smtp_context_base.get("smtp_port"))
+                smtp_context["helo"] = refreshed_config.get("helo", smtp_context_base.get("helo"))
+                smtp_context["mail_from"] = new_mail_from
+                smtp_context["header"] = header_text_candidate
+                if substitution_payload_base:
+                    smtp_context["substitution"] = copy.deepcopy(substitution_payload_base)
+                snapshot_clone = copy.deepcopy(refreshed_config)
+                snapshot_clone["mail_from"] = new_mail_from
+                snapshot_clone["header"] = header_text_candidate
+                smtp_context["config_snapshot"] = snapshot_clone
+                mail_from = new_mail_from
+                new_header_from = self._extract_header_from(header_text_candidate, mail_from) if header_text_candidate else None
+                if new_header_from:
+                    header_from = new_header_from
+                new_message_id = _extract_message_id_from_text(header_text_candidate)
+                if new_message_id:
+                    sent_message_id = new_message_id
+                smtp_context_base = copy.deepcopy(smtp_context)
+                config_snapshot_base = copy.deepcopy(snapshot_clone)
+                self._log_imap_console(
+                    f"IMAP 재시도 {sequence_index}차 · 헤더 재롤 적용",
+                    domain=normalized,
+                    tag="IMAP-메일헤더재롤",
+                )
+                return True
+
             for sequence_index in range(1, max_sequence_attempts + 1):
                 if sequence_index > 1:
+                    if reroll_on_retry_enabled:
+                        perform_reroll(sequence_index)
                     if purge_before_check_enabled:
                         current_purge_context = self._run_imap_precheck_purge(
                             domain=normalized,

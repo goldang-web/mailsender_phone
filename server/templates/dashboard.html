@@ -2537,6 +2537,10 @@ button:not(:disabled):hover {
           <input type="checkbox" id="imapPurgeBeforeCheck">
           <span>확인용 메일 발송 전에 스팸함 비우기</span>
         </label>
+        <label class="inline-checkbox field" id="imapRerollOnRetryLabel" title="IMAP 재확인 재시도 시 헤더·치환값을 다시 계산해 확인 메일을 발송합니다.">
+          <input type="checkbox" id="imapRerollOnRetry">
+          <span>재시도 시 헤더 다시 뽑기</span>
+        </label>
         <p class="field-hint">단일 발송 확인 대기는 확인을 시작하기 전 지연을 의미하며, Sent 누적 간격은 발송 성공 건수가 기준에 도달할 때마다 IMAP 확인을 실행합니다. 허용 지연은 발송과 수신 사이의 최대 허용 간격이며, 실패 시 대응에 따라 중지 범위가 결정됩니다.</p>
       </form>
     </div>
@@ -2608,6 +2612,7 @@ const IMAP_FAILURE_ACTIONS = ["none", "stop_device", "stop_all"];
 const IMAP_DEFAULT_RECHECK_ATTEMPTS = 2;
 const IMAP_RECHECK_MIN = 1;
 const IMAP_RECHECK_MAX = 3;
+const IMAP_DEFAULT_REROLL_ON_RETRY = false;
 
 function createDefaultSubstitutionSnapshot() {
   return {
@@ -7162,6 +7167,7 @@ function bestConfig(device, domain) {
     imap_sent_last_reset_at: null,
     imap_failure_action: "none",
     imap_notify_before_stop_all: false,
+    imap_reroll_on_retry: IMAP_DEFAULT_REROLL_ON_RETRY,
     imap_recheck_attempts: IMAP_DEFAULT_RECHECK_ATTEMPTS,
     imap_last_status: "",
     imap_last_checked_at: null,
@@ -7936,6 +7942,7 @@ function renderImapSection(card, device, domain) {
     }
     summaryLines.push(failureLine);
     summaryLines.push(`확인용 발송 전 스팸함 비우기: ${config.imap_purge_before_check ? "켜짐" : "꺼짐"}`);
+    summaryLines.push(`재시도 시 헤더 다시 뽑기: ${config.imap_reroll_on_retry ? "사용" : "비활성"}`);
     summaryLines.push(`대기 시간: 단일 ${imapSingleDelayValue}초`);
     summaryLines.push(`재확인 횟수: ${imapRecheckValue}회`);
     summaryLines.push(`Sent 누적 확인: ${imapSentThresholdValue}건마다`);
@@ -7964,6 +7971,7 @@ function renderImapSection(card, device, domain) {
   block.dataset.imapFailureAction = failureActionValue;
   block.dataset.imapNotifyBeforeStopAll = config.imap_notify_before_stop_all ? "1" : "0";
   block.dataset.imapPurgeBeforeCheck = config.imap_purge_before_check ? "1" : "0";
+  block.dataset.imapRerollOnRetry = config.imap_reroll_on_retry ? "1" : "0";
   block.dataset.imapRecheckAttempts = String(imapRecheckValue);
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
   block.dataset.imapLastCheckedAt = currentCheckedMarker;
@@ -9475,6 +9483,8 @@ function openImapModal(card, device, domain, options = {}) {
   const failureActionSelect = document.getElementById("imapFailureAction");
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
+  const rerollCheckbox = document.getElementById("imapRerollOnRetry");
+  const rerollCheckbox = document.getElementById("imapRerollOnRetry");
   const passwordToggle = document.querySelector('[data-action="imap-password-toggle"]');
 
   usernameInput.value = config.imap_username || "";
@@ -9492,6 +9502,7 @@ function openImapModal(card, device, domain, options = {}) {
   const blockFailureAction = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapFailureAction;
   const blockNotifyRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapNotifyBeforeStopAll;
   const blockPurgeRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapPurgeBeforeCheck;
+  const blockRerollRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapRerollOnRetry;
   const allowedLatencyValue = clampNumber(
     blockAllowedLatency ?? config.imap_allowed_latency_seconds ?? IMAP_DEFAULT_ALLOWED_LATENCY,
     IMAP_ALLOWED_MIN,
@@ -9542,6 +9553,11 @@ function openImapModal(card, device, domain, options = {}) {
     const configPurge = Boolean(config.imap_purge_before_check);
     const blockPurge = parseFlag(blockPurgeRaw);
     purgeCheckbox.checked = blockPurge ?? configPurge;
+  }
+  if (rerollCheckbox) {
+    const configReroll = Boolean(config.imap_reroll_on_retry);
+    const blockReroll = parseFlag(blockRerollRaw);
+    rerollCheckbox.checked = blockReroll ?? configReroll ?? IMAP_DEFAULT_REROLL_ON_RETRY;
   }
   updateImapNotifyControl(failureActionSelect?.value || "none");
 
@@ -9648,6 +9664,7 @@ async function submitImapModal() {
       notifyCheckbox && !notifyCheckbox.disabled && notifyCheckbox.checked
     ),
     purge_before_check: Boolean(purgeCheckbox && purgeCheckbox.checked),
+    reroll_on_retry: Boolean(rerollCheckbox && rerollCheckbox.checked),
   };
   if (rawPassword) {
     payload.password = rawPassword;

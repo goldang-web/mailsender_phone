@@ -72,6 +72,7 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "imap_failure_action": "none",
     "imap_notify_before_stop_all": False,
     "imap_purge_before_check": False,
+    "imap_reroll_on_retry": False,
     "imap_recheck_attempts": IMAP_RECHECK_ATTEMPTS_DEFAULT,
     "imap_sent_threshold": IMAP_SENT_THRESHOLD_DEFAULT,
     "imap_sent_since_last_check": 0,
@@ -123,6 +124,7 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "telegram_chat_id": "",
     "message_id_auto": True,
     "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
+    "imap_reroll_on_retry": False,
 }
 GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count", "message_id_auto", "message_id_pattern")
 MAX_DEVICE_LOG_HISTORY = 10
@@ -736,6 +738,10 @@ def sanitize_imap_notify_before_stop_all(value: Any) -> bool:
 
 
 def sanitize_imap_purge_before_check(value: Any) -> bool:
+    return sanitize_stop_schedule_enabled(value)
+
+
+def sanitize_imap_reroll_on_retry(value: Any) -> bool:
     return sanitize_stop_schedule_enabled(value)
 
 
@@ -1359,6 +1365,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_failure_action TEXT NOT NULL DEFAULT 'none',
                 imap_notify_before_stop_all INTEGER NOT NULL DEFAULT 0,
                 imap_purge_before_check INTEGER NOT NULL DEFAULT 0,
+                imap_reroll_on_retry INTEGER NOT NULL DEFAULT 0,
                 imap_recheck_attempts INTEGER NOT NULL DEFAULT {IMAP_RECHECK_ATTEMPTS_DEFAULT},
                 imap_sent_threshold INTEGER NOT NULL DEFAULT 90,
                 imap_sent_since_last_check INTEGER NOT NULL DEFAULT 0,
@@ -1395,6 +1402,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_failure_action,
                 imap_notify_before_stop_all,
                 imap_purge_before_check,
+                imap_reroll_on_retry,
                 imap_recheck_attempts,
                 imap_sent_threshold,
                 imap_sent_since_last_check,
@@ -1419,6 +1427,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 'none' AS imap_failure_action,
                 0 AS imap_notify_before_stop_all,
                 0 AS imap_purge_before_check,
+                0 AS imap_reroll_on_retry,
                 {recheck_default} AS imap_recheck_attempts,
                 {threshold_default} AS imap_sent_threshold,
                 0 AS imap_sent_since_last_check,
@@ -1664,6 +1673,10 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_purge_before_check INTEGER NOT NULL DEFAULT 0"
             )
+        if "imap_reroll_on_retry" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_reroll_on_retry INTEGER NOT NULL DEFAULT 0"
+            )
         if "imap_recheck_attempts" not in config_columns:
             conn.execute(
                 f"ALTER TABLE device_configs ADD COLUMN imap_recheck_attempts INTEGER NOT NULL DEFAULT {IMAP_RECHECK_ATTEMPTS_DEFAULT}"
@@ -1893,10 +1906,11 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG.get("imap_delay_seconds", DEFAULT_DOMAIN_CONFIG["imap_single_delay_seconds"]),
                     DEFAULT_DOMAIN_CONFIG["imap_single_delay_seconds"],
                     DEFAULT_DOMAIN_CONFIG["imap_allowed_latency_seconds"],
-                    DEFAULT_DOMAIN_CONFIG["imap_failure_action"],
-                    1 if DEFAULT_DOMAIN_CONFIG["imap_notify_before_stop_all"] else 0,
-                    1 if DEFAULT_DOMAIN_CONFIG["imap_purge_before_check"] else 0,
-                    DEFAULT_DOMAIN_CONFIG["imap_recheck_attempts"],
+                DEFAULT_DOMAIN_CONFIG["imap_failure_action"],
+                1 if DEFAULT_DOMAIN_CONFIG["imap_notify_before_stop_all"] else 0,
+                1 if DEFAULT_DOMAIN_CONFIG["imap_purge_before_check"] else 0,
+                1 if DEFAULT_DOMAIN_CONFIG["imap_reroll_on_retry"] else 0,
+                DEFAULT_DOMAIN_CONFIG["imap_recheck_attempts"],
                     DEFAULT_DOMAIN_CONFIG["imap_sent_threshold"],
                     DEFAULT_DOMAIN_CONFIG["imap_sent_since_last_check"],
                     DEFAULT_DOMAIN_CONFIG["imap_sent_last_reset_at"],
@@ -1994,6 +2008,9 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     imap_purge_before_check = sanitize_imap_purge_before_check(
         row.get("imap_purge_before_check")
     )
+    imap_reroll_on_retry = sanitize_imap_reroll_on_retry(
+        row.get("imap_reroll_on_retry")
+    )
     imap_recheck_attempts = sanitize_imap_recheck_attempts(
         row.get("imap_recheck_attempts"),
         default=DEFAULT_DOMAIN_CONFIG.get("imap_recheck_attempts"),
@@ -2072,6 +2089,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "imap_failure_action": imap_failure_action,
         "imap_notify_before_stop_all": imap_notify_before_stop_all,
         "imap_purge_before_check": imap_purge_before_check,
+        "imap_reroll_on_retry": imap_reroll_on_retry,
         "imap_recheck_attempts": imap_recheck_attempts,
         "imap_sent_threshold": imap_sent_threshold,
         "imap_sent_since_last_check": sent_since_last_check,
@@ -3182,6 +3200,7 @@ class ImapSettingsPayload(BaseModel):
     failure_action: Optional[str] = None
     notify_before_stop_all: Optional[bool] = None
     purge_before_check: Optional[bool] = None
+    reroll_on_retry: Optional[bool] = None
     recheck_attempts: Optional[int] = None
     delay_seconds: Optional[int] = None  # legacy alias for allowed latency
 
@@ -4341,6 +4360,11 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
             if payload.purge_before_check is not None
             else config.get("imap_purge_before_check")
         )
+        reroll_on_retry_value = sanitize_imap_reroll_on_retry(
+            payload.reroll_on_retry
+            if payload.reroll_on_retry is not None
+            else config.get("imap_reroll_on_retry")
+        )
         recheck_attempts_value = sanitize_imap_recheck_attempts(
             payload.recheck_attempts
             if payload.recheck_attempts is not None
@@ -4376,6 +4400,7 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 imap_failure_action=?,
                 imap_notify_before_stop_all=?,
                 imap_purge_before_check=?,
+                imap_reroll_on_retry=?,
                 imap_recheck_attempts=?,
                 imap_sent_threshold=?,
                 imap_last_status=?,
@@ -4398,6 +4423,7 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 failure_action_value,
                 1 if notify_before_stop_value else 0,
                 1 if purge_before_check_value else 0,
+                1 if reroll_on_retry_value else 0,
                 recheck_attempts_value,
                 sent_threshold_value,
                 status_value,
