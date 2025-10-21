@@ -3075,23 +3075,23 @@ class MailClient:
                     received_display = result.get("received_display")
                     if sent_display:
                         self._log_imap_console(
-                            f"  ↳ 발신 {sent_display}",
+                            f"[IMAP 확인] 발신 {sent_display}",
                             domain=normalized,
-                            tag="IMAP-메일확인상세",
+                            tag="IMAP-메일확인",
                         )
                     if received_display:
                         self._log_imap_console(
-                            f"  ↳ 수신 {received_display}",
+                            f"[IMAP 확인] 수신 {received_display}",
                             domain=normalized,
-                            tag="IMAP-메일확인상세",
+                            tag="IMAP-메일확인",
                         )
                     latency_label = (
                         f"{attempt_latency:.1f}s" if isinstance(attempt_latency, (int, float)) else "-"
                     )
                     self._log_imap_console(
-                        f"IMAP 확인 {sequence_index}차 · 상태 {attempt_status} · 지연 {latency_label} · 허용 {allowed_delay_value}s",
+                        f"IMAP 확인 결과 {sequence_index}차 · 상태 {attempt_status} · 지연 {latency_label} · 허용 {allowed_delay_value}s",
                         domain=normalized,
-                        tag="IMAP-메일확인중",
+                        tag="IMAP-메일확인결과",
                     )
                     if attempt_status != "success" and attempt_reason:
                         self._log_imap_console(
@@ -6246,18 +6246,18 @@ class MailClient:
         )
         if mail_info:
             self._log_imap_console(
-                "  ↳ 헤더 비교 · "
+                "[IMAP 확인] 최신 메일 · "
                 f"From {mail_info.get('from') or mail_info.get('from_address') or '-'} · "
                 f"Subject {mail_info.get('subject') or '-'} · "
                 f"수신 {mail_info.get('received_at_iso') or mail_info.get('date_header') or '-'}",
                 domain=normalized,
-                tag="IMAP-메일확인상세",
+                tag="IMAP-메일확인",
             )
         if reason:
             self._log_imap_console(
-                f"  ↳ 실패 사유: {reason}",
+                f"[IMAP 확인] 실패 사유: {reason}",
                 domain=normalized,
-                tag="IMAP-메일확인상세",
+                tag="IMAP-메일확인",
             )
 
         def _shorten(value: Optional[str], *, length: int = 60) -> str:

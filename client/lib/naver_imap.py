@@ -352,22 +352,7 @@ def verify_delivery(
     else:
         sent_dt = sent_dt.astimezone(timezone.utc)
 
-    def _normalize_message_id(raw_value) -> str:
-        if raw_value is None:
-            return ""
-        if isinstance(raw_value, bytes):
-            try:
-                raw_text = raw_value.decode("utf-8", errors="ignore")
-            except Exception:  # pylint: disable=broad-except
-                raw_text = raw_value.decode("latin-1", errors="ignore")
-        else:
-            raw_text = str(raw_value)
-        flattened = "".join(part.strip() for part in raw_text.replace("\r", "\n").split("\n"))
-        return flattened.strip().lower()
-
     expected_message_id = str(message_id or "").strip()
-    expected_message_id_lower = _normalize_message_id(expected_message_id)
-    message_id_mismatch_detected = False
 
     def _normalize_from_compare(raw_value: str) -> str:
         if not raw_value:
@@ -470,19 +455,6 @@ def verify_delivery(
             normalized_header = _normalize_from_compare(from_header)
             _, sender_address = parseaddr(from_header)
             normalized_sender = (sender_address or "").strip().lower()
-            message_id_header = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
-            normalized_message_id = _normalize_message_id(message_id_header)
-
-            message_id_matched = True
-            if expected_message_id_lower:
-                if normalized_message_id != expected_message_id_lower:
-                    message_id_matched = False
-                    message_id_mismatch_detected = True
-                    print(
-                        f"[IMAP 확인] Message-ID 불일치 · 수신 {message_id_header or '-'} · 기대 {expected_message_id}",
-                        flush=True,
-                    )
-
             if expected_address_lower:
                 if not normalized_sender:
                     sender_mismatch_found = True
@@ -542,8 +514,6 @@ def verify_delivery(
                 "sent_at": sent_dt.isoformat(),
                 "sent_display": sent_line,
                 "received_display": received_line,
-                "message_id": message_id_header or "",
-                "message_id_matched": message_id_matched,
             }
             if latency <= allowed:
                 print("[IMAP 확인] 판정: 성공", flush=True)
@@ -563,9 +533,6 @@ def verify_delivery(
         if sender_mismatch_found:
             reason_text = "발신자 주소가 일치하는 메일을 찾지 못했습니다."
             print("[IMAP 확인] 판정: 발신자 주소가 일치하는 메일 없음", flush=True)
-        elif message_id_mismatch_detected and expected_message_id_lower:
-            reason_text = "Message-ID가 일치하는 메일을 찾지 못했습니다."
-            print("[IMAP 확인] 판정: Message-ID 일치 메일 없음", flush=True)
         else:
             reason_text = "유효한 메일을 찾지 못했습니다."
             print("[IMAP 확인] 판정: 유효한 메일을 찾지 못했습니다.", flush=True)
@@ -579,8 +546,6 @@ def verify_delivery(
             "delay_before_check": delay_before_check,
             "sent_display": sent_line,
             "received_display": default_received_line,
-            "message_id": expected_message_id,
-            "message_id_matched": False,
         }
     except imaplib.IMAP4.abort as exc:
         raise IMAPNetworkError(f"IMAP 세션이 예기치 않게 종료되었습니다: {exc}", original=exc) from exc
