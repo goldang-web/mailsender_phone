@@ -352,8 +352,21 @@ def verify_delivery(
     else:
         sent_dt = sent_dt.astimezone(timezone.utc)
 
+    def _normalize_message_id(raw_value) -> str:
+        if raw_value is None:
+            return ""
+        if isinstance(raw_value, bytes):
+            try:
+                raw_text = raw_value.decode("utf-8", errors="ignore")
+            except Exception:  # pylint: disable=broad-except
+                raw_text = raw_value.decode("latin-1", errors="ignore")
+        else:
+            raw_text = str(raw_value)
+        flattened = "".join(part.strip() for part in raw_text.replace("\r", "\n").split("\n"))
+        return flattened.strip().lower()
+
     expected_message_id = str(message_id or "").strip()
-    expected_message_id_lower = expected_message_id.lower()
+    expected_message_id_lower = _normalize_message_id(expected_message_id)
 
     def _normalize_from_compare(raw_value: str) -> str:
         if not raw_value:
@@ -457,10 +470,14 @@ def verify_delivery(
             _, sender_address = parseaddr(from_header)
             normalized_sender = (sender_address or "").strip().lower()
             message_id_header = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
-            normalized_message_id = message_id_header.lower()
+            normalized_message_id = _normalize_message_id(message_id_header)
 
             if expected_message_id_lower:
                 if normalized_message_id != expected_message_id_lower:
+                    print(
+                        f"[IMAP 확인] Message-ID 불일치 · 수신 {message_id_header or '-'} · 기대 {expected_message_id}",
+                        flush=True,
+                    )
                     continue
                 if expected_address_lower and normalized_sender and normalized_sender != expected_address_lower:
                     sender_mismatch_found = True
