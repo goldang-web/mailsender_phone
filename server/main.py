@@ -31,6 +31,9 @@ DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
 IMAP_SENT_THRESHOLD_DEFAULT = 90
 MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${HELO}>"
 OLD_MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소숫자:22}@auto.local>"
+IMAP_RECHECK_ATTEMPTS_DEFAULT = 2
+IMAP_RECHECK_ATTEMPTS_MIN = 1
+IMAP_RECHECK_ATTEMPTS_MAX = 3
 
 DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "helo": "",
@@ -69,6 +72,7 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "imap_failure_action": "none",
     "imap_notify_before_stop_all": False,
     "imap_purge_before_check": False,
+    "imap_recheck_attempts": IMAP_RECHECK_ATTEMPTS_DEFAULT,
     "imap_sent_threshold": IMAP_SENT_THRESHOLD_DEFAULT,
     "imap_sent_since_last_check": 0,
     "imap_sent_last_reset_at": None,
@@ -735,6 +739,18 @@ def sanitize_imap_purge_before_check(value: Any) -> bool:
     return sanitize_stop_schedule_enabled(value)
 
 
+def sanitize_imap_recheck_attempts(value: Any, *, default: Optional[int] = None) -> int:
+    effective_default = (
+        default if default is not None else IMAP_RECHECK_ATTEMPTS_DEFAULT
+    )
+    try:
+        attempts = int(value)
+    except (TypeError, ValueError):
+        attempts = effective_default
+    attempts = max(IMAP_RECHECK_ATTEMPTS_MIN, min(IMAP_RECHECK_ATTEMPTS_MAX, attempts))
+    return attempts
+
+
 def sanitize_imap_status(value: Any) -> str:
     if value is None:
         return ""
@@ -1302,7 +1318,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
     try:
         conn.execute("ALTER TABLE device_configs RENAME TO device_configs_legacy")
         conn.execute(
-            """
+            f"""
             CREATE TABLE device_configs (
                 device_id TEXT NOT NULL,
                 domain TEXT NOT NULL,
@@ -1343,6 +1359,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_failure_action TEXT NOT NULL DEFAULT 'none',
                 imap_notify_before_stop_all INTEGER NOT NULL DEFAULT 0,
                 imap_purge_before_check INTEGER NOT NULL DEFAULT 0,
+                imap_recheck_attempts INTEGER NOT NULL DEFAULT {IMAP_RECHECK_ATTEMPTS_DEFAULT},
                 imap_sent_threshold INTEGER NOT NULL DEFAULT 90,
                 imap_sent_since_last_check INTEGER NOT NULL DEFAULT 0,
                 imap_sent_last_reset_at TEXT,
@@ -1354,7 +1371,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_last_sent_at TEXT,
                 imap_last_received_at TEXT,
                 substitution_lock_mode TEXT NOT NULL DEFAULT 'auto',
-                substitution_snapshot TEXT DEFAULT '{}',
+                substitution_snapshot TEXT DEFAULT '{{}}',
                 updated_at TEXT NOT NULL,
                 PRIMARY KEY (device_id, domain),
                 FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
@@ -1378,6 +1395,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_failure_action,
                 imap_notify_before_stop_all,
                 imap_purge_before_check,
+                imap_recheck_attempts,
                 imap_sent_threshold,
                 imap_sent_since_last_check,
                 imap_sent_last_reset_at,
@@ -1401,6 +1419,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 'none' AS imap_failure_action,
                 0 AS imap_notify_before_stop_all,
                 0 AS imap_purge_before_check,
+                {recheck_default} AS imap_recheck_attempts,
                 {threshold_default} AS imap_sent_threshold,
                 0 AS imap_sent_since_last_check,
                 NULL AS imap_sent_last_reset_at,
@@ -1413,6 +1432,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
             """
         ).format(
             threshold_default=IMAP_SENT_THRESHOLD_DEFAULT,
+            recheck_default=IMAP_RECHECK_ATTEMPTS_DEFAULT,
             pattern_default=MESSAGE_ID_PATTERN_DEFAULT.replace("'", "''"),
         )
         conn.execute("DROP TABLE device_configs_legacy")
@@ -1644,6 +1664,10 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_purge_before_check INTEGER NOT NULL DEFAULT 0"
             )
+        if "imap_recheck_attempts" not in config_columns:
+            conn.execute(
+                f"ALTER TABLE device_configs ADD COLUMN imap_recheck_attempts INTEGER NOT NULL DEFAULT {IMAP_RECHECK_ATTEMPTS_DEFAULT}"
+            )
         if "imap_sent_threshold" not in config_columns:
             conn.execute(
                 f"ALTER TABLE device_configs ADD COLUMN imap_sent_threshold INTEGER NOT NULL DEFAULT {IMAP_SENT_THRESHOLD_DEFAULT}"
@@ -1814,7 +1838,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
                     imap_enabled, imap_username, imap_password, imap_delay_seconds,
                     imap_single_delay_seconds, imap_allowed_latency_seconds,
-                    imap_failure_action, imap_notify_before_stop_all, imap_purge_before_check,
+                    imap_failure_action, imap_notify_before_stop_all, imap_purge_before_check, imap_recheck_attempts,
                     imap_sent_threshold, imap_sent_since_last_check, imap_sent_last_reset_at,
                     imap_last_status, imap_last_checked_at, imap_last_latency, imap_last_error, imap_last_mail_from,
                     imap_last_sent_at, imap_last_received_at,
@@ -1823,7 +1847,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     updated_at
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?,
@@ -1872,6 +1896,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG["imap_failure_action"],
                     1 if DEFAULT_DOMAIN_CONFIG["imap_notify_before_stop_all"] else 0,
                     1 if DEFAULT_DOMAIN_CONFIG["imap_purge_before_check"] else 0,
+                    DEFAULT_DOMAIN_CONFIG["imap_recheck_attempts"],
                     DEFAULT_DOMAIN_CONFIG["imap_sent_threshold"],
                     DEFAULT_DOMAIN_CONFIG["imap_sent_since_last_check"],
                     DEFAULT_DOMAIN_CONFIG["imap_sent_last_reset_at"],
@@ -1969,6 +1994,10 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     imap_purge_before_check = sanitize_imap_purge_before_check(
         row.get("imap_purge_before_check")
     )
+    imap_recheck_attempts = sanitize_imap_recheck_attempts(
+        row.get("imap_recheck_attempts"),
+        default=DEFAULT_DOMAIN_CONFIG.get("imap_recheck_attempts"),
+    )
     imap_status = sanitize_imap_status(row.get("imap_last_status"))
     imap_checked_at = row.get("imap_last_checked_at")
     imap_latency = sanitize_imap_latency(row.get("imap_last_latency"))
@@ -2043,6 +2072,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "imap_failure_action": imap_failure_action,
         "imap_notify_before_stop_all": imap_notify_before_stop_all,
         "imap_purge_before_check": imap_purge_before_check,
+        "imap_recheck_attempts": imap_recheck_attempts,
         "imap_sent_threshold": imap_sent_threshold,
         "imap_sent_since_last_check": sent_since_last_check,
         "imap_sent_last_reset_at": imap_sent_last_reset,
@@ -3152,6 +3182,7 @@ class ImapSettingsPayload(BaseModel):
     failure_action: Optional[str] = None
     notify_before_stop_all: Optional[bool] = None
     purge_before_check: Optional[bool] = None
+    recheck_attempts: Optional[int] = None
     delay_seconds: Optional[int] = None  # legacy alias for allowed latency
 
 
@@ -4310,6 +4341,12 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
             if payload.purge_before_check is not None
             else config.get("imap_purge_before_check")
         )
+        recheck_attempts_value = sanitize_imap_recheck_attempts(
+            payload.recheck_attempts
+            if payload.recheck_attempts is not None
+            else config.get("imap_recheck_attempts"),
+            default=DEFAULT_DOMAIN_CONFIG.get("imap_recheck_attempts"),
+        )
         if failure_action_value == "none":
             notify_before_stop_value = False
         if desired_enabled and (not username or not password):
@@ -4339,6 +4376,7 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 imap_failure_action=?,
                 imap_notify_before_stop_all=?,
                 imap_purge_before_check=?,
+                imap_recheck_attempts=?,
                 imap_sent_threshold=?,
                 imap_last_status=?,
                 imap_last_checked_at=?,
@@ -4360,6 +4398,7 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 failure_action_value,
                 1 if notify_before_stop_value else 0,
                 1 if purge_before_check_value else 0,
+                recheck_attempts_value,
                 sent_threshold_value,
                 status_value,
                 checked_at,

@@ -2515,6 +2515,10 @@ button:not(:disabled):hover {
           <span>허용 지연 시간 (초)</span>
           <input type="number" id="imapAllowedLatencySeconds" min="5" max="600" required title="발송 후 IMAP으로 도착 여부를 확인할 때 허용할 최대 지연 시간을 지정합니다.">
         </label>
+        <label class="field">
+          <span>재확인 횟수</span>
+          <input type="number" id="imapRecheckAttempts" min="1" max="3" required title="IMAP 확인이 실패했을 때 동일 순서를 다시 시도할 횟수입니다. 1로 설정하면 재시도 없이 즉시 판정합니다.">
+        </label>
         <div class="field">
           <span>확인 실패 시 대응</span>
           <div class="field-row tight">
@@ -2601,6 +2605,9 @@ const IMAP_SENT_THRESHOLD_MIN = 1;
 const IMAP_SENT_THRESHOLD_MAX = 1000;
 const IMAP_SINGLE_MIN_DELAY = 0;
 const IMAP_FAILURE_ACTIONS = ["none", "stop_device", "stop_all"];
+const IMAP_DEFAULT_RECHECK_ATTEMPTS = 2;
+const IMAP_RECHECK_MIN = 1;
+const IMAP_RECHECK_MAX = 3;
 
 function createDefaultSubstitutionSnapshot() {
   return {
@@ -7155,6 +7162,7 @@ function bestConfig(device, domain) {
     imap_sent_last_reset_at: null,
     imap_failure_action: "none",
     imap_notify_before_stop_all: false,
+    imap_recheck_attempts: IMAP_DEFAULT_RECHECK_ATTEMPTS,
     imap_last_status: "",
     imap_last_checked_at: null,
     imap_last_latency: null,
@@ -7887,6 +7895,12 @@ function renderImapSection(card, device, domain) {
     IMAP_SENT_THRESHOLD_MAX,
     IMAP_DEFAULT_SENT_THRESHOLD,
   );
+  const imapRecheckValue = clampNumber(
+    config.imap_recheck_attempts ?? IMAP_DEFAULT_RECHECK_ATTEMPTS,
+    IMAP_RECHECK_MIN,
+    IMAP_RECHECK_MAX,
+    IMAP_DEFAULT_RECHECK_ATTEMPTS,
+  );
   const imapSentSinceValue = Math.max(0, Number(config.imap_sent_since_last_check || 0));
   const failureActionValue = IMAP_FAILURE_ACTIONS.includes(config.imap_failure_action)
     ? config.imap_failure_action
@@ -7923,6 +7937,7 @@ function renderImapSection(card, device, domain) {
     summaryLines.push(failureLine);
     summaryLines.push(`확인용 발송 전 스팸함 비우기: ${config.imap_purge_before_check ? "켜짐" : "꺼짐"}`);
     summaryLines.push(`대기 시간: 단일 ${imapSingleDelayValue}초`);
+    summaryLines.push(`재확인 횟수: ${imapRecheckValue}회`);
     summaryLines.push(`Sent 누적 확인: ${imapSentThresholdValue}건마다`);
     configMetaEl.textContent = summaryLines.join("\n");
     configMetaEl.title = "";
@@ -7949,6 +7964,7 @@ function renderImapSection(card, device, domain) {
   block.dataset.imapFailureAction = failureActionValue;
   block.dataset.imapNotifyBeforeStopAll = config.imap_notify_before_stop_all ? "1" : "0";
   block.dataset.imapPurgeBeforeCheck = config.imap_purge_before_check ? "1" : "0";
+  block.dataset.imapRecheckAttempts = String(imapRecheckValue);
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
   block.dataset.imapLastCheckedAt = currentCheckedMarker;
   block.dataset.imapLastStatus = lastStatus || "";
@@ -9455,6 +9471,8 @@ function openImapModal(card, device, domain, options = {}) {
   const singleDelayInput = document.getElementById("imapSingleDelaySeconds");
   const sentThresholdInput = document.getElementById("imapSentThreshold");
   const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
+  const recheckInput = document.getElementById("imapRecheckAttempts");
+  const recheckInput = document.getElementById("imapRecheckAttempts");
   const failureActionSelect = document.getElementById("imapFailureAction");
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
@@ -9471,6 +9489,7 @@ function openImapModal(card, device, domain, options = {}) {
   const blockSingleDelay = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapSingleDelay;
   const blockSentThreshold = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapSentThreshold;
   const blockAllowedLatency = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapAllowedLatency;
+  const blockRecheck = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapRecheckAttempts;
   const blockFailureAction = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapFailureAction;
   const blockNotifyRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapNotifyBeforeStopAll;
   const blockPurgeRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapPurgeBeforeCheck;
@@ -9495,6 +9514,15 @@ function openImapModal(card, device, domain, options = {}) {
     IMAP_DEFAULT_SENT_THRESHOLD,
   );
   sentThresholdInput.value = sentThresholdValue;
+  const recheckValue = clampNumber(
+    blockRecheck ?? config.imap_recheck_attempts ?? IMAP_DEFAULT_RECHECK_ATTEMPTS,
+    IMAP_RECHECK_MIN,
+    IMAP_RECHECK_MAX,
+    IMAP_DEFAULT_RECHECK_ATTEMPTS,
+  );
+  if (recheckInput) {
+    recheckInput.value = recheckValue;
+  }
   if (failureActionSelect) {
     const normalizedFailure = (blockFailureAction || config.imap_failure_action || "").toString().toLowerCase();
     failureActionSelect.value = IMAP_FAILURE_ACTIONS.includes(normalizedFailure) ? normalizedFailure : "none";
@@ -9587,6 +9615,17 @@ async function submitImapModal() {
   const failureActionValue = failureActionSelect && IMAP_FAILURE_ACTIONS.includes(failureActionSelect.value)
     ? failureActionSelect.value
     : "none";
+  const recheckValue = recheckInput
+    ? clampNumber(
+        recheckInput.value,
+        IMAP_RECHECK_MIN,
+        IMAP_RECHECK_MAX,
+        IMAP_DEFAULT_RECHECK_ATTEMPTS,
+      )
+    : IMAP_DEFAULT_RECHECK_ATTEMPTS;
+  if (recheckInput) {
+    recheckInput.value = recheckValue;
+  }
 
   if (!username) {
     setImapModalMessage("네이버 계정 ID를 입력하세요.");
@@ -9603,6 +9642,7 @@ async function submitImapModal() {
     single_delay_seconds: singleDelayValue,
     sent_threshold: sentThresholdValue,
     allowed_latency_seconds: allowedLatencyValue,
+    recheck_attempts: recheckValue,
     failure_action: failureActionValue,
     notify_before_stop_all: Boolean(
       notifyCheckbox && !notifyCheckbox.disabled && notifyCheckbox.checked
