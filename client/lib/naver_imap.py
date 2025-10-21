@@ -367,6 +367,7 @@ def verify_delivery(
 
     expected_message_id = str(message_id or "").strip()
     expected_message_id_lower = _normalize_message_id(expected_message_id)
+    message_id_mismatch_detected = False
 
     def _normalize_from_compare(raw_value: str) -> str:
         if not raw_value:
@@ -472,52 +473,47 @@ def verify_delivery(
             message_id_header = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip()
             normalized_message_id = _normalize_message_id(message_id_header)
 
+            message_id_matched = True
             if expected_message_id_lower:
                 if normalized_message_id != expected_message_id_lower:
+                    message_id_matched = False
+                    message_id_mismatch_detected = True
                     print(
                         f"[IMAP 확인] Message-ID 불일치 · 수신 {message_id_header or '-'} · 기대 {expected_message_id}",
                         flush=True,
                     )
+
+            if expected_address_lower:
+                if not normalized_sender:
+                    sender_mismatch_found = True
+                    print(
+                        f"[IMAP 확인] 발신자 주소를 해석하지 못했습니다. 헤더={decoded_from or '-'}",
+                        flush=True,
+                    )
                     continue
-                if expected_address_lower and normalized_sender and normalized_sender != expected_address_lower:
+                if normalized_sender != expected_address_lower:
                     sender_mismatch_found = True
                     print(
                         "[IMAP 확인] 발신자 불일치:" f" 수신 {normalized_sender} · 기대 {expected_address_lower}",
                         flush=True,
                     )
                     continue
-            else:
-                if expected_address_lower:
-                    if not normalized_sender:
-                        sender_mismatch_found = True
-                        print(
-                            f"[IMAP 확인] 발신자 주소를 해석하지 못했습니다. 헤더={decoded_from or '-'}",
-                            flush=True,
-                        )
-                        continue
-                    if normalized_sender != expected_address_lower:
-                        sender_mismatch_found = True
-                        print(
-                            "[IMAP 확인] 발신자 불일치:" f" 수신 {normalized_sender} · 기대 {expected_address_lower}",
-                            flush=True,
-                        )
-                        continue
-                elif expected_header_compare:
-                    if not normalized_header:
-                        sender_mismatch_found = True
-                        print(
-                            f"[IMAP 확인] 발신자 헤더를 해석하지 못했습니다. 헤더={decoded_from or '-'}",
-                            flush=True,
-                        )
-                        continue
-                    if normalized_header != expected_header_compare:
-                        sender_mismatch_found = True
-                        expected_label = expected_header_display or header_from or mail_from or "-"
-                        print(
-                            "[IMAP 확인] 발신자 헤더 불일치:" f" 수신 {decoded_from or '-'} · 기대 {expected_label}",
-                            flush=True,
-                        )
-                        continue
+            elif expected_header_compare:
+                if not normalized_header:
+                    sender_mismatch_found = True
+                    print(
+                        f"[IMAP 확인] 발신자 헤더를 해석하지 못했습니다. 헤더={decoded_from or '-'}",
+                        flush=True,
+                    )
+                    continue
+                if normalized_header != expected_header_compare:
+                    sender_mismatch_found = True
+                    expected_label = expected_header_display or header_from or mail_from or "-"
+                    print(
+                        "[IMAP 확인] 발신자 헤더 불일치:" f" 수신 {decoded_from or '-'} · 기대 {expected_label}",
+                        flush=True,
+                    )
+                    continue
 
             date_header = msg.get("Date")
             if not date_header:
@@ -546,6 +542,8 @@ def verify_delivery(
                 "sent_at": sent_dt.isoformat(),
                 "sent_display": sent_line,
                 "received_display": received_line,
+                "message_id": message_id_header or "",
+                "message_id_matched": message_id_matched,
             }
             if latency <= allowed:
                 print("[IMAP 확인] 판정: 성공", flush=True)
@@ -565,6 +563,9 @@ def verify_delivery(
         if sender_mismatch_found:
             reason_text = "발신자 주소가 일치하는 메일을 찾지 못했습니다."
             print("[IMAP 확인] 판정: 발신자 주소가 일치하는 메일 없음", flush=True)
+        elif message_id_mismatch_detected and expected_message_id_lower:
+            reason_text = "Message-ID가 일치하는 메일을 찾지 못했습니다."
+            print("[IMAP 확인] 판정: Message-ID 일치 메일 없음", flush=True)
         else:
             reason_text = "유효한 메일을 찾지 못했습니다."
             print("[IMAP 확인] 판정: 유효한 메일을 찾지 못했습니다.", flush=True)
@@ -578,6 +579,8 @@ def verify_delivery(
             "delay_before_check": delay_before_check,
             "sent_display": sent_line,
             "received_display": default_received_line,
+            "message_id": expected_message_id,
+            "message_id_matched": False,
         }
     except imaplib.IMAP4.abort as exc:
         raise IMAPNetworkError(f"IMAP 세션이 예기치 않게 종료되었습니다: {exc}", original=exc) from exc
