@@ -6471,6 +6471,13 @@ class MailClient:
             header_text = raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
         config_payload["header"] = header_text
         header_from_value = self._extract_header_from(header_text, mail_from_value)
+        payload_message_id_obj = payload.get("message_id") if isinstance(payload, dict) else None
+        if isinstance(payload_message_id_obj, str):
+            payload_message_id = payload_message_id_obj.strip() or None
+        else:
+            payload_message_id = None
+        header_message_id = _extract_message_id_from_text(header_text)
+        message_id_value = payload_message_id or header_message_id
         context_reason = str(payload.get("context_reason") or "사용자 수동 도착 확인")
         smtp_context = {
             "smtp_host": config_payload.get("smtp_host"),
@@ -6525,6 +6532,7 @@ class MailClient:
             job_id=job_id,
             send_type="manual",
             mail_from=mail_from_value,
+            message_id=message_id_value,
             header_from=header_from_value,
             has_anchor=False,
             context_reason=context_reason,

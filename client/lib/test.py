@@ -80,9 +80,14 @@ def send_mail_telnet(
     response_entries: List[Tuple[str, str]] = []
 
     debug_enabled = bool(debug)
+    debug_started = False
 
     def debug_log(tag: str, message: str) -> None:
+        nonlocal debug_started
         if debug_enabled:
+            if not debug_started:
+                print("---------------------------")
+                debug_started = True
             print(f"[텔넷-{tag}] {message}")
 
     try:
@@ -198,3 +203,6 @@ def send_mail_telnet(
         response_entries.append(("ERROR", str(exc)))
         debug_log("ERROR", f"<< ERROR: {exc}")
         return "\n".join(response_lines), response_entries
+    finally:
+        if debug_enabled and debug_started:
+            print("------------------------------")
