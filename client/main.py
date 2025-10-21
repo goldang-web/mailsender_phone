@@ -63,11 +63,10 @@ THROTTLE_MARKER_MESSAGES = {
     "452 4.7.1 sent too many messages": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
     "452 4.7.1 sent too many message": "네이버 '452 4.7.1 Sent too many messages' 응답 감지",
     "421 4.3.2 your ip blocked from this server": "네이버 '421 4.3.2 Your IP blocked from this server' 응답 감지",
-}
-
-FATAL_STOP_MARKER_MESSAGES = {
     "421 4.7.1 this email has been temporarily blocked": "네이버 '421 4.7.1 This email has been temporarily blocked' 응답 감지",
 }
+
+FATAL_STOP_MARKER_MESSAGES = {}
 
 RECIPIENT_LIMIT_MARKERS = (
     "too many recipients",
