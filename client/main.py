@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+import copy
 import hashlib
 import json
 import random
@@ -769,6 +770,7 @@ class DispatchOutcome:
     data_response_message: Optional[str] = None
     mail_from: Optional[str] = None
     header_text: Optional[str] = None
+    config_snapshot: Optional[Dict[str, object]] = None
 
 
 @dataclass
@@ -2463,7 +2465,7 @@ class MailClient:
             status_line = "테스트 메일 발송 예외"
             detail_line = str(exc)
             if debug_enabled:
-                print("-------------------------", flush=True)
+                print("---------------------------", flush=True)
             self._log_imap_console(
                 f"IMAP 발송 · 확인 메일 발송 실패 · {detail_line}",
                 domain=normalized,
@@ -2471,7 +2473,7 @@ class MailClient:
             )
             return False, None, status_line, detail_line, message_id_value
         if debug_enabled:
-            print("-------------------------", flush=True)
+            print("------------------------------", flush=True)
         status_line, detail_line = self._smtp_status_and_detail(response_text)
         if success:
             self._log_imap_console(
@@ -2514,19 +2516,17 @@ class MailClient:
                 status_line="SMTP 설정 없음",
                 detail_line="확인 메일 발송을 위한 SMTP 설정이 비어 있습니다.",
             )
-        helo_value = str(smtp_context.get("helo") or "")
-        if not mail_from:
-            self._log_imap_console(
-                "IMAP 발송 · MAIL FROM 누락",
-                domain=normalized,
-                tag="IMAP-메일발송실패",
-            )
-            return SentProbeResult(
-                success=False,
-                sent_at=None,
-                status_line="MAIL FROM 누락",
-                detail_line="MAIL FROM이 설정되지 않아 확인 메일을 발송할 수 없습니다.",
-            )
+        base_context = dict(smtp_context)
+        substitution_payload = (
+            base_context.get("substitution")
+            if isinstance(base_context.get("substitution"), dict)
+            else None
+        )
+        config_snapshot = (
+            base_context.get("config_snapshot")
+            if isinstance(base_context.get("config_snapshot"), dict)
+            else None
+        )
         rcpt_value = normalize_imap_recipient(domain, rcpt_to)
         if not rcpt_value or "@" not in rcpt_value:
             self._log_imap_console(
@@ -2541,76 +2541,7 @@ class MailClient:
                 detail_line="IMAP 계정 주소가 올바르지 않아 확인 메일을 발송할 수 없습니다.",
             )
 
-        header_template: Optional[str] = None
-        newline_hint = "\n"
-        raw_header_value = smtp_context.get("header") if smtp_context else None
-        if isinstance(raw_header_value, bytes):
-            try:
-                decoded_header = raw_header_value.decode("utf-8")
-            except UnicodeDecodeError:
-                decoded_header = raw_header_value.decode("latin-1", errors="ignore")
-        elif raw_header_value is not None:
-            decoded_header = str(raw_header_value)
-        else:
-            decoded_header = ""
-        if decoded_header and decoded_header.strip():
-            header_template = decoded_header
-            newline_hint = "\r\n" if "\r\n" in decoded_header else "\n"
-
-        probe_reference = utc_now()
-        header_message_id = _extract_message_id_from_text(header_template)
-        message_id_value = header_message_id or _generate_default_message_id(helo_value, mail_from)
-
-        def build_probe_header(msg_id: str) -> str:
-            if header_template:
-                normalized_template = header_template.replace("\r\n", "\n").replace("\r", "\n")
-                has_terminal_newline = normalized_template.endswith("\n")
-                separator_block = ""
-                body_section: Optional[str]
-                separator_index = normalized_template.find("\n\n")
-                if separator_index >= 0:
-                    separator_end = separator_index + 2
-                    while separator_end < len(normalized_template) and normalized_template[separator_end] == "\n":
-                        separator_end += 1
-                    header_section = normalized_template[:separator_index]
-                    separator_block = normalized_template[separator_index:separator_end]
-                    body_section = normalized_template[separator_end:]
-                else:
-                    header_section = normalized_template
-                    body_section = None
-                match = MESSAGE_ID_HEADER_PATTERN.search(header_section)
-                if match:
-                    indent = match.group("indent") or ""
-                    start, end = match.span()
-                    header_section = f"{header_section[:start]}{indent}Message-ID: {msg_id}{header_section[end:]}"
-                else:
-                    header_lines = header_section.split("\n") if header_section else []
-                    header_lines.append(f"Message-ID: {msg_id}")
-                    header_section = "\n".join(header_lines)
-                if body_section is not None:
-                    normalized_result = f"{header_section}{separator_block}{body_section}"
-                else:
-                    normalized_result = header_section
-                final_message = normalized_result.replace("\n", newline_hint)
-                if has_terminal_newline and not final_message.endswith(newline_hint):
-                    final_message = f"{final_message}{newline_hint}"
-                return final_message
-            date_header = format_datetime(probe_reference.astimezone(timezone.utc))
-            subject = f"[IMAP 체크] Sent 누적 확인 {probe_reference.astimezone().strftime('%H:%M:%S')}"
-            return (
-                f"From: {mail_from}\n"
-                f"To: {rcpt_value}\n"
-                f"Subject: {subject}\n"
-                f"Date: {date_header}\n"
-                f"Message-ID: {msg_id}\n"
-                "MIME-Version: 1.0\n"
-                "Content-Type: text/plain; charset=UTF-8\n"
-                "Content-Transfer-Encoding: 8bit\n"
-                "\n"
-                f"Sent 누적 확인용 테스트 메일입니다. 발송 시각(UTC): {probe_reference.isoformat()}.\n"
-            )
-
-        probe_header = build_probe_header(message_id_value)
+        # probe header 구성은 루프 내에서 계산합니다.
 
         throttle_marker: Optional[str] = None
         throttle_detail: Optional[str] = None
@@ -2619,6 +2550,7 @@ class MailClient:
         ip_change_message: Optional[str] = None
         ip_after_change: Optional[str] = None
         attempts = 0
+        mail_from_current = mail_from
         last_status_line = "발송 실패"
         last_detail_line: Optional[str] = None
         sent_at_value: Optional[datetime] = None
@@ -2626,6 +2558,115 @@ class MailClient:
 
         while attempts < max_retry_limit:
             attempts += 1
+            smtp_context_local = dict(base_context)
+            mail_from_current = mail_from
+            if substitution_payload:
+                base_config = copy.deepcopy(config_snapshot) if config_snapshot else {
+                    "smtp_host": smtp_context_local.get("smtp_host"),
+                    "smtp_port": smtp_context_local.get("smtp_port"),
+                    "helo": smtp_context_local.get("helo"),
+                    "mail_from": smtp_context_local.get("mail_from") or mail_from,
+                    "header": smtp_context_local.get("header"),
+                }
+                refreshed_config, missing_tokens = self._render_all_headers_unique_config(
+                    base_config,
+                    substitution_payload,
+                )
+                if missing_tokens:
+                    self._log_substitution_missing(normalized, "", missing_tokens, "imap_probe")
+                if refreshed_config.get("smtp_host") is not None:
+                    smtp_context_local["smtp_host"] = refreshed_config["smtp_host"]
+                if refreshed_config.get("smtp_port") is not None:
+                    smtp_context_local["smtp_port"] = refreshed_config["smtp_port"]
+                if refreshed_config.get("helo"):
+                    smtp_context_local["helo"] = refreshed_config["helo"]
+                if refreshed_config.get("mail_from"):
+                    mail_from_current = str(refreshed_config["mail_from"])
+                    smtp_context_local["mail_from"] = mail_from_current
+                if refreshed_config.get("header"):
+                    smtp_context_local["header"] = refreshed_config["header"]
+            helo_value = str(smtp_context_local.get("helo") or "")
+            if not mail_from_current:
+                self._log_imap_console(
+                    "IMAP 발송 · MAIL FROM 누락",
+                    domain=normalized,
+                    tag="IMAP-메일발송실패",
+                )
+                return SentProbeResult(
+                    success=False,
+                    sent_at=None,
+                    status_line="MAIL FROM 누락",
+                    detail_line="MAIL FROM이 설정되지 않아 확인 메일을 발송할 수 없습니다.",
+                )
+            raw_header_value = smtp_context_local.get("header")
+            header_template: Optional[str] = None
+            newline_hint = "\n"
+            if isinstance(raw_header_value, bytes):
+                try:
+                    decoded_header = raw_header_value.decode("utf-8")
+                except UnicodeDecodeError:
+                    decoded_header = raw_header_value.decode("latin-1", errors="ignore")
+            elif raw_header_value is not None:
+                decoded_header = str(raw_header_value)
+            else:
+                decoded_header = ""
+            if decoded_header and decoded_header.strip():
+                header_template = decoded_header
+                newline_hint = "\r\n" if "\r\n" in decoded_header else "\n"
+            probe_reference = utc_now()
+            header_message_id = _extract_message_id_from_text(header_template)
+            message_id_value = header_message_id or _generate_default_message_id(helo_value, mail_from_current)
+
+            def build_probe_header(msg_id: str) -> str:
+                if header_template:
+                    normalized_template = header_template.replace("\r\n", "\n").replace("\r", "\n")
+                    has_terminal_newline = normalized_template.endswith("\n")
+                    separator_block = ""
+                    body_section: Optional[str]
+                    separator_index = normalized_template.find("\n\n")
+                    if separator_index >= 0:
+                        separator_end = separator_index + 2
+                        while separator_end < len(normalized_template) and normalized_template[separator_end] == "\n":
+                            separator_end += 1
+                        header_section = normalized_template[:separator_index]
+                        separator_block = normalized_template[separator_index:separator_end]
+                        body_section = normalized_template[separator_end:]
+                    else:
+                        header_section = normalized_template
+                        body_section = None
+                    match = MESSAGE_ID_HEADER_PATTERN.search(header_section)
+                    if match:
+                        indent = match.group("indent") or ""
+                        start, end = match.span()
+                        header_section = f"{header_section[:start]}{indent}Message-ID: {msg_id}{header_section[end:]}"
+                    else:
+                        header_lines = header_section.split("\n") if header_section else []
+                        header_lines.append(f"Message-ID: {msg_id}")
+                        header_section = "\n".join(header_lines)
+                    if body_section is not None:
+                        normalized_result = f"{header_section}{separator_block}{body_section}"
+                    else:
+                        normalized_result = header_section
+                    final_message = normalized_result.replace("\n", newline_hint)
+                    if has_terminal_newline and not final_message.endswith(newline_hint):
+                        final_message = f"{final_message}{newline_hint}"
+                    return final_message
+                date_header = format_datetime(probe_reference.astimezone(timezone.utc))
+                subject = f"[IMAP 체크] Sent 누적 확인 {probe_reference.astimezone().strftime('%H:%M:%S')}"
+                return (
+                    f"From: {mail_from_current}\n"
+                    f"To: {rcpt_value}\n"
+                    f"Subject: {subject}\n"
+                    f"Date: {date_header}\n"
+                    f"Message-ID: {msg_id}\n"
+                    "MIME-Version: 1.0\n"
+                    "Content-Type: text/plain; charset=UTF-8\n"
+                    "Content-Transfer-Encoding: 8bit\n"
+                    "\n"
+                    f"Sent 누적 확인용 테스트 메일입니다. 발송 시각(UTC): {probe_reference.isoformat()}.\n"
+                )
+
+            probe_header = build_probe_header(message_id_value)
             attempt_label = "" if attempts == 1 else f" (재시도 {attempts})"
             self._log_imap_console(
                 f"확인용 발송{attempt_label} · RCPT {rcpt_value}",
@@ -2634,8 +2675,8 @@ class MailClient:
             )
             success, sent_at_candidate, status_line, detail_line, returned_message_id = self._send_imap_probe_mail(
                 domain=normalized,
-                smtp_context=smtp_context,
-                mail_from=mail_from,
+                smtp_context=smtp_context_local,
+                mail_from=mail_from_current,
                 rcpt_to=rcpt_value,
                 header_text=probe_header,
                 message_id=message_id_value,
@@ -2650,7 +2691,7 @@ class MailClient:
             if success and smtp_ok:
                 if sent_at_candidate is not None:
                     sent_at_value = sent_at_candidate
-                header_from_value = self._extract_header_from(probe_header, mail_from)
+                header_from_value = self._extract_header_from(probe_header, mail_from_current)
                 return SentProbeResult(
                     success=True,
                     sent_at=sent_at_value,
@@ -2664,7 +2705,7 @@ class MailClient:
                     ip_after_change=ip_after_change,
                     attempts=attempts,
                     message_id=message_id_value,
-                    mail_from=mail_from,
+                    mail_from=mail_from_current,
                     header_from=header_from_value,
                     rcpt_to=rcpt_value,
                 )
@@ -2723,7 +2764,7 @@ class MailClient:
             domain=normalized,
             tag="IMAP-메일발송실패",
         )
-        header_from_value = self._extract_header_from(probe_header, mail_from)
+        header_from_value = self._extract_header_from(probe_header, mail_from_current)
         return SentProbeResult(
             success=False,
             sent_at=sent_at_value,
@@ -2737,7 +2778,7 @@ class MailClient:
             ip_after_change=ip_after_change,
             attempts=attempts,
             message_id=message_id_value,
-            mail_from=mail_from,
+            mail_from=mail_from_current,
             header_from=header_from_value,
             rcpt_to=rcpt_value,
         )
@@ -5227,6 +5268,8 @@ class MailClient:
                             raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
                         )
                     session_config["header"] = dispatch_header
+                    session_config["mail_from"] = session_mail_from
+                    session_snapshot = dict(session_config)
                     success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
                         smtp_host=session_config.get("smtp_host", ""),
                         smtp_port=int(session_config.get("smtp_port") or 25),
@@ -5254,6 +5297,7 @@ class MailClient:
                         data_response_message=(data_response or {}).get("message"),
                         mail_from=session_mail_from,
                         header_text=dispatch_header,
+                        config_snapshot=session_snapshot,
                     )
 
                 def prepare_group_for_dispatch(group: DispatchGroup) -> DispatchGroup:
@@ -5316,14 +5360,21 @@ class MailClient:
                     increment: int,
                     mail_from_current: Optional[str],
                     header_snapshot: Optional[str],
+                    session_config: Optional[Dict[str, object]],
                 ) -> None:
                     nonlocal current_sent_counter, threshold_check_request
                     if increment <= 0:
                         return
                     if not self._imap_enabled(normalized):
                         return
-                    if mail_from_current:
-                        self._remember_last_mail_from(normalized, mail_from_current)
+                    session_config_local = dict(session_config) if isinstance(session_config, dict) else {}
+                    session_mail_from_value = (
+                        session_config_local.get("mail_from")
+                        or mail_from_current
+                        or mail_from_value
+                    )
+                    if session_mail_from_value:
+                        self._remember_last_mail_from(normalized, session_mail_from_value)
                     visible_sent = max(0, sent_count - sent_reset_offset)
                     visible_from_sequence = self._visible_sent_counter(normalized)
                     if visible_from_sequence > visible_sent:
@@ -5354,10 +5405,30 @@ class MailClient:
                     if isinstance(header_snapshot, str) and header_snapshot.strip():
                         header_value = header_snapshot
                     message_id_snapshot = _extract_message_id_from_text(header_value) if header_value else None
+                    substitution_clone: Optional[Dict[str, Any]] = None
+                    config_snapshot_clone: Optional[Dict[str, Any]] = None
+                    if all_headers_unique and substitution_payload:
+                        substitution_clone = copy.deepcopy(substitution_payload)
+                        if session_config_local:
+                            config_snapshot_clone = copy.deepcopy(session_config_local)
+                        else:
+                            config_snapshot_clone = copy.deepcopy(config)
+                    smtp_payload: Dict[str, object] = {
+                        "smtp_host": session_config_local.get("smtp_host", config.get("smtp_host")),
+                        "smtp_port": session_config_local.get("smtp_port", config.get("smtp_port")),
+                        "helo": session_config_local.get("helo", config.get("helo")),
+                        "header": header_value if header_value is not None else session_config_local.get("header", config.get("header")),
+                    }
+                    if session_mail_from_value:
+                        smtp_payload["mail_from"] = session_mail_from_value
+                    if substitution_clone:
+                        smtp_payload["substitution"] = substitution_clone
+                    if config_snapshot_clone:
+                        smtp_payload["config_snapshot"] = config_snapshot_clone
                     threshold_check_request = {
                         "sent_at": sent_at,
                         "detail": detail_text,
-                        "mail_from": mail_from_current or mail_from_value,
+                        "mail_from": session_mail_from_value,
                         "message_id": message_id_snapshot,
                         "allowed_latency": sanitize_imap_allowed_latency(
                             settings_local.get("allowed_latency_seconds"),
@@ -5377,13 +5448,12 @@ class MailClient:
                         "target_multiple": next_multiple,
                         "current_multiple": current_multiple,
                         "reason": f"threshold reached ({target_value})",
-                        "smtp": {
-                            "smtp_host": config.get("smtp_host"),
-                            "smtp_port": config.get("smtp_port"),
-                            "helo": config.get("helo"),
-                            "header": header_value if header_value is not None else config.get("header"),
-                        },
+                        "smtp": smtp_payload,
                     }
+                    if substitution_clone:
+                        threshold_check_request["substitution"] = substitution_clone
+                    if config_snapshot_clone:
+                        threshold_check_request["config_snapshot"] = config_snapshot_clone
 
                 def ensure_threshold_check() -> None:
                     nonlocal threshold_check_request, current_sent_counter, threshold_deferred_notice, stop_requested, fatal_error, stop_reason
@@ -5472,7 +5542,8 @@ class MailClient:
                         header_from_candidate = str(header_from_value).strip() or None
                     else:
                         header_from_candidate = None
-                    smtp_context = request.get("smtp")
+                    smtp_context = dict(request.get("smtp") or {})
+                    request["smtp"] = smtp_context
                     guard_outcome, report_payload = self._guard_sent_threshold(
                         domain=normalized,
                         job_id=job_id,
@@ -5754,6 +5825,7 @@ class MailClient:
                             success_increment,
                             mail_from_current,
                             outcome.header_text,
+                            outcome.config_snapshot,
                         )
                     elif not session_success and normalized == "naver":
                         current_sent_counter = max(0, sent_count - sent_reset_offset)
@@ -6377,7 +6449,8 @@ class MailClient:
         if not self._imap_enabled(normalized):
             message = "IMAP 확인이 비활성화되어 있어 수동 도착 확인을 실행하지 않습니다."
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
-        if substitution_payload and _normalize_bool_flag(config_payload.get("all_headers_unique"), default=False):
+        all_headers_unique_flag = _normalize_bool_flag(config_payload.get("all_headers_unique"), default=False)
+        if substitution_payload and all_headers_unique_flag:
             config_payload, missing_tokens = self._render_all_headers_unique_config(config_payload, substitution_payload)
             self._log_substitution_missing(normalized, job_id, missing_tokens, "imap_manual_check")
         mail_from_value = self._effective_mail_from(normalized, config_payload)
@@ -6404,7 +6477,11 @@ class MailClient:
             "smtp_port": config_payload.get("smtp_port"),
             "helo": config_payload.get("helo"),
             "header": header_text,
+            "mail_from": mail_from_value,
         }
+        if substitution_payload and all_headers_unique_flag:
+            smtp_context["substitution"] = copy.deepcopy(substitution_payload)
+            smtp_context["config_snapshot"] = copy.deepcopy(config_payload)
         settings_snapshot = self._imap_settings_for_domain(normalized)
         single_delay_seconds = sanitize_imap_delay(
             settings_snapshot.get("single_delay_seconds"),

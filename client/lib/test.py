@@ -81,15 +81,15 @@ def send_mail_telnet(
 
     debug_enabled = bool(debug)
 
-    def debug_log(message: str) -> None:
+    def debug_log(tag: str, message: str) -> None:
         if debug_enabled:
-            print(f"[텔넷 디버그] {message}")
+            print(f"[텔넷-{tag}] {message}")
 
     try:
         port_value = smtp_port_override or smtp_port
-        debug_log(f"텔넷 연결 시도 → {smtp_server}:{port_value}")
+        debug_log("CONNECT", f"연결 시도 → {smtp_server}:{port_value}")
         with telnetlib.Telnet(smtp_server, port_value) as tn:
-            debug_log("텔넷 연결 성공")
+            debug_log("CONNECT", "연결 성공")
 
             def record(label: str, text: str) -> None:
                 trimmed = (text or "").strip()
@@ -102,10 +102,25 @@ def send_mail_telnet(
                     response_lines.append(trimmed)
                 if debug_enabled:
                     entry_label = label if label else "RESP"
-                    if trimmed:
-                        debug_log(f"<< {entry_label}: {trimmed}")
-                    else:
-                        debug_log(f"<< {entry_label}")
+                    tag = "Resp"
+                    base_label = label or ""
+                    upper_label = base_label.upper()
+                    if upper_label.startswith("RCPT"):
+                        tag = "Rcpt"
+                    elif upper_label == "MAIL FROM":
+                        tag = "MailFrom"
+                    elif upper_label == "HELO":
+                        tag = "HELO"
+                    elif upper_label == "DATA":
+                        tag = "DATA"
+                    elif upper_label == "DATA END":
+                        tag = "DataEnd"
+                    elif upper_label == "QUIT":
+                        tag = "QUIT"
+                    elif upper_label == "CONNECT":
+                        tag = "CONNECT"
+                    message_text = f"<< {entry_label}: {trimmed}" if trimmed else f"<< {entry_label}"
+                    debug_log(tag, message_text)
 
             def read_line(label: str, address: Optional[str] = None) -> str:
                 raw = tn.read_until(b"\r\n", timeout=READ_LINE_TIMEOUT)
@@ -115,7 +130,20 @@ def send_mail_telnet(
                 return text
 
             def write_line(text: str) -> None:
-                debug_log(f">> {text}")
+                upper_text = text.strip().upper()
+                if upper_text.startswith("HELO") or upper_text.startswith("EHLO"):
+                    tag = "HELO"
+                elif upper_text.startswith("MAIL FROM"):
+                    tag = "MailFrom"
+                elif upper_text.startswith("RCPT TO"):
+                    tag = "Rcpt"
+                elif upper_text == "DATA":
+                    tag = "DATA"
+                elif upper_text == "QUIT":
+                    tag = "QUIT"
+                else:
+                    tag = "Command"
+                debug_log(tag, f">> {text}")
                 tn.write(f"{text}\r\n".encode('utf-8'))
 
             read_line("CONNECT")
@@ -141,9 +169,9 @@ def send_mail_telnet(
                 if debug_enabled:
                     for line in payload.split("\r\n"):
                         if line == "":
-                            debug_log(">> ")
+                            debug_log("Body", ">> ")
                         else:
-                            debug_log(f">> {line}")
+                            debug_log("Body", f">> {line}")
                 tn.write(payload.encode('euc-kr'))
             except UnicodeEncodeError as exc:
                 fallback_lines = []
@@ -156,7 +184,7 @@ def send_mail_telnet(
                 alt_payload = ''.join(fallback_lines)
                 record("EUC-KR 변환 실패", str(exc))
                 if debug_enabled:
-                    debug_log(f">> [EUC-KR 변환 실패, 대체 전송] {alt_payload}")
+                    debug_log("Body", f">> [EUC-KR 변환 실패, 대체 전송] {alt_payload}")
                 tn.write(alt_payload.encode('euc-kr', errors='ignore'))
 
             read_line("DATA END")
@@ -168,5 +196,5 @@ def send_mail_telnet(
         message = f"ERROR: {exc}"
         response_lines.append(message)
         response_entries.append(("ERROR", str(exc)))
-        debug_log(f"<< ERROR: {exc}")
+        debug_log("ERROR", f"<< ERROR: {exc}")
         return "\n".join(response_lines), response_entries
