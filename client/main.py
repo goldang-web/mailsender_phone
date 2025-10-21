@@ -3073,18 +3073,7 @@ class MailClient:
                     attempt_reason = result.get("reason")
                     sent_display = result.get("sent_display")
                     received_display = result.get("received_display")
-                    if sent_display:
-                        self._log_imap_console(
-                            f"[IMAP 확인] 발신 {sent_display}",
-                            domain=normalized,
-                            tag="IMAP-메일확인결과",
-                        )
-                    if received_display:
-                        self._log_imap_console(
-                            f"[IMAP 확인] 수신 {received_display}",
-                            domain=normalized,
-                            tag="IMAP-메일확인결과",
-                        )
+                    
                     latency_label = (
                         f"{attempt_latency:.1f}s" if isinstance(attempt_latency, (int, float)) else "-"
                     )
