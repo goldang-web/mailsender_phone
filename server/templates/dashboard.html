@@ -9472,7 +9472,6 @@ function openImapModal(card, device, domain, options = {}) {
   const sentThresholdInput = document.getElementById("imapSentThreshold");
   const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
   const recheckInput = document.getElementById("imapRecheckAttempts");
-  const recheckInput = document.getElementById("imapRecheckAttempts");
   const failureActionSelect = document.getElementById("imapFailureAction");
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
@@ -9588,6 +9587,7 @@ async function submitImapModal() {
   const singleDelayInput = document.getElementById("imapSingleDelaySeconds");
   const sentThresholdInput = document.getElementById("imapSentThreshold");
   const allowedLatencyInput = document.getElementById("imapAllowedLatencySeconds");
+  const recheckInput = document.getElementById("imapRecheckAttempts");
   const failureActionSelect = document.getElementById("imapFailureAction");
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");

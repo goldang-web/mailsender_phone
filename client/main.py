@@ -40,7 +40,7 @@ from lib.naver_imap import (
 from lib import substitution as substitution_lib
 
 
-APP_VERSION = "0.0.85"
+APP_VERSION = "0.0.86"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -1668,6 +1668,7 @@ class MailClient:
         job_id: Optional[str],
         send_type: str,
         mail_from: str,
+        message_id: Optional[str],
         header_from: Optional[str],
         has_anchor: bool,
         context_reason: Optional[str],
@@ -1822,6 +1823,7 @@ class MailClient:
             smtp_context=smtp_context,
             probe_result=probe_result,
             precheck_purge=purge_context,
+            message_id_snapshot=message_id,
             recheck_attempts=recheck_attempts_value,
         )
         return ImapGuardOutcome(
@@ -1937,6 +1939,7 @@ class MailClient:
         request: Dict[str, object],
         send_type: str,
         mail_from: str,
+        message_id: Optional[str],
         header_from: Optional[str],
         has_anchor: bool,
         context_reason: Optional[str],
@@ -1971,6 +1974,7 @@ class MailClient:
                 allowed_delay=allowed_delay,
                 smtp_context=smtp_context,
                 force=force,
+                message_id=message_id,
                 counter_mode=counter_mode,
                 counter_current=counter_current,
                 counter_threshold=counter_threshold,
@@ -2006,8 +2010,17 @@ class MailClient:
                 probe=probe_to_store,
                 status=status_value,
             )
-        else:
-            self._resume_sent_workers(normalized)
+            return outcome, report_payload
+        if status_value in {"failure", "error"}:
+            effective_request = dict(request or {})
+            probe_to_store = outcome.probe if outcome.probe and outcome.probe.message_id else reuse_probe
+            self._store_guard_pending(
+                normalized,
+                request=effective_request,
+                probe=probe_to_store,
+                status=status_value,
+            )
+        self._resume_sent_workers(normalized)
         return outcome, report_payload
 
     def _record_imap_throttle(self, domain: str, marker: Optional[str], detail: Optional[str]) -> None:
@@ -2706,6 +2719,7 @@ class MailClient:
         smtp_context: Optional[Dict[str, object]] = None,
         probe_result: Optional[SentProbeResult] = None,
         precheck_purge: Optional[Dict[str, object]] = None,
+        message_id_snapshot: Optional[str] = None,
         recheck_attempts: Optional[int] = None,
     ) -> Optional[Future]:
         normalized = (domain or "").lower()
@@ -2779,8 +2793,12 @@ class MailClient:
             except (TypeError, ValueError):
                 return None
 
+        sent_message_id = (
+            str(message_id_snapshot).strip() if isinstance(message_id_snapshot, str) and message_id_snapshot.strip() else None
+        )
+
         def task() -> Dict[str, object]:
-            nonlocal sent_at_value, sent_at_iso
+            nonlocal sent_at_value, sent_at_iso, sent_message_id
             mode_label = "수동" if manual_force else "자동"
             components = [
                 "IMAP 확인",
@@ -2827,6 +2845,8 @@ class MailClient:
             if passed_probe_result and passed_probe_result.sent_at:
                 sent_at_value = passed_probe_result.sent_at
                 sent_at_iso = to_utc_iso(passed_probe_result.sent_at)
+            if sent_message_id is None and passed_probe_result and passed_probe_result.message_id:
+                sent_message_id = passed_probe_result.message_id
 
             ip_change_attempted = bool(passed_probe_result and passed_probe_result.ip_change_attempted)
             ip_change_success = bool(passed_probe_result and passed_probe_result.ip_change_success)
@@ -2867,6 +2887,8 @@ class MailClient:
                 if isinstance(current_purge_context, dict):
                     purge_context = current_purge_context
                 final_probe_result = current_probe if current_probe else final_probe_result
+                if sent_message_id is None and current_probe and current_probe.message_id:
+                    sent_message_id = current_probe.message_id
 
                 if not current_probe or not current_probe.success or not current_probe.message_id:
                     probe_status_line = current_probe.status_line if current_probe else None
@@ -2909,6 +2931,7 @@ class MailClient:
                 attempt_received_at = None
 
                 try:
+                    candidate_message_id = sent_message_id or (current_probe.message_id if current_probe else None)
                     result = verify_delivery(
                         email_id=username,
                         password=password,
@@ -2918,7 +2941,7 @@ class MailClient:
                         header_from=effective_header_from,
                         max_messages=10,
                         check_delay=delay_seconds,
-                        message_id=current_probe.message_id,
+                        message_id=candidate_message_id,
                     )
                     attempt_status = str(result.get("status") or "error")
                     attempt_latency = result.get("latency")
@@ -2994,6 +3017,8 @@ class MailClient:
             throttle_detail = final_probe_result.throttle_detail if final_probe_result else throttle_detail
             effective_mail_from = final_probe_result.mail_from or effective_mail_from
             effective_header_from = final_probe_result.header_from or effective_header_from
+            if sent_message_id is None and final_probe_result and final_probe_result.message_id:
+                sent_message_id = final_probe_result.message_id
 
             purge_attempted = bool(purge_context and purge_context.get("attempted"))
             purge_success = purge_context.get("success") if purge_attempted else None
@@ -3094,6 +3119,7 @@ class MailClient:
                 "probe_status_line": probe_status_line,
                 "probe_detail_line": probe_detail_line,
                 "probe_attempts": probe_attempts,
+                "message_id": sent_message_id,
                 "check_attempts": len(attempt_history),
                 "check_max_attempts": max_sequence_attempts,
                 "sequence_attempts": max_sequence_attempts,
@@ -5209,6 +5235,7 @@ class MailClient:
                     detail_text: Optional[str],
                     increment: int,
                     mail_from_current: Optional[str],
+                    header_snapshot: Optional[str],
                 ) -> None:
                     nonlocal current_sent_counter, threshold_check_request
                     if increment <= 0:
@@ -5243,10 +5270,15 @@ class MailClient:
                         [f"배수 {next_multiple} 도달 · 현재 성공 {session_success}건"],
                         domain=normalized,
                     )
+                    header_value = None
+                    if isinstance(header_snapshot, str) and header_snapshot.strip():
+                        header_value = header_snapshot
+                    message_id_snapshot = _extract_message_id_from_text(header_value) if header_value else None
                     threshold_check_request = {
                         "sent_at": sent_at,
                         "detail": detail_text,
                         "mail_from": mail_from_current or mail_from_value,
+                        "message_id": message_id_snapshot,
                         "allowed_latency": sanitize_imap_allowed_latency(
                             settings_local.get("allowed_latency_seconds"),
                             default=IMAP_DEFAULT_ALLOWED_LATENCY_SECONDS,
@@ -5261,6 +5293,7 @@ class MailClient:
                         "sequence_total": global_success,
                         "username": normalize_imap_string(settings_local.get("username")),
                         "header_from": header_from_value,
+                        "header_snapshot": header_value,
                         "target_multiple": next_multiple,
                         "current_multiple": current_multiple,
                         "reason": f"threshold reached ({target_value})",
@@ -5268,7 +5301,7 @@ class MailClient:
                             "smtp_host": config.get("smtp_host"),
                             "smtp_port": config.get("smtp_port"),
                             "helo": config.get("helo"),
-                            "header": config.get("header"),
+                            "header": header_value if header_value is not None else config.get("header"),
                         },
                     }
 
@@ -5338,25 +5371,17 @@ class MailClient:
                         normalized,
                         request.get("username") or settings_snapshot.get("username"),
                     )
+                    prep_lines = [
+                        f"계정 {username_candidate or '-'}",
+                        f"임계 {threshold_value}건 · 현재 {session_success}건 · 누적 {global_success}건",
+                        f"대기 {delay_value}초 / 허용 {allowed_latency_value}초",
+                        f"실패 대응 {failure_label}",
+                    ]
+                    if reason_text:
+                        prep_lines.append(f"사유: {reason_text}")
                     self._emit_imap_section(
-                        "IMAP 설정",
-                        [
-                            f"계정: {username_candidate or '-'}",
-                            f"확인 간격: {threshold_value}건",
-                            f"확인 대기: {delay_value}초",
-                            f"허용 지연: {allowed_latency_value}초",
-                            f"실패 대응: {failure_label}",
-                        ],
-                        domain=normalized,
-                    )
-                    self._emit_imap_section(
-                        "IMAP 확인 대기",
-                        [f"현재 성공: {session_success}건 / 누적 성공: {global_success}건"],
-                        domain=normalized,
-                    )
-                    self._emit_imap_section(
-                        "IMAP 확인 시도",
-                        [f"사유: {reason_text}"],
+                        "IMAP 확인 준비",
+                        prep_lines,
                         domain=normalized,
                     )
                     mail_from_candidate = str(request.get("mail_from") or mail_from_value)
@@ -5374,6 +5399,7 @@ class MailClient:
                         request=request,
                         send_type="sent-threshold",
                         mail_from=mail_from_candidate,
+                        message_id=request.get("message_id"),
                         header_from=header_from_candidate,
                         has_anchor=False,
                         context_reason=str(request.get("detail") or "Sent 기준 확인"),
@@ -5433,6 +5459,7 @@ class MailClient:
                         return
                     else:
                         failure_lines: List[str] = []
+                        failure_summary = str(report_payload.get("reason") or "").strip()
                         marker = report_payload.get("ip_change_marker")
                         marker_reason = report_payload.get("ip_change_reason")
                         if marker:
@@ -5451,12 +5478,21 @@ class MailClient:
                             failure_lines.append(str(probe_error))
                         if not failure_lines:
                             failure_lines.append(status_value or "IMAP 확인 실패")
+                        if failure_summary:
+                            if failure_lines[0] != failure_summary:
+                                failure_lines.insert(0, failure_summary)
+                        else:
+                            failure_summary = failure_lines[0]
                         self._emit_imap_section("IMAP 확인 실패", failure_lines, domain=normalized)
                         refreshed_counter = self._visible_sent_counter(normalized)
                         if refreshed_counter < current_sent_counter:
                             refreshed_counter = current_sent_counter
                         current_sent_counter = refreshed_counter
                         self._set_sent_counter(normalized, current_sent_counter)
+                        fatal_error = failure_summary
+                        stop_reason = failure_summary
+                        stop_requested = True
+                        return
                     next_multiple = self._get_last_threshold_multiple(normalized) + 1
                     next_target = threshold_value * next_multiple if threshold_value > 0 else 0
                     remaining = max(0, next_target - current_sent_counter) if next_target else 0
@@ -5632,7 +5668,13 @@ class MailClient:
                         header_from_value = header_from_current
 
                     if session_success and normalized == "naver":
-                        register_sent_success(outcome.sent_at, detail_for_log, success_increment, mail_from_current)
+                        register_sent_success(
+                            outcome.sent_at,
+                            detail_for_log,
+                            success_increment,
+                            mail_from_current,
+                            outcome.header_text,
+                        )
                     elif not session_success and normalized == "naver":
                         current_sent_counter = max(0, sent_count - sent_reset_offset)
                         self._set_sent_counter(normalized, current_sent_counter)
