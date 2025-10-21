@@ -1876,6 +1876,7 @@ class MailClient:
         self._log_imap_console(
             f"확인용 메일 발송 전에 스팸함 비우기 실행 · 폴더 {folder}",
             domain=normalized,
+            tag="IMAP-스팸함제거실행",
         )
         try:
             summary = purge_imap_folder(username, password, folder=folder)
@@ -1884,6 +1885,7 @@ class MailClient:
             self._log_imap_console(
                 f"확인용 메일 발송 전 스팸함 비우기 실패 - {reason_text}",
                 domain=normalized,
+                tag="IMAP-스팸함제거실패",
             )
             result["reason"] = reason_text
             return result
@@ -1920,14 +1922,14 @@ class MailClient:
             message = "확인용 메일 발송 전 스팸함 비우기 완료"
             if detail_parts:
                 message = f"{message} · {' · '.join(detail_parts)}"
-            self._log_imap_console(message, domain=normalized)
+            self._log_imap_console(message, domain=normalized, tag="IMAP-스팸함제거완료")
         else:
             reason_label = reason_text or "사유 정보 없음"
             detail = " · ".join(detail_parts) if detail_parts else ""
             combined = f"확인용 메일 발송 전 스팸함 비우기 실패 - {reason_label}"
             if detail:
                 combined = f"{combined} · {detail}"
-            self._log_imap_console(combined, domain=normalized)
+            self._log_imap_console(combined, domain=normalized, tag="IMAP-스팸함제거실패")
 
         return result
 
@@ -2445,6 +2447,7 @@ class MailClient:
                 f"Sent 누적 확인용 테스트 메일입니다. 발송 시각(UTC): {probe_started.isoformat()}.\n"
             )
             payload_header = header_override or default_header
+        debug_enabled = bool(self.telnet_debug_mode)
         try:
             success, response_text, completed_at, _rcpt_details, _data_response = send_via_telnet(
                 smtp_host=smtp_host,
@@ -2459,21 +2462,35 @@ class MailClient:
         except Exception as exc:  # pylint: disable=broad-except
             status_line = "테스트 메일 발송 예외"
             detail_line = str(exc)
-            self._log_imap_console(f"IMAP 발송 · 확인 메일 발송 실패 · {detail_line}", domain=normalized)
+            if debug_enabled:
+                print("-------------------------", flush=True)
+            self._log_imap_console(
+                f"IMAP 발송 · 확인 메일 발송 실패 · {detail_line}",
+                domain=normalized,
+                tag="IMAP-메일발송실패",
+            )
             return False, None, status_line, detail_line, message_id_value
+        if debug_enabled:
+            print("-------------------------", flush=True)
         status_line, detail_line = self._smtp_status_and_detail(response_text)
         if success:
             self._log_imap_console(
                 f"확인용 발송 성공 · 응답 {status_line or '-'}",
                 domain=normalized,
+                tag="IMAP-메일발송완료",
             )
             return True, completed_at, status_line, detail_line, message_id_value
         self._log_imap_console(
             f"확인용 발송 실패 · 응답 {status_line or '-'}",
             domain=normalized,
+            tag="IMAP-메일발송실패",
         )
         if detail_line:
-            self._log_imap_console(f"  ↳ {detail_line}", domain=normalized)
+            self._log_imap_console(
+                f"  ↳ {detail_line}",
+                domain=normalized,
+                tag="IMAP-메일발송상세",
+            )
         return False, completed_at, status_line, detail_line, message_id_value
 
     def _run_sent_probe_mail(
@@ -2486,7 +2503,11 @@ class MailClient:
     ) -> SentProbeResult:
         normalized = (domain or "").lower()
         if not smtp_context:
-            self._log_imap_console("IMAP 발송 · SMTP 설정 없음", domain=normalized)
+            self._log_imap_console(
+                "IMAP 발송 · SMTP 설정 없음",
+                domain=normalized,
+                tag="IMAP-메일발송실패",
+            )
             return SentProbeResult(
                 success=False,
                 sent_at=None,
@@ -2495,7 +2516,11 @@ class MailClient:
             )
         helo_value = str(smtp_context.get("helo") or "")
         if not mail_from:
-            self._log_imap_console("IMAP 발송 · MAIL FROM 누락", domain=normalized)
+            self._log_imap_console(
+                "IMAP 발송 · MAIL FROM 누락",
+                domain=normalized,
+                tag="IMAP-메일발송실패",
+            )
             return SentProbeResult(
                 success=False,
                 sent_at=None,
@@ -2504,7 +2529,11 @@ class MailClient:
             )
         rcpt_value = normalize_imap_recipient(domain, rcpt_to)
         if not rcpt_value or "@" not in rcpt_value:
-            self._log_imap_console("IMAP 발송 · RCPT TO 형식 오류", domain=normalized)
+            self._log_imap_console(
+                "IMAP 발송 · RCPT TO 형식 오류",
+                domain=normalized,
+                tag="IMAP-메일발송실패",
+            )
             return SentProbeResult(
                 success=False,
                 sent_at=None,
@@ -2601,6 +2630,7 @@ class MailClient:
             self._log_imap_console(
                 f"확인용 발송{attempt_label} · RCPT {rcpt_value}",
                 domain=normalized,
+                tag="IMAP-메일발송시작",
             )
             success, sent_at_candidate, status_line, detail_line, returned_message_id = self._send_imap_probe_mail(
                 domain=normalized,
@@ -2677,10 +2707,22 @@ class MailClient:
             break
 
         if last_status_line:
-            self._log_imap_console(f"  ↳ 최종 응답 {last_status_line}", domain=normalized)
+            self._log_imap_console(
+                f"  ↳ 최종 응답 {last_status_line}",
+                domain=normalized,
+                tag="IMAP-메일발송상세",
+            )
         if last_detail_line:
-            self._log_imap_console(f"  ↳ 상세 {last_detail_line}", domain=normalized)
-        self._log_imap_console("확인용 발송 실패 → IMAP 확인 생략", domain=normalized)
+            self._log_imap_console(
+                f"  ↳ 상세 {last_detail_line}",
+                domain=normalized,
+                tag="IMAP-메일발송상세",
+            )
+        self._log_imap_console(
+            "확인용 발송 실패 → IMAP 확인 생략",
+            domain=normalized,
+            tag="IMAP-메일발송실패",
+        )
         header_from_value = self._extract_header_from(probe_header, mail_from)
         return SentProbeResult(
             success=False,
@@ -2799,6 +2841,7 @@ class MailClient:
 
         def task() -> Dict[str, object]:
             nonlocal sent_at_value, sent_at_iso, sent_message_id
+            probe_current = passed_probe_result
             mode_label = "수동" if manual_force else "자동"
             components = [
                 "IMAP 확인",
@@ -2834,26 +2877,30 @@ class MailClient:
                     components.append("스팸함 비우기 선행 실패")
                 else:
                     components.append("스팸함 비우기 선행 미실행")
-            self._log_imap_console(" · ".join(components), domain=normalized)
+            self._log_imap_console(
+                " · ".join(components),
+                domain=normalized,
+                tag="IMAP-메일확인준비",
+            )
 
-            probe_mail_sent = bool(passed_probe_result and passed_probe_result.success)
-            probe_status_line = passed_probe_result.status_line if passed_probe_result else None
-            probe_detail_line = passed_probe_result.detail_line if passed_probe_result else None
-            probe_attempts = passed_probe_result.attempts if passed_probe_result else 0
+            probe_mail_sent = bool(probe_current and probe_current.success)
+            probe_status_line = probe_current.status_line if probe_current else None
+            probe_detail_line = probe_current.detail_line if probe_current else None
+            probe_attempts = probe_current.attempts if probe_current else 0
             probe_mail_error = None if probe_mail_sent else (probe_detail_line or probe_status_line)
 
-            if passed_probe_result and passed_probe_result.sent_at:
-                sent_at_value = passed_probe_result.sent_at
-                sent_at_iso = to_utc_iso(passed_probe_result.sent_at)
-            if sent_message_id is None and passed_probe_result and passed_probe_result.message_id:
-                sent_message_id = passed_probe_result.message_id
+            if probe_current and probe_current.sent_at:
+                sent_at_value = probe_current.sent_at
+                sent_at_iso = to_utc_iso(probe_current.sent_at)
+            if sent_message_id is None and probe_current and probe_current.message_id:
+                sent_message_id = probe_current.message_id
 
-            ip_change_attempted = bool(passed_probe_result and passed_probe_result.ip_change_attempted)
-            ip_change_success = bool(passed_probe_result and passed_probe_result.ip_change_success)
-            ip_change_message = passed_probe_result.ip_change_message if passed_probe_result else ""
-            ip_after_change = passed_probe_result.ip_after_change if passed_probe_result else None
-            throttle_marker = passed_probe_result.throttle_marker if passed_probe_result else None
-            throttle_detail = passed_probe_result.throttle_detail if passed_probe_result else None
+            ip_change_attempted = bool(probe_current and probe_current.ip_change_attempted)
+            ip_change_success = bool(probe_current and probe_current.ip_change_success)
+            ip_change_message = probe_current.ip_change_message if probe_current else ""
+            ip_after_change = probe_current.ip_after_change if probe_current else None
+            throttle_marker = probe_current.throttle_marker if probe_current else None
+            throttle_detail = probe_current.throttle_detail if probe_current else None
 
             checked_at_iso = utc_now_iso()
             status = "error"
@@ -2864,7 +2911,7 @@ class MailClient:
             effective_mail_from = mail_from
             effective_header_from = header_from
             current_purge_context = purge_context
-            final_probe_result = passed_probe_result
+            final_probe_result = probe_current
 
             for sequence_index in range(1, max_sequence_attempts + 1):
                 if sequence_index > 1:
@@ -2877,13 +2924,13 @@ class MailClient:
                     else:
                         current_purge_context = None
                     with self._sent_guard_lock:
-                        passed_probe_result = self._run_sent_probe_mail(
+                        probe_current = self._run_sent_probe_mail(
                             domain=normalized,
                             mail_from=mail_from,
                             smtp_context=smtp_context,
                             rcpt_to=username,
                         )
-                current_probe = passed_probe_result
+                current_probe = probe_current
                 if isinstance(current_purge_context, dict):
                     purge_context = current_purge_context
                 final_probe_result = current_probe if current_probe else final_probe_result
@@ -2904,7 +2951,11 @@ class MailClient:
                             "reason": reason_text or "",
                         }
                     )
-                    self._log_imap_console("확인용 발송 실패 → IMAP 확인 생략", domain=normalized)
+                    self._log_imap_console(
+                        "확인용 발송 실패 → IMAP 확인 생략",
+                        domain=normalized,
+                        tag="IMAP-메일발송실패",
+                    )
                     break
 
                 probe_status_line = current_probe.status_line
@@ -2950,30 +3001,55 @@ class MailClient:
                     sent_display = result.get("sent_display")
                     received_display = result.get("received_display")
                     if sent_display:
-                        self._log_imap_console(f"  ↳ 발신 {sent_display}", domain=normalized)
+                        self._log_imap_console(
+                            f"  ↳ 발신 {sent_display}",
+                            domain=normalized,
+                            tag="IMAP-메일확인상세",
+                        )
                     if received_display:
-                        self._log_imap_console(f"  ↳ 수신 {received_display}", domain=normalized)
+                        self._log_imap_console(
+                            f"  ↳ 수신 {received_display}",
+                            domain=normalized,
+                            tag="IMAP-메일확인상세",
+                        )
                     latency_label = (
                         f"{attempt_latency:.1f}s" if isinstance(attempt_latency, (int, float)) else "-"
                     )
                     self._log_imap_console(
                         f"IMAP 확인 {sequence_index}차 · 상태 {attempt_status} · 지연 {latency_label} · 허용 {allowed_delay_value}s",
                         domain=normalized,
+                        tag="IMAP-메일확인중",
                     )
                     if attempt_status != "success" and attempt_reason:
-                        self._log_imap_console(f"  ↳ 사유: {attempt_reason}", domain=normalized)
+                        self._log_imap_console(
+                            f"  ↳ 사유: {attempt_reason}",
+                            domain=normalized,
+                            tag="IMAP-메일확인상세",
+                        )
                 except IMAPNetworkError as exc:
                     attempt_status = "network_error"
                     attempt_reason = str(exc)
-                    self._log_imap_console("IMAP 확인 · 네트워크 오류", domain=normalized)
+                    self._log_imap_console(
+                        "IMAP 확인 · 네트워크 오류",
+                        domain=normalized,
+                        tag="IMAP-메일확인네트워크",
+                    )
                 except (socket.timeout, OSError, ssl.SSLError) as exc:
                     attempt_status = "network_error"
                     attempt_reason = f"네트워크 예외: {exc}"
-                    self._log_imap_console("IMAP 확인 · 네트워크 예외", domain=normalized)
+                    self._log_imap_console(
+                        "IMAP 확인 · 네트워크 예외",
+                        domain=normalized,
+                        tag="IMAP-메일확인네트워크",
+                    )
                 except Exception as exc:  # pylint: disable=broad-except
                     attempt_status = "error"
                     attempt_reason = f"IMAP 확인 실패: {exc}"
-                    self._log_imap_console("IMAP 확인 · 예외 발생", domain=normalized)
+                    self._log_imap_console(
+                        "IMAP 확인 · 예외 발생",
+                        domain=normalized,
+                        tag="IMAP-메일확인예외",
+                    )
 
                 if attempt_status not in {"success", "failure", "error", "network_error"}:
                     attempt_status = "error"
@@ -2998,12 +3074,16 @@ class MailClient:
                     retry_components = [f"IMAP 확인 {sequence_index}차 실패 · 재시도 준비"]
                     if attempt_reason:
                         retry_components.append(f"사유 {attempt_reason}")
-                    self._log_imap_console(" · ".join(retry_components), domain=normalized)
+                    self._log_imap_console(
+                        " · ".join(retry_components),
+                        domain=normalized,
+                        tag="IMAP-메일확인재시도",
+                    )
                     continue
                 break
 
             if final_probe_result is None:
-                final_probe_result = passed_probe_result
+                final_probe_result = probe_current
             probe_mail_sent = bool(final_probe_result and final_probe_result.success)
             probe_status_line = final_probe_result.status_line if final_probe_result else None
             probe_detail_line = final_probe_result.detail_line if final_probe_result else None
@@ -5899,10 +5979,16 @@ class MailClient:
             error=error_message,
         )
 
-    def _log_imap_console(self, message: str, domain: Optional[str] = None) -> None:
+    def _log_imap_console(
+        self,
+        message: str,
+        *,
+        domain: Optional[str] = None,
+        tag: str = "IMAP-안내",
+    ) -> None:
         if domain and not self._imap_enabled(domain):
             return
-        print(f"[IMAP 테스트] {message}", flush=True)
+        print(f"[{tag}] {message}", flush=True)
 
     def _log_imap_protection(self, message: str) -> None:
         # 보호 전용 로그는 콘솔에 노출하지 않습니다.
@@ -5951,7 +6037,11 @@ class MailClient:
             self._log_imap_console(message, domain=normalized)
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
         folder = str(payload.get("folder") or "Junk").strip() or "Junk"
-        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 연결 시도", domain=normalized)
+        self._log_imap_console(
+            f"계정 {username} · 폴더 {folder} · 연결 시도",
+            domain=normalized,
+            tag="IMAP-연결시도",
+        )
         diagnostics = probe_imap_connection(username, password, folder=folder)
         success = bool(diagnostics.get("success"))
         latency = diagnostics.get("latency")
@@ -5970,10 +6060,18 @@ class MailClient:
         if success:
             latency_text = f"{latency:.1f}s" if isinstance(latency, (int, float)) else "-"
             message = f"IMAP 연결 성공 · {folder} 접근 · 지연 {latency_text}"
-            self._log_imap_console(f"성공 - {message}", domain=normalized)
+            self._log_imap_console(
+                f"성공 - {message}",
+                domain=normalized,
+                tag="IMAP-연결성공",
+            )
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
         error_message = reason or "IMAP 연결 실패"
-        self._log_imap_console(f"실패 - {error_message}", domain=normalized)
+        self._log_imap_console(
+            f"실패 - {error_message}",
+            domain=normalized,
+            tag="IMAP-연결실패",
+        )
         return JobResult(
             job_id=job_id,
             status="failed",
@@ -6022,7 +6120,11 @@ class MailClient:
         except (TypeError, ValueError):
             limit_value = 1
         limit_value = max(1, min(10, limit_value))
-        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 최신 메일 확인", domain=normalized)
+        self._log_imap_console(
+            f"계정 {username} · 폴더 {folder} · 최신 메일 확인",
+            domain=normalized,
+            tag="IMAP-메일조회시작",
+        )
         summary = fetch_latest_message_summary(username, password, folder=folder, limit=limit_value)
         success = bool(summary.get("success"))
         mail_info = summary.get("mail") or {}
@@ -6036,6 +6138,7 @@ class MailClient:
             f"ID {mail_info.get('sequence','-')} · "
             f"저장비번 {used_saved}",
             domain=normalized,
+            tag="IMAP-메일조회요약",
         )
         if mail_info:
             self._log_imap_console(
@@ -6044,9 +6147,14 @@ class MailClient:
                 f"Subject {mail_info.get('subject') or '-'} · "
                 f"수신 {mail_info.get('received_at_iso') or mail_info.get('date_header') or '-'}",
                 domain=normalized,
+                tag="IMAP-메일확인상세",
             )
         if reason:
-            self._log_imap_console(f"  ↳ 실패 사유: {reason}", domain=normalized)
+            self._log_imap_console(
+                f"  ↳ 실패 사유: {reason}",
+                domain=normalized,
+                tag="IMAP-메일확인상세",
+            )
 
         def _shorten(value: Optional[str], *, length: int = 60) -> str:
             if not value:
@@ -6096,11 +6204,19 @@ class MailClient:
             message = "최신 메일 확인 성공"
             if detail_parts:
                 message = f"{message} · {' · '.join(detail_parts)}"
-            self._log_imap_console(f"성공 - {message}", domain=normalized)
+            self._log_imap_console(
+                f"성공 - {message}",
+                domain=normalized,
+                tag="IMAP-메일확인성공",
+            )
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
 
         error_message = reason or "최신 메일을 가져오지 못했습니다."
-        self._log_imap_console(f"실패 - {error_message}", domain=normalized)
+        self._log_imap_console(
+            f"실패 - {error_message}",
+            domain=normalized,
+            tag="IMAP-메일확인실패",
+        )
         return JobResult(
             job_id=job_id,
             status="failed",
@@ -6148,7 +6264,11 @@ class MailClient:
             chunk_value = int(chunk_size) if chunk_size is not None else 100
         except (TypeError, ValueError):
             chunk_value = 100
-        self._log_imap_console(f"계정 {username} · 폴더 {folder} · 스팸함 비우기 시작", domain=normalized)
+        self._log_imap_console(
+            f"계정 {username} · 폴더 {folder} · 스팸함 비우기 시작",
+            domain=normalized,
+            tag="IMAP-스팸함제거실행",
+        )
         summary = purge_imap_folder(username, password, folder=folder, chunk_size=chunk_value)
         success = bool(summary.get("success"))
         reason = summary.get("reason")
@@ -6187,9 +6307,14 @@ class MailClient:
             f"삭제 {deleted_count if deleted_count is not None else '-'}건 · "
             f"남은 {remaining_count if remaining_count is not None else '-'}건",
             domain=normalized,
+            tag="IMAP-스팸함제거요약",
         )
         if reason:
-            self._log_imap_console(f"  ↳ 사유: {reason}", domain=normalized)
+            self._log_imap_console(
+                f"  ↳ 사유: {reason}",
+                domain=normalized,
+                tag="IMAP-스팸함제거상세",
+            )
         detail_parts: List[str] = []
         if total_count is not None:
             detail_parts.append(f"총 {total_count}건")
@@ -6218,11 +6343,19 @@ class MailClient:
             message = f"{folder} 메일함 비우기 완료"
             if detail_parts:
                 message = f"{message} · {' · '.join(detail_parts)}"
-            self._log_imap_console(f"성공 - {message}", domain=normalized)
+            self._log_imap_console(
+                f"성공 - {message}",
+                domain=normalized,
+                tag="IMAP-스팸함제거완료",
+            )
             return JobResult(job_id=job_id, status="success", message=message, result=result_payload)
 
         error_message = reason or f"{folder} 메일함을 비우지 못했습니다."
-        self._log_imap_console(f"실패 - {error_message}", domain=normalized)
+        self._log_imap_console(
+            f"실패 - {error_message}",
+            domain=normalized,
+            tag="IMAP-스팸함제거실패",
+        )
         return JobResult(
             job_id=job_id,
             status="failed",
