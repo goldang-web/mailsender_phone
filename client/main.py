@@ -899,6 +899,8 @@ class MailClient:
                 "sent_last_reset_at": entry.get("sent_last_reset_at"),
                 "last_threshold_multiple": last_threshold_multiple,
             }
+        self._substitution_lock_modes: Dict[str, str] = {domain: "auto" for domain in DOMAINS}
+        self._substitution_lock_active: Dict[str, bool] = {domain: False for domain in DOMAINS}
         self._imap_sent_counters: Dict[str, int] = {}
         self._imap_threshold_multiples: Dict[str, int] = {}
         for domain in DOMAINS:
@@ -2009,6 +2011,12 @@ class MailClient:
                 "reason": f"IMAP 확인 작업 예외: {exc}",
             }
 
+        if isinstance(report_payload, dict):
+            self._apply_reroll_report(
+                domain=normalized,
+                report=report_payload,
+                request=request,
+            )
         status_value = str((report_payload or {}).get("status") or "").lower()
         if status_value == "network_error":
             effective_request = dict(request or {})
@@ -2120,6 +2128,12 @@ class MailClient:
             self.imap_settings[normalized] = settings
         return settings
 
+    def _is_substitution_lock_active(self, domain: Optional[str]) -> bool:
+        normalized = (domain or "").lower()
+        if normalized in self._substitution_lock_active:
+            return bool(self._substitution_lock_active[normalized])
+        return False
+
     def _remember_last_mail_from(self, domain: str, value: str) -> None:
         normalized = (domain or "").lower()
         candidate = (value or "").strip()
@@ -2163,6 +2177,94 @@ class MailClient:
         items = ", ".join(sorted(missing))
         normalized = (domain or "").lower()
         print(f"[경고] 치환 재계산 누락 항목({items}) · domain={normalized} · job={job_id} · context={context}")
+
+    def _apply_reroll_report(
+        self,
+        *,
+        domain: str,
+        report: Dict[str, object],
+        config: Optional[Dict[str, object]] = None,
+        substitution_payload: Optional[Dict[str, object]] = None,
+        request: Optional[Dict[str, object]] = None,
+    ) -> Tuple[Optional[str], Optional[str]]:
+        normalized = (domain or "").lower()
+        if not isinstance(report, dict):
+            return None, None
+        reroll_applied = bool(report.get("reroll_applied"))
+        if not reroll_applied:
+            return None, None
+        if self._is_substitution_lock_active(normalized):
+            return None, None
+        smtp_context = report.get("smtp_context")
+        if not isinstance(smtp_context, dict):
+            return None, None
+        context_clone = copy.deepcopy(smtp_context)
+        header_raw = context_clone.get("header")
+        if isinstance(header_raw, bytes):
+            try:
+                header_text = header_raw.decode("utf-8")
+            except UnicodeDecodeError:
+                header_text = header_raw.decode("latin-1", errors="ignore")
+        else:
+            header_text = str(header_raw or "")
+        context_clone["header"] = header_text
+        mail_from_value = context_clone.get("mail_from")
+        if isinstance(mail_from_value, str):
+            mail_from_value = mail_from_value.strip()
+            context_clone["mail_from"] = mail_from_value
+        snapshot_payload = report.get("config_snapshot")
+        if isinstance(snapshot_payload, dict):
+            snapshot_clone = copy.deepcopy(snapshot_payload)
+        else:
+            config_snapshot_source = context_clone.get("config_snapshot")
+            snapshot_clone = copy.deepcopy(config_snapshot_source) if isinstance(config_snapshot_source, dict) else None
+        if isinstance(config, dict):
+            if mail_from_value:
+                config["mail_from"] = mail_from_value
+            if header_text:
+                config["header"] = header_text
+            if "message_id_auto" in context_clone:
+                config["message_id_auto"] = context_clone.get("message_id_auto")
+            if "message_id_pattern" in context_clone and context_clone.get("message_id_pattern") is not None:
+                config["message_id_pattern"] = context_clone.get("message_id_pattern")
+            if snapshot_clone:
+                config["config_snapshot"] = copy.deepcopy(snapshot_clone)
+        if substitution_payload and isinstance(substitution_payload.get("template"), dict) and snapshot_clone:
+            substitution_payload["template"] = copy.deepcopy(snapshot_clone)
+        header_from = report.get("header_from")
+        if not header_from and header_text:
+            header_from = self._extract_header_from(header_text, mail_from_value)
+        if isinstance(request, dict):
+            smtp_payload = request.get("smtp")
+            if not isinstance(smtp_payload, dict):
+                smtp_payload = {}
+                request["smtp"] = smtp_payload
+            for key in ("smtp_host", "smtp_port", "helo"):
+                value = context_clone.get(key)
+                if value is not None:
+                    smtp_payload[key] = value
+            if mail_from_value:
+                smtp_payload["mail_from"] = mail_from_value
+                request["mail_from"] = mail_from_value
+            if header_text:
+                smtp_payload["header"] = header_text
+                request["header_snapshot"] = header_text
+            if "message_id_auto" in context_clone:
+                smtp_payload["message_id_auto"] = context_clone.get("message_id_auto")
+            if "message_id_pattern" in context_clone and context_clone.get("message_id_pattern") is not None:
+                smtp_payload["message_id_pattern"] = context_clone.get("message_id_pattern")
+            if snapshot_clone:
+                smtp_payload["config_snapshot"] = copy.deepcopy(snapshot_clone)
+                request["config_snapshot"] = copy.deepcopy(snapshot_clone)
+            if header_from:
+                request["header_from"] = header_from
+            if report.get("message_id"):
+                request["message_id"] = report.get("message_id")
+        mail_from_return = mail_from_value if mail_from_value else None
+        if mail_from_return:
+            self._remember_last_mail_from(normalized, mail_from_return)
+        header_from_return = header_from if header_from else None
+        return mail_from_return, header_from_return
 
     def _effective_mail_from(
         self,
@@ -2865,7 +2967,9 @@ class MailClient:
         )
         smtp_context = dict(smtp_context or {})
         reroll_on_retry_enabled = sanitize_bool_flag(settings.get("reroll_on_retry"))
-        smtp_context["reroll_on_retry"] = reroll_on_retry_enabled
+        lock_active = self._is_substitution_lock_active(normalized)
+        reroll_allowed = reroll_on_retry_enabled and not lock_active
+        smtp_context["reroll_on_retry"] = reroll_allowed
         smtp_context_base = copy.deepcopy(smtp_context)
         substitution_payload_base = (
             copy.deepcopy(smtp_context_base.get("substitution"))
@@ -2907,6 +3011,7 @@ class MailClient:
         sent_message_id = (
             str(message_id_snapshot).strip() if isinstance(message_id_snapshot, str) and message_id_snapshot.strip() else None
         )
+        reroll_applied = False
 
         def task() -> Dict[str, object]:
             nonlocal sent_at_value, sent_at_iso, sent_message_id
@@ -2984,8 +3089,14 @@ class MailClient:
             final_probe_result = probe_current
 
             def perform_reroll(sequence_index: int) -> bool:
-                nonlocal mail_from, header_from, smtp_context, sent_message_id, smtp_context_base, config_snapshot_base
-                if not reroll_on_retry_enabled:
+                nonlocal mail_from, header_from, smtp_context, sent_message_id, smtp_context_base, config_snapshot_base, reroll_applied
+                if not reroll_allowed:
+                    if reroll_on_retry_enabled:
+                        self._log_imap_console(
+                            f"IMAP 재시도 {sequence_index}차 · 재롤 생략 (고정 모드 활성)",
+                            domain=normalized,
+                            tag="IMAP-메일헤더재롤",
+                        )
                     return False
                 substitution_payload = (
                     copy.deepcopy(substitution_payload_base)
@@ -3083,6 +3194,7 @@ class MailClient:
                     sent_message_id = new_message_id
                 smtp_context_base = copy.deepcopy(smtp_context)
                 config_snapshot_base = copy.deepcopy(snapshot_clone)
+                reroll_applied = True
                 self._log_imap_console(
                     f"IMAP 재시도 {sequence_index}차 · 헤더 재롤 적용",
                     domain=normalized,
@@ -3410,6 +3522,12 @@ class MailClient:
                 "purge_remaining_count": purge_remaining_count if purge_attempted else None,
                 "purge_elapsed_seconds": purge_elapsed_seconds if purge_attempted else None,
             }
+            reroll_success = bool(reroll_applied and status == "success")
+            report["reroll_applied"] = reroll_success
+            if reroll_success:
+                report["smtp_context"] = copy.deepcopy(smtp_context_base)
+                if isinstance(config_snapshot_base, dict):
+                    report["config_snapshot"] = copy.deepcopy(config_snapshot_base)
             print(IMAP_LOG_FOOTER_SEPARATOR, flush=True)
             self._queue_imap_report(report)
             return report
@@ -5683,7 +5801,7 @@ class MailClient:
                     )
 
                 def ensure_threshold_check() -> None:
-                    nonlocal threshold_check_request, current_sent_counter, threshold_deferred_notice, stop_requested, fatal_error, stop_reason
+                    nonlocal threshold_check_request, current_sent_counter, threshold_deferred_notice, stop_requested, fatal_error, stop_reason, mail_from_value, header_from_value
                     if not threshold_check_request:
                         if threshold_deferred_notice:
                             threshold_deferred_notice = False
@@ -5840,6 +5958,16 @@ class MailClient:
                             [f"IMAP latency: {_format_latency(latency_value)} / 재개"],
                             domain=normalized,
                         )
+                        new_mail_from, new_header_from = self._apply_reroll_report(
+                            domain=normalized,
+                            report=report_payload,
+                            config=config,
+                            substitution_payload=substitution_payload,
+                        )
+                        if new_mail_from:
+                            mail_from_value = new_mail_from
+                        if new_header_from:
+                            header_from_value = new_header_from
                     elif status_value == "network_error":
                         fatal_error = report_payload.get("reason") or "IMAP 확인 네트워크 오류"
                         stop_reason = fatal_error
@@ -7339,6 +7467,16 @@ class MailClient:
                 state["server_last_run"] = None
             else:
                 state["server_last_run"] = server_last_run
+            lock_mode_value = str(payload.get("substitution_lock_mode") or "").strip().lower() or "auto"
+            lock_active_raw = payload.get("substitution_lock_active")
+            lock_active_flag = bool(lock_active_raw) if lock_active_raw is not None else lock_mode_value == "lock"
+            if (
+                self._substitution_lock_modes.get(normalized) != lock_mode_value
+                or self._substitution_lock_active.get(normalized) != lock_active_flag
+            ):
+                self._substitution_lock_modes[normalized] = lock_mode_value
+                self._substitution_lock_active[normalized] = lock_active_flag
+                changed = True
             self._update_imap_settings_from_server(normalized, payload)
         if changed:
             self.persist()

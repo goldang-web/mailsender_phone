@@ -1,3 +1,4 @@
+import copy
 import sys
 from concurrent.futures import Future
 from datetime import datetime, timezone
@@ -241,3 +242,250 @@ def test_guard_sent_threshold_stores_failure_snapshot(monkeypatch: pytest.Monkey
     assert pending is not None
     assert pending["request"]["message_id"] == "STORED-ID"
     assert resumed, "실패 후에는 Sent 작업이 재개되어야 합니다."
+
+
+def test_submit_imap_check_reroll_updates_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _build_client()
+    settings = client._imap_settings_for_domain("naver")
+    settings.update(
+        {
+            "reroll_on_retry": True,
+            "enabled": True,
+        }
+    )
+    client._substitution_lock_active["naver"] = False
+    client._substitution_lock_modes["naver"] = "auto"
+
+    base_header = (
+        "From: Old Sender <old@example.com>\n"
+        "Subject: Test\n"
+        "Message-ID: <OLD-ID@example.com>\n"
+    )
+    config_snapshot = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": "helo.example.com",
+        "mail_from": "old@example.com",
+        "header": base_header,
+        "message_id_auto": True,
+        "message_id_pattern": "<OLD-ID@example.com>",
+    }
+    substitution_payload = {
+        "template": copy.deepcopy(config_snapshot),
+        "rules": [],
+    }
+    smtp_context = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": "helo.example.com",
+        "mail_from": "old@example.com",
+        "header": base_header,
+        "config_snapshot": copy.deepcopy(config_snapshot),
+        "substitution": copy.deepcopy(substitution_payload),
+    }
+
+    new_mail_from = "new@example.com"
+
+    def fake_render(base_config, payload):  # type: ignore[override]
+        refreshed = dict(base_config)
+        refreshed["mail_from"] = new_mail_from
+        refreshed["header"] = client_main._ensure_message_id_header(
+            "From: New Sender <new@example.com>\nSubject: Test\n",
+            auto_enabled=True,
+            pattern_value=None,
+            mail_from=new_mail_from,
+            helo=base_config.get("helo"),
+        )
+        refreshed["message_id_auto"] = True
+        refreshed["message_id_pattern"] = "<NEW-ID@example.com>"
+        return refreshed, set()
+
+    monkeypatch.setattr(client, "_render_all_headers_unique_config", fake_render)
+
+    verify_calls = []
+
+    def fake_verify_delivery(*, message_id=None, **kwargs):
+        verify_calls.append(message_id)
+        if len(verify_calls) == 1:
+            return {
+                "status": "failure",
+                "reason": "latency exceeded",
+                "latency": None,
+                "received_at": None,
+                "sent_display": "sent",
+                "received_display": "-",
+            }
+        return {
+            "status": "success",
+            "latency": 0.5,
+            "received_at": datetime.now(timezone.utc).isoformat(),
+            "reason": None,
+            "sent_display": "sent",
+            "received_display": "received",
+        }
+
+    monkeypatch.setattr(client_main, "verify_delivery", fake_verify_delivery)
+
+    def fake_run_sent_probe_mail(*, smtp_context, **kwargs):  # type: ignore[override]
+        header_text = smtp_context.get("header") or ""
+        message_id = client_main._extract_message_id_from_text(header_text) or "FALLBACK-ID"
+        return client_main.SentProbeResult(
+            success=True,
+            sent_at=datetime.now(timezone.utc),
+            status_line="250 2.0.0 OK",
+            detail_line=None,
+            message_id=message_id,
+            mail_from=smtp_context.get("mail_from"),
+            header_from=f"Tester <{smtp_context.get('mail_from')}>",
+            rcpt_to="imap-user@naver.com",
+        )
+
+    monkeypatch.setattr(client, "_run_sent_probe_mail", fake_run_sent_probe_mail)
+
+    probe = _probe_result("PROBE-ID")
+    future = client._submit_imap_check(
+        domain="naver",
+        job_id="job-4",
+        send_type="sent-threshold",
+        mail_from="old@example.com",
+        header_from="Old Sender <old@example.com>",
+        sent_at=datetime.now(timezone.utc),
+        has_anchor=False,
+        delay_before_check=0,
+        allowed_delay=15,
+        context_reason="threshold reached (1)",
+        force=False,
+        sent_window_count=1,
+        sent_threshold=1,
+        smtp_context=smtp_context,
+        probe_result=probe,
+        precheck_purge=None,
+        message_id_snapshot=None,
+        recheck_attempts=2,
+    )
+    report = future.result()
+    assert report["status"] == "success"
+    assert report["reroll_applied"] is True
+    assert report["mail_from"] == new_mail_from
+    assert report.get("smtp_context", {}).get("mail_from") == new_mail_from
+    assert isinstance(report.get("config_snapshot"), dict)
+    assert verify_calls[0] == "PROBE-ID"
+    assert len(verify_calls) == 2
+    assert verify_calls[-1] != "PROBE-ID"
+
+
+def test_submit_imap_check_skips_reroll_when_locked(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _build_client()
+    settings = client._imap_settings_for_domain("naver")
+    settings.update(
+        {
+            "reroll_on_retry": True,
+            "enabled": True,
+        }
+    )
+    client._substitution_lock_active["naver"] = True
+    client._substitution_lock_modes["naver"] = "lock"
+
+    base_header = (
+        "From: Old Sender <old@example.com>\n"
+        "Subject: Test\n"
+        "Message-ID: <OLD-ID@example.com>\n"
+    )
+    config_snapshot = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": "helo.example.com",
+        "mail_from": "old@example.com",
+        "header": base_header,
+        "message_id_auto": True,
+        "message_id_pattern": "<OLD-ID@example.com>",
+    }
+    substitution_payload = {
+        "template": copy.deepcopy(config_snapshot),
+        "rules": [],
+    }
+    smtp_context = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": "helo.example.com",
+        "mail_from": "old@example.com",
+        "header": base_header,
+        "config_snapshot": copy.deepcopy(config_snapshot),
+        "substitution": copy.deepcopy(substitution_payload),
+    }
+
+    def fake_render(base_config, payload):  # type: ignore[override]
+        refreshed = dict(base_config)
+        refreshed["header"] = base_header
+        refreshed["mail_from"] = "locked@example.com"
+        return refreshed, set()
+
+    monkeypatch.setattr(client, "_render_all_headers_unique_config", fake_render)
+
+    verify_calls = []
+
+    def fake_verify_delivery(*, message_id=None, **kwargs):
+        verify_calls.append(message_id)
+        if len(verify_calls) == 1:
+            return {
+                "status": "failure",
+                "reason": "latency exceeded",
+                "latency": None,
+                "received_at": None,
+                "sent_display": "sent",
+                "received_display": "-",
+            }
+        return {
+            "status": "success",
+            "latency": 0.4,
+            "received_at": datetime.now(timezone.utc).isoformat(),
+            "reason": None,
+            "sent_display": "sent",
+            "received_display": "received",
+        }
+
+    monkeypatch.setattr(client_main, "verify_delivery", fake_verify_delivery)
+
+    def fake_run_sent_probe_mail(*, smtp_context, **kwargs):  # type: ignore[override]
+        header_text = smtp_context.get("header") or ""
+        message_id = client_main._extract_message_id_from_text(header_text) or "FALLBACK-ID"
+        return client_main.SentProbeResult(
+            success=True,
+            sent_at=datetime.now(timezone.utc),
+            status_line="250 2.0.0 OK",
+            detail_line=None,
+            message_id=message_id,
+            mail_from=smtp_context.get("mail_from"),
+            header_from=f"Tester <{smtp_context.get('mail_from')}>",
+            rcpt_to="imap-user@naver.com",
+        )
+
+    monkeypatch.setattr(client, "_run_sent_probe_mail", fake_run_sent_probe_mail)
+
+    probe = _probe_result("PROBE-ID")
+    future = client._submit_imap_check(
+        domain="naver",
+        job_id="job-5",
+        send_type="sent-threshold",
+        mail_from="old@example.com",
+        header_from="Old Sender <old@example.com>",
+        sent_at=datetime.now(timezone.utc),
+        has_anchor=False,
+        delay_before_check=0,
+        allowed_delay=15,
+        context_reason="threshold reached (1)",
+        force=False,
+        sent_window_count=1,
+        sent_threshold=1,
+        smtp_context=smtp_context,
+        probe_result=probe,
+        precheck_purge=None,
+        message_id_snapshot=None,
+        recheck_attempts=2,
+    )
+    report = future.result()
+    assert report["status"] == "success"
+    assert report["reroll_applied"] is False
+    assert "smtp_context" not in report or report["smtp_context"]["mail_from"] == "old@example.com"
+    assert len(verify_calls) == 2
+    assert verify_calls[0] == verify_calls[1] == "PROBE-ID"
