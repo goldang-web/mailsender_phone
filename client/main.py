@@ -1753,31 +1753,14 @@ class MailClient:
         if send_type == "manual":
             recheck_attempts_value = 1
 
-        def _collect_purge_targets(current_mail_from: Optional[str], current_header_from: Optional[str]) -> List[str]:
-            targets: List[str] = []
-
-            def _append(candidate: Optional[str]) -> None:
-                if not candidate:
-                    return
-                text = str(candidate).strip()
-                if not text:
-                    return
-                _, parsed = parseaddr(text)
-                normalized = (parsed or text).strip().strip("<>").strip().lower()
-                if normalized and normalized not in targets:
-                    targets.append(normalized)
-
-            _append(current_header_from)
-            _append(current_mail_from)
-            return targets
-
         purge_context: Optional[Dict[str, object]] = None
+        purge_targets_initial = self._collect_purge_targets(mail_from, header_from)
         if purge_before_check_enabled and rcpt_username and password_value:
             purge_context = self._run_imap_precheck_purge(
                 domain=normalized,
                 username=rcpt_username,
                 password=password_value,
-                from_addresses=_collect_purge_targets(mail_from, header_from),
+                from_addresses=purge_targets_initial,
             )
         provided_counter = counter_current if counter_current is not None else sent_window_count
         if counter_mode == "manual":
@@ -2477,6 +2460,28 @@ class MailClient:
             combined = " ".join(part for part in collected if part)
             return combined.strip() or fallback
         return fallback
+
+    def _collect_purge_targets(
+        self,
+        mail_from: Optional[str],
+        header_from: Optional[str],
+    ) -> List[str]:
+        targets: List[str] = []
+
+        def _append(candidate: Optional[str]) -> None:
+            if not candidate:
+                return
+            text = str(candidate).strip()
+            if not text:
+                return
+            _, parsed = parseaddr(text)
+            normalized = (parsed or text).strip().strip("<>").strip().lower()
+            if normalized and normalized not in targets:
+                targets.append(normalized)
+
+        _append(header_from)
+        _append(mail_from)
+        return targets
 
     def _current_sent_threshold(self, domain: str) -> int:
         settings = self._imap_settings_for_domain(domain)
@@ -3432,7 +3437,7 @@ class MailClient:
                             domain=normalized,
                             username=username,
                             password=password,
-                            from_addresses=_collect_purge_targets(mail_from, header_from),
+                            from_addresses=self._collect_purge_targets(mail_from, header_from),
                         )
                     else:
                         current_purge_context = None
