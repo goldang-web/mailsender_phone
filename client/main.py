@@ -2864,6 +2864,8 @@ class MailClient:
             default=IMAP_DEFAULT_SENT_THRESHOLD,
         )
         smtp_context = dict(smtp_context or {})
+        reroll_on_retry_enabled = sanitize_bool_flag(settings.get("reroll_on_retry"))
+        smtp_context["reroll_on_retry"] = reroll_on_retry_enabled
         smtp_context_base = copy.deepcopy(smtp_context)
         substitution_payload_base = (
             copy.deepcopy(smtp_context_base.get("substitution"))
@@ -2875,8 +2877,6 @@ class MailClient:
             if isinstance(smtp_context_base.get("config_snapshot"), dict)
             else None
         )
-        reroll_on_retry_enabled = sanitize_bool_flag(settings.get("reroll_on_retry"))
-
         passed_probe_result = probe_result
         stop_actions = {"stop_device", "stop_all"}
         max_sequence_attempts = sanitize_imap_recheck_attempts(
@@ -2911,6 +2911,7 @@ class MailClient:
         def task() -> Dict[str, object]:
             nonlocal sent_at_value, sent_at_iso, sent_message_id
             probe_current = passed_probe_result
+            print(IMAP_LOG_HEADER_SEPARATOR, flush=True)
             mode_label = "수동" if manual_force else "자동"
             components = [
                 "IMAP 확인",
@@ -3064,6 +3065,7 @@ class MailClient:
                     smtp_context["message_id_pattern"] = message_id_pattern_value
                 if substitution_payload_base:
                     smtp_context["substitution"] = copy.deepcopy(substitution_payload_base)
+                smtp_context["reroll_on_retry"] = reroll_on_retry_enabled
                 snapshot_clone = copy.deepcopy(refreshed_config)
                 snapshot_clone["mail_from"] = new_mail_from
                 snapshot_clone["header"] = header_text_candidate
@@ -3408,6 +3410,7 @@ class MailClient:
                 "purge_remaining_count": purge_remaining_count if purge_attempted else None,
                 "purge_elapsed_seconds": purge_elapsed_seconds if purge_attempted else None,
             }
+            print(IMAP_LOG_FOOTER_SEPARATOR, flush=True)
             self._queue_imap_report(report)
             return report
 
@@ -5901,7 +5904,6 @@ class MailClient:
                     else:
                         next_line = "다음 배수 없음"
                     self._emit_imap_section("IMAP 다음 배수", [next_line], domain=normalized)
-                    print(IMAP_LOG_FOOTER_SEPARATOR, flush=True)
                 def process_future(future: Future, group: DispatchGroup) -> None:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
                     nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
@@ -6343,7 +6345,6 @@ class MailClient:
     ) -> None:
         if domain and not self._imap_enabled(domain):
             return
-        print(IMAP_LOG_HEADER_SEPARATOR, flush=True)
         print(f"[{tag}] {message}", flush=True)
 
     def _log_imap_protection(self, message: str) -> None:
@@ -6362,7 +6363,6 @@ class MailClient:
         for line in lines:
             if not line:
                 continue
-            print(IMAP_LOG_HEADER_SEPARATOR, flush=True)
             print(f"[{label}] {line}", flush=True)
 
     def handle_imap_test(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
