@@ -6,6 +6,7 @@ import time
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.utils import parseaddr, parsedate_to_datetime
+from typing import Iterable, List, Optional
 
 
 class IMAPNetworkError(Exception):
@@ -145,8 +146,18 @@ def fetch_latest_message_summary(email_id: str, password: str, *, folder: str = 
                 pass
 
 
-def purge_imap_folder(email_id: str, password: str, *, folder: str = "Junk", chunk_size: int = 100) -> dict:
-    """지정한 IMAP 폴더의 모든 메일을 삭제하고 정리합니다."""
+def purge_imap_folder(
+    email_id: str,
+    password: str,
+    *,
+    folder: str = "Junk",
+    chunk_size: int = 100,
+    from_addresses: Optional[Iterable[str]] = None,
+) -> dict:
+    """
+    지정한 IMAP 폴더에서 특정 발신자 메일을 선별 삭제하거나,
+    필터가 없으면 모든 메일을 삭제하고 정리합니다.
+    """
     if not email_id or not password:
         return {"success": False, "reason": "IMAP 계정 정보가 필요합니다.", "folder": (folder or "Junk") or "Junk"}
     try:
@@ -159,6 +170,26 @@ def purge_imap_folder(email_id: str, password: str, *, folder: str = "Junk", chu
     started = time.monotonic()
     deleted_total = 0
     total_messages = 0
+    matched_total = 0
+
+    def _normalize_address(value: object) -> str:
+        if not value:
+            return ""
+        text = str(value).strip()
+        if not text:
+            return ""
+        _, parsed = parseaddr(text)
+        candidate = (parsed or text).strip().strip("<>").strip()
+        if not candidate:
+            return ""
+        return candidate.lower()
+
+    target_addresses: List[str] = []
+    if from_addresses:
+        for raw in from_addresses:
+            normalized = _normalize_address(raw)
+            if normalized and normalized not in target_addresses:
+                target_addresses.append(normalized)
     try:
         mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=30)
         mail.login(email_id, password)
@@ -184,12 +215,65 @@ def purge_imap_folder(email_id: str, password: str, *, folder: str = "Junk", chu
                 "success": True,
                 "folder": target_folder,
                 "total_count": 0,
+                "matched_count": 0,
                 "deleted_count": 0,
                 "remaining_count": 0,
                 "elapsed_seconds": elapsed_empty,
             }
-        for index in range(0, total_messages, chunk_value):
-            chunk = ids_raw[index : index + chunk_value]
+
+        if target_addresses:
+            matched_ids: List[bytes] = []
+            for msg_id in ids_raw:
+                if not msg_id:
+                    continue
+                try:
+                    header_status, header_data = mail.fetch(msg_id, "(BODY.PEEK[HEADER.FIELDS (FROM)])")
+                except imaplib.IMAP4.error:
+                    continue
+                header_bytes = b""
+                if header_status == "OK" and header_data:
+                    for entry in header_data:
+                        if isinstance(entry, tuple) and len(entry) >= 2 and entry[1]:
+                            header_bytes += entry[1]
+                if not header_bytes:
+                    try:
+                        header_status, header_data = mail.fetch(msg_id, "(RFC822.HEADER)")
+                    except imaplib.IMAP4.error:
+                        header_status = "NOK"
+                        header_data = None
+                    if header_status == "OK" and header_data:
+                        for entry in header_data:
+                            if isinstance(entry, tuple) and len(entry) >= 2 and entry[1]:
+                                header_bytes += entry[1]
+                if not header_bytes:
+                    continue
+                try:
+                    msg = email.message_from_bytes(header_bytes)
+                except Exception:  # pylint: disable=broad-except
+                    continue
+                from_header = msg.get("From", "")
+                normalized_from = _normalize_address(from_header)
+                if normalized_from and normalized_from in target_addresses:
+                    matched_ids.append(msg_id)
+            target_id_list: List[bytes] = matched_ids
+        else:
+            target_id_list = list(ids_raw)
+
+        matched_total = len(target_id_list)
+        if matched_total == 0:
+            elapsed_noop = time.monotonic() - started
+            return {
+                "success": True,
+                "folder": target_folder,
+                "total_count": total_messages,
+                "matched_count": 0,
+                "deleted_count": 0,
+                "remaining_count": total_messages,
+                "elapsed_seconds": elapsed_noop,
+            }
+
+        for index in range(0, matched_total, chunk_value):
+            chunk = target_id_list[index : index + chunk_value]
             message_set_parts = []
             for item in chunk:
                 if not item:
@@ -211,18 +295,21 @@ def purge_imap_folder(email_id: str, password: str, *, folder: str = "Junk", chu
                     "reason": "메일에 삭제 플래그를 지정하지 못했습니다.",
                     "folder": target_folder,
                     "total_count": total_messages,
+                    "matched_count": matched_total,
                     "deleted_count": deleted_total,
                 }
             deleted_total += len(message_set_parts)
-        status, _ = mail.expunge()
-        if status != "OK":
-            return {
-                "success": False,
-                "reason": "메일 영구 삭제(EXPUNGE)에 실패했습니다.",
-                "folder": target_folder,
-                "total_count": total_messages,
-                "deleted_count": deleted_total,
-            }
+        if deleted_total:
+            status, _ = mail.expunge()
+            if status != "OK":
+                return {
+                    "success": False,
+                    "reason": "메일 영구 삭제(EXPUNGE)에 실패했습니다.",
+                    "folder": target_folder,
+                    "total_count": total_messages,
+                    "matched_count": matched_total,
+                    "deleted_count": deleted_total,
+                }
         status, remaining_messages = mail.search(None, "ALL")
         if status == "OK":
             remaining_ids = remaining_messages[0].split() if remaining_messages and remaining_messages[0] else []
@@ -234,6 +321,7 @@ def purge_imap_folder(email_id: str, password: str, *, folder: str = "Junk", chu
             "success": True,
             "folder": target_folder,
             "total_count": total_messages,
+            "matched_count": matched_total,
             "deleted_count": deleted_total,
             "remaining_count": remaining_count if remaining_count is not None else max(0, total_messages - deleted_total),
             "elapsed_seconds": elapsed,

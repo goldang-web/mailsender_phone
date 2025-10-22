@@ -19,7 +19,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from email import policy
 from email.parser import Parser
-from email.utils import format_datetime
+from email.utils import format_datetime, parseaddr
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 from datetime import datetime, timezone, timedelta
@@ -43,7 +43,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.87"
+APP_VERSION = "0.0.89"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -1752,12 +1752,32 @@ class MailClient:
         )
         if send_type == "manual":
             recheck_attempts_value = 1
+
+        def _collect_purge_targets(current_mail_from: Optional[str], current_header_from: Optional[str]) -> List[str]:
+            targets: List[str] = []
+
+            def _append(candidate: Optional[str]) -> None:
+                if not candidate:
+                    return
+                text = str(candidate).strip()
+                if not text:
+                    return
+                _, parsed = parseaddr(text)
+                normalized = (parsed or text).strip().strip("<>").strip().lower()
+                if normalized and normalized not in targets:
+                    targets.append(normalized)
+
+            _append(current_header_from)
+            _append(current_mail_from)
+            return targets
+
         purge_context: Optional[Dict[str, object]] = None
         if purge_before_check_enabled and rcpt_username and password_value:
             purge_context = self._run_imap_precheck_purge(
                 domain=normalized,
                 username=rcpt_username,
                 password=password_value,
+                from_addresses=_collect_purge_targets(mail_from, header_from),
             )
         provided_counter = counter_current if counter_current is not None else sent_window_count
         if counter_mode == "manual":
@@ -1874,6 +1894,7 @@ class MailClient:
         username: str,
         password: str,
         folder: str = "Junk",
+        from_addresses: Optional[Iterable[str]] = None,
     ) -> Dict[str, object]:
         normalized = (domain or "naver").lower()
 
@@ -1899,6 +1920,7 @@ class MailClient:
             "attempted": True,
             "success": False,
             "reason": "",
+            "matched_count": None,
             "total_count": None,
             "deleted_count": None,
             "remaining_count": None,
@@ -1906,13 +1928,32 @@ class MailClient:
             "folder": folder,
         }
 
-        self._log_imap_console(
-            f"확인용 메일 발송 전에 스팸함 비우기 실행 · 폴더 {folder}",
-            domain=normalized,
-            tag="IMAP-스팸함제거실행",
-        )
+        purge_targets: List[str] = []
+        if from_addresses:
+            for candidate in from_addresses:
+                if not candidate:
+                    continue
+                text = str(candidate).strip()
+                if not text:
+                    continue
+                _, parsed = parseaddr(text)
+                normalized_addr = (parsed or text).strip().strip("<>").strip().lower()
+                if normalized_addr and normalized_addr not in purge_targets:
+                    purge_targets.append(normalized_addr)
+
+        log_message = f"확인용 메일 발송 전에 스팸함 비우기 실행 · 폴더 {folder}"
+        if purge_targets:
+            log_message = f"{log_message} · 대상 {', '.join(purge_targets)}"
+        self._log_imap_console(log_message, domain=normalized, tag="IMAP-스팸함제거실행")
+        result["targets"] = purge_targets
+
         try:
-            summary = purge_imap_folder(username, password, folder=folder)
+            summary = purge_imap_folder(
+                username,
+                password,
+                folder=folder,
+                from_addresses=purge_targets if purge_targets else None,
+            )
         except Exception as exc:  # pylint: disable=broad-except
             reason_text = f"예외: {exc}"
             self._log_imap_console(
@@ -1929,21 +1970,26 @@ class MailClient:
         deleted_count = _coerce_int(summary.get("deleted_count", summary.get("deleted")))
         remaining_count = _coerce_int(summary.get("remaining_count", summary.get("remaining")))
         elapsed_seconds = _coerce_float(summary.get("elapsed_seconds", summary.get("elapsed")))
+        matched_count = _coerce_int(summary.get("matched_count", summary.get("matched")))
 
         result.update(
             {
                 "success": success,
                 "reason": reason_text,
+                "matched_count": matched_count,
                 "total_count": total_count,
                 "deleted_count": deleted_count,
                 "remaining_count": remaining_count,
                 "elapsed_seconds": elapsed_seconds,
+                "targets": purge_targets,
             }
         )
 
         detail_parts: List[str] = []
         if total_count is not None:
             detail_parts.append(f"총 {total_count}건")
+        if matched_count is not None and purge_targets:
+            detail_parts.append(f"대상 {matched_count}건")
         if deleted_count is not None:
             detail_parts.append(f"삭제 {deleted_count}건")
         if remaining_count is not None:
@@ -3166,6 +3212,20 @@ class MailClient:
             purge_elapsed_seconds: Optional[float] = (
                 _safe_float(purge_context.get("elapsed_seconds")) if purge_attempted else None
             )
+            purge_matched_count: Optional[int] = (
+                _safe_int(purge_context.get("matched_count")) if purge_attempted else None
+            )
+            purge_targets_raw = purge_context.get("targets") if purge_attempted else None
+            if isinstance(purge_targets_raw, (list, tuple, set)):
+                purge_targets_list = [
+                    str(entry).strip()
+                    for entry in purge_targets_raw
+                    if isinstance(entry, str) and str(entry).strip()
+                ]
+            elif isinstance(purge_targets_raw, str):
+                purge_targets_list = [purge_targets_raw.strip()] if purge_targets_raw.strip() else []
+            else:
+                purge_targets_list = []
             purge_folder = str(purge_context.get("folder") or "Junk") if purge_context else "Junk"
 
             if purge_before_check_enabled:
@@ -3180,6 +3240,22 @@ class MailClient:
                 domain=normalized,
                 tag="IMAP-메일확인준비",
             )
+            if (
+                purge_before_check_enabled
+                and purge_attempted
+                and (purge_targets_list or purge_matched_count is not None)
+            ):
+                detail_segments: List[str] = []
+                if purge_targets_list:
+                    detail_segments.append(f"대상 From {', '.join(purge_targets_list)}")
+                if purge_matched_count is not None:
+                    detail_segments.append(f"대상 메일 {purge_matched_count}건")
+                if detail_segments:
+                    self._log_imap_console(
+                        "  ↳ " + " · ".join(detail_segments),
+                        domain=normalized,
+                        tag="IMAP-스팸함제거대상",
+                    )
 
             probe_mail_sent = bool(probe_current and probe_current.success)
             probe_status_line = probe_current.status_line if probe_current else None
@@ -3356,6 +3432,7 @@ class MailClient:
                             domain=normalized,
                             username=username,
                             password=password,
+                            from_addresses=_collect_purge_targets(mail_from, header_from),
                         )
                     else:
                         current_purge_context = None
@@ -3563,6 +3640,18 @@ class MailClient:
             purge_deleted_count = _safe_int(purge_context.get("deleted_count")) if purge_attempted else None
             purge_remaining_count = _safe_int(purge_context.get("remaining_count")) if purge_attempted else None
             purge_elapsed_seconds = _safe_float(purge_context.get("elapsed_seconds")) if purge_attempted else None
+            purge_matched_count = _safe_int(purge_context.get("matched_count")) if purge_attempted else None
+            purge_targets_raw = purge_context.get("targets") if purge_attempted else None
+            if isinstance(purge_targets_raw, (list, tuple, set)):
+                purge_targets_list = [
+                    str(entry).strip()
+                    for entry in purge_targets_raw
+                    if isinstance(entry, str) and str(entry).strip()
+                ]
+            elif isinstance(purge_targets_raw, str):
+                purge_targets_list = [purge_targets_raw.strip()] if purge_targets_raw.strip() else []
+            else:
+                purge_targets_list = []
 
             trigger_stop = bool(
                 failure_action_value in stop_actions
@@ -3606,10 +3695,20 @@ class MailClient:
 
             combined_reason = " · ".join([component for component in reason_components if component])
 
+            manual_check_context = send_type == "manual"
+
             if trigger_stop:
-                should_notify = failure_action_value == "stop_all" or (
-                    failure_action_value == "stop_device" and notify_before_stop
-                )
+                should_notify = False
+                if not manual_check_context:
+                    should_notify = failure_action_value == "stop_all" or (
+                        failure_action_value == "stop_device" and notify_before_stop
+                    )
+                elif manual_check_context:
+                    self._log_imap_console(
+                        "수동 도착 확인 중 실패 → 텔레그램 알림 생략",
+                        domain=normalized,
+                        tag="IMAP-텔레그램생략",
+                    )
                 if should_notify:
                     notice_current = sent_window_count if sent_window_count is not None else self._get_sent_counter(
                         normalized
@@ -3663,9 +3762,11 @@ class MailClient:
                 "purge_success": purge_success if purge_attempted else None,
                 "purge_reason": purge_reason_text if purge_attempted else "",
                 "purge_total_count": purge_total_count if purge_attempted else None,
+                "purge_matched_count": purge_matched_count if purge_attempted else None,
                 "purge_deleted_count": purge_deleted_count if purge_attempted else None,
                 "purge_remaining_count": purge_remaining_count if purge_attempted else None,
                 "purge_elapsed_seconds": purge_elapsed_seconds if purge_attempted else None,
+                "purge_targets": purge_targets_list if purge_attempted else [],
             }
             reroll_success = bool(reroll_applied and status == "success")
             reroll_success_total = self._get_reroll_success_count(normalized)
@@ -6912,6 +7013,7 @@ class MailClient:
         success = bool(summary.get("success"))
         reason = summary.get("reason")
         total_count_raw = summary.get("total_count", summary.get("total"))
+        matched_count_raw = summary.get("matched_count", summary.get("matched"))
         deleted_count_raw = summary.get("deleted_count", summary.get("deleted"))
         remaining_count_raw = summary.get("remaining_count", summary.get("remaining"))
         elapsed_raw = summary.get("elapsed_seconds", summary.get("elapsed"))
@@ -6935,6 +7037,7 @@ class MailClient:
                 return None
 
         total_count = _coerce_int(total_count_raw)
+        matched_count = _coerce_int(matched_count_raw)
         deleted_count = _coerce_int(deleted_count_raw)
         remaining_count = _coerce_int(remaining_count_raw)
         elapsed_seconds = _coerce_float(elapsed_raw)
@@ -6943,6 +7046,7 @@ class MailClient:
             "스팸함 비우기 결과 · "
             f"성공 {success} · "
             f"총 {total_count if total_count is not None else '-'}건 · "
+            f"대상 {matched_count if matched_count is not None else '-'}건 · "
             f"삭제 {deleted_count if deleted_count is not None else '-'}건 · "
             f"남은 {remaining_count if remaining_count is not None else '-'}건",
             domain=normalized,
@@ -6957,6 +7061,8 @@ class MailClient:
         detail_parts: List[str] = []
         if total_count is not None:
             detail_parts.append(f"총 {total_count}건")
+        if matched_count is not None:
+            detail_parts.append(f"대상 {matched_count}건")
         if deleted_count is not None:
             detail_parts.append(f"삭제 {deleted_count}건")
         if remaining_count is not None:
@@ -6971,6 +7077,7 @@ class MailClient:
             "folder": folder,
             "success": success,
             "total_count": total_count,
+            "matched_count": matched_count,
             "deleted_count": deleted_count,
             "remaining_count": remaining_count,
             "elapsed_seconds": elapsed_seconds,
