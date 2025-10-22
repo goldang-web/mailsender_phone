@@ -5343,10 +5343,28 @@ def clear_device_logs(device_id: str, payload: ClearLogsRequest) -> Dict[str, An
                 """,
                 (device_id, normalized_domain),
             )
+            conn.execute(
+                """
+                UPDATE device_configs
+                SET imap_reroll_success_count=0,
+                    updated_at=?
+                WHERE device_id=? AND domain=?
+                """,
+                (now_ts(), device_id, normalized_domain),
+            )
         else:
             cursor = conn.execute(
                 "DELETE FROM send_logs WHERE device_id=?",
                 (device_id,),
+            )
+            conn.execute(
+                """
+                UPDATE device_configs
+                SET imap_reroll_success_count=0,
+                    updated_at=?
+                WHERE device_id=?
+                """,
+                (now_ts(), device_id),
             )
         deleted = cursor.rowcount if cursor.rowcount is not None else 0
         job_payload = {"domains": [normalized_domain]} if normalized_domain else {"domains": []}
