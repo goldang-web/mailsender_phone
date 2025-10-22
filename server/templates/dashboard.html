@@ -1550,6 +1550,19 @@ button.card-delete-btn:disabled {
 .inline-checkbox.disabled {
   color: var(--color-muted);
 }
+.checkbox-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.checkbox-group .checkbox-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+}
+.checkbox-group .inline-checkbox {
+  font-weight: 500;
+}
 .input-with-toggle input {
   flex: 1 1 auto;
 }
@@ -2533,14 +2546,19 @@ button:not(:disabled):hover {
             </label>
           </div>
         </div>
-        <label class="inline-checkbox field" id="imapPurgeBeforeCheckLabel" title="IMAP 확인을 시작하기 전에 네이버 스팸함을 비우고 진행합니다.">
-          <input type="checkbox" id="imapPurgeBeforeCheck">
-          <span>확인용 메일 발송 전에 스팸함 비우기</span>
-        </label>
-        <label class="inline-checkbox field" id="imapRerollOnRetryLabel" title="IMAP 재확인 재시도 시 헤더·치환값을 다시 계산해 확인 메일을 발송합니다.">
-          <input type="checkbox" id="imapRerollOnRetry">
-          <span>재시도 시 헤더 다시 뽑기</span>
-        </label>
+        <div class="field checkbox-group">
+          <span>추가 확인 옵션</span>
+          <div class="checkbox-stack">
+            <label class="inline-checkbox" id="imapPurgeBeforeCheckLabel" title="IMAP 확인을 시작하기 전에 네이버 스팸함을 비우고 진행합니다.">
+              <input type="checkbox" id="imapPurgeBeforeCheck">
+              <span>확인용 메일 발송 전에 스팸함 비우기</span>
+            </label>
+            <label class="inline-checkbox" id="imapRerollOnRetryLabel" title="IMAP 재확인 재시도 시 헤더·치환값을 다시 계산해 확인 메일을 발송합니다.">
+              <input type="checkbox" id="imapRerollOnRetry">
+              <span>재시도 시 헤더 다시 뽑기</span>
+            </label>
+          </div>
+        </div>
         <p class="field-hint">단일 발송 확인 대기는 확인을 시작하기 전 지연을 의미하며, Sent 누적 간격은 발송 성공 건수가 기준에 도달할 때마다 IMAP 확인을 실행합니다. 허용 지연은 발송과 수신 사이의 최대 허용 간격이며, 실패 시 대응에 따라 중지 범위가 결정됩니다.</p>
       </form>
     </div>
@@ -9484,7 +9502,6 @@ function openImapModal(card, device, domain, options = {}) {
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
   const rerollCheckbox = document.getElementById("imapRerollOnRetry");
-  const rerollCheckbox = document.getElementById("imapRerollOnRetry");
   const passwordToggle = document.querySelector('[data-action="imap-password-toggle"]');
 
   usernameInput.value = config.imap_username || "";
@@ -9607,6 +9624,7 @@ async function submitImapModal() {
   const failureActionSelect = document.getElementById("imapFailureAction");
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
+  const rerollCheckbox = document.getElementById("imapRerollOnRetry");
   const allowedLatencyValue = clampNumber(
     allowedLatencyInput.value,
     IMAP_ALLOWED_MIN,
