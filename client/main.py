@@ -77,6 +77,9 @@ RECIPIENT_LIMIT_MARKERS = (
     "수신자 수 초과",
 )
 
+IMAP_LOG_HEADER_SEPARATOR = "****************************"
+IMAP_LOG_FOOTER_SEPARATOR = "***************************"
+
 
 def utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -2567,17 +2570,23 @@ class MailClient:
             smtp_context_local = dict(base_context)
             mail_from_current = mail_from
             if substitution_payload:
-                base_config = copy.deepcopy(config_snapshot) if config_snapshot else {
-                    "smtp_host": smtp_context_local.get("smtp_host"),
-                    "smtp_port": smtp_context_local.get("smtp_port"),
-                    "helo": smtp_context_local.get("helo"),
-                    "mail_from": smtp_context_local.get("mail_from") or mail_from,
-                    "header": smtp_context_local.get("header"),
-                }
-                refreshed_config, missing_tokens = self._render_all_headers_unique_config(
-                    base_config,
-                    substitution_payload,
-                )
+                missing_tokens: Set[str] = set()
+                if config_snapshot:
+                    refreshed_config = copy.deepcopy(config_snapshot)
+                else:
+                    base_config = {
+                        "smtp_host": smtp_context_local.get("smtp_host"),
+                        "smtp_port": smtp_context_local.get("smtp_port"),
+                        "helo": smtp_context_local.get("helo"),
+                        "mail_from": smtp_context_local.get("mail_from") or mail_from,
+                        "header": smtp_context_local.get("header"),
+                    }
+                    refreshed_config, missing_tokens = self._render_all_headers_unique_config(
+                        base_config,
+                        substitution_payload,
+                    )
+                    config_snapshot = copy.deepcopy(refreshed_config)
+                    base_context["config_snapshot"] = copy.deepcopy(refreshed_config)
                 if missing_tokens:
                     self._log_substitution_missing(normalized, "", missing_tokens, "imap_probe")
                 if refreshed_config.get("smtp_host") is not None:
@@ -5892,6 +5901,7 @@ class MailClient:
                     else:
                         next_line = "다음 배수 없음"
                     self._emit_imap_section("IMAP 다음 배수", [next_line], domain=normalized)
+                    print(IMAP_LOG_FOOTER_SEPARATOR, flush=True)
                 def process_future(future: Future, group: DispatchGroup) -> None:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
                     nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
@@ -6333,6 +6343,7 @@ class MailClient:
     ) -> None:
         if domain and not self._imap_enabled(domain):
             return
+        print(IMAP_LOG_HEADER_SEPARATOR, flush=True)
         print(f"[{tag}] {message}", flush=True)
 
     def _log_imap_protection(self, message: str) -> None:
@@ -6351,6 +6362,7 @@ class MailClient:
         for line in lines:
             if not line:
                 continue
+            print(IMAP_LOG_HEADER_SEPARATOR, flush=True)
             print(f"[{label}] {line}", flush=True)
 
     def handle_imap_test(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
