@@ -3026,16 +3026,42 @@ class MailClient:
                     header_text_candidate = str(raw_header_value)
                 else:
                     header_text_candidate = ""
+                snapshot_source = config_snapshot_base if isinstance(config_snapshot_base, dict) else {}
+                message_id_auto_candidate = refreshed_config.get("message_id_auto")
+                if message_id_auto_candidate is None:
+                    message_id_auto_candidate = snapshot_source.get("message_id_auto")
+                message_id_auto_flag = _normalize_bool_flag(message_id_auto_candidate, default=True)
+                message_id_pattern_value = (
+                    refreshed_config.get("message_id_pattern")
+                    or snapshot_source.get("message_id_pattern")
+                    or smtp_context_base.get("message_id_pattern")
+                )
+                if message_id_auto_flag:
+                    header_text_candidate = _ensure_message_id_header(
+                        header_text_candidate,
+                        auto_enabled=True,
+                        pattern_value=message_id_pattern_value,
+                        mail_from=new_mail_from,
+                        helo=refreshed_config.get("helo") or smtp_context_base.get("helo"),
+                    )
                 smtp_context["smtp_host"] = refreshed_config.get("smtp_host", smtp_context_base.get("smtp_host"))
                 smtp_context["smtp_port"] = refreshed_config.get("smtp_port", smtp_context_base.get("smtp_port"))
                 smtp_context["helo"] = refreshed_config.get("helo", smtp_context_base.get("helo"))
                 smtp_context["mail_from"] = new_mail_from
                 smtp_context["header"] = header_text_candidate
+                if message_id_auto_candidate is not None:
+                    smtp_context["message_id_auto"] = message_id_auto_flag
+                if message_id_pattern_value is not None:
+                    smtp_context["message_id_pattern"] = message_id_pattern_value
                 if substitution_payload_base:
                     smtp_context["substitution"] = copy.deepcopy(substitution_payload_base)
                 snapshot_clone = copy.deepcopy(refreshed_config)
                 snapshot_clone["mail_from"] = new_mail_from
                 snapshot_clone["header"] = header_text_candidate
+                if message_id_auto_candidate is not None:
+                    snapshot_clone["message_id_auto"] = message_id_auto_flag
+                if message_id_pattern_value is not None:
+                    snapshot_clone["message_id_pattern"] = message_id_pattern_value
                 smtp_context["config_snapshot"] = snapshot_clone
                 mail_from = new_mail_from
                 new_header_from = self._extract_header_from(header_text_candidate, mail_from) if header_text_candidate else None
@@ -4794,7 +4820,21 @@ class MailClient:
                     "smtp_port": config.get("smtp_port"),
                     "helo": config.get("helo"),
                     "header": config.get("header"),
+                    "mail_from": mail_from_value,
                 }
+                config_snapshot_payload = {
+                    "smtp_host": config.get("smtp_host"),
+                    "smtp_port": config.get("smtp_port"),
+                    "helo": config.get("helo"),
+                    "mail_from": mail_from_value,
+                    "header": config.get("header"),
+                    "message_id_auto": config.get("message_id_auto"),
+                    "message_id_pattern": config.get("message_id_pattern"),
+                    "all_headers_unique": config.get("all_headers_unique"),
+                }
+                smtp_context_payload["config_snapshot"] = config_snapshot_payload
+                if substitution_payload:
+                    smtp_context_payload["substitution"] = copy.deepcopy(substitution_payload)
                 self._execute_imap_guard_flow(
                     domain=normalized_domain,
                     job_id=job_id,
@@ -5571,7 +5611,13 @@ class MailClient:
                     message_id_snapshot = _extract_message_id_from_text(header_value) if header_value else None
                     substitution_clone: Optional[Dict[str, Any]] = None
                     config_snapshot_clone: Optional[Dict[str, Any]] = None
-                    if all_headers_unique and substitution_payload:
+                    reroll_on_retry_enabled_local = sanitize_bool_flag(
+                        settings_local.get("reroll_on_retry")
+                    )
+                    include_substitution = bool(substitution_payload) and (
+                        all_headers_unique or reroll_on_retry_enabled_local
+                    )
+                    if include_substitution:
                         substitution_clone = copy.deepcopy(substitution_payload)
                         if session_config_local:
                             config_snapshot_clone = copy.deepcopy(session_config_local)
@@ -6676,8 +6722,10 @@ class MailClient:
         if not self._imap_enabled(normalized):
             message = "IMAP 확인이 비활성화되어 있어 수동 도착 확인을 실행하지 않습니다."
             return JobResult(job_id=job_id, status="failed", message=message, error=message)
+        settings_snapshot = self._imap_settings_for_domain(normalized)
+        reroll_on_retry_enabled = sanitize_bool_flag(settings_snapshot.get("reroll_on_retry"))
         all_headers_unique_flag = _normalize_bool_flag(config_payload.get("all_headers_unique"), default=False)
-        if substitution_payload and all_headers_unique_flag:
+        if substitution_payload and (all_headers_unique_flag or reroll_on_retry_enabled):
             config_payload, missing_tokens = self._render_all_headers_unique_config(config_payload, substitution_payload)
             self._log_substitution_missing(normalized, job_id, missing_tokens, "imap_manual_check")
         mail_from_value = self._effective_mail_from(normalized, config_payload)
@@ -6713,10 +6761,9 @@ class MailClient:
             "header": header_text,
             "mail_from": mail_from_value,
         }
-        if substitution_payload and all_headers_unique_flag:
+        if substitution_payload and (all_headers_unique_flag or reroll_on_retry_enabled):
             smtp_context["substitution"] = copy.deepcopy(substitution_payload)
             smtp_context["config_snapshot"] = copy.deepcopy(config_payload)
-        settings_snapshot = self._imap_settings_for_domain(normalized)
         single_delay_seconds = sanitize_imap_delay(
             settings_snapshot.get("single_delay_seconds"),
             default=IMAP_DEFAULT_SINGLE_DELAY_SECONDS,

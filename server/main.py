@@ -4667,6 +4667,9 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
             )
         elif not isinstance(raw_header_value, str):
             resolved_config["header"] = str(raw_header_value or "")
+        reroll_on_retry_enabled = sanitize_imap_reroll_on_retry(
+            config_data.get("imap_reroll_on_retry")
+        )
         minimal_config = {
             "smtp_host": resolved_config.get("smtp_host"),
             "smtp_port": resolved_config.get("smtp_port"),
@@ -4676,7 +4679,7 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
             "all_headers_unique": bool(resolved_config.get("all_headers_unique")),
         }
         substitution_payload: Optional[Dict[str, Any]] = None
-        if resolved_config.get("all_headers_unique"):
+        if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
             substitution_payload = {
                 "template": template_config,
                 "rules": substitution_rules,
@@ -4905,14 +4908,20 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                 )
             elif not isinstance(raw_header_value, str):
                 resolved_config["header"] = str(raw_header_value or "")
+            reroll_on_retry_enabled = sanitize_imap_reroll_on_retry(
+                base_config.get("imap_reroll_on_retry")
+            )
             substitution_payload: Optional[Dict[str, Any]] = None
-            if resolved_config.get("all_headers_unique"):
+            if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
                 substitution_payload = {
                     "template": template_config,
                     "rules": substitution_rules,
                 }
+            payload_map: Dict[str, Any] = {"config": resolved_config}
+            if substitution_payload:
+                payload_map["substitution"] = substitution_payload
             job_payload = attach_telegram_credentials(
-                {"config": resolved_config, **({"substitution": substitution_payload} if substitution_payload else {})},
+                payload_map,
                 bot_token=bot_token,
                 chat_id=chat_id,
             )
@@ -4988,12 +4997,15 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             resolved_config["header"] = str(raw_header_value or "")
         substituted_rcpt = resolved_rcpt or rcpt_to
         force_imap_check = bool(payload.force_imap_check)
+        reroll_on_retry_enabled = sanitize_imap_reroll_on_retry(
+            base_config.get("imap_reroll_on_retry")
+        )
         base_payload = {
             "rcpt_to": substituted_rcpt,
             "config": resolved_config,
             "force_imap_check": force_imap_check,
         }
-        if resolved_config.get("all_headers_unique"):
+        if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
             base_payload["substitution"] = {
                 "template": template_config,
                 "rules": substitution_rules,
@@ -5055,8 +5067,11 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             )
         elif not isinstance(raw_header_value, str):
             resolved_config["header"] = str(raw_header_value or "")
+        reroll_on_retry_enabled = sanitize_imap_reroll_on_retry(
+            base_config.get("imap_reroll_on_retry")
+        )
         payload_map: Dict[str, Any] = {"config": resolved_config}
-        if resolved_config.get("all_headers_unique"):
+        if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
             payload_map["substitution"] = {
                 "template": template_config,
                 "rules": substitution_rules,
