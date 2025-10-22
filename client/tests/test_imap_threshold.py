@@ -1,4 +1,5 @@
 import copy
+import random
 import sys
 from concurrent.futures import Future
 from datetime import datetime, timezone
@@ -544,6 +545,178 @@ def test_submit_imap_check_reroll_keeps_template_and_refreshes_snapshot(
     assert client_main._extract_message_id_from_text(last_snapshot_header) == report["message_id"]
     config_snapshot_header = report.get("smtp_context", {}).get("config_snapshot", {}).get("header")
     assert config_snapshot_header and "Value-1" in config_snapshot_header
+
+
+def test_submit_imap_check_reroll_reencodes_rule_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _build_client()
+    settings = client._imap_settings_for_domain("naver")
+    settings.update(
+        {
+            "reroll_on_retry": True,
+            "enabled": True,
+            "recheck_attempts": 3,
+        }
+    )
+    client._substitution_lock_active["naver"] = False
+    client._substitution_lock_modes["naver"] = "auto"
+
+    class IncrementingRandom(random.Random):
+        counter = 0
+
+        def __init__(self):  # type: ignore[override]
+            super().__init__(IncrementingRandom.counter)
+            IncrementingRandom.counter += 1
+
+    monkeypatch.setattr(client_main.random, "SystemRandom", IncrementingRandom)
+
+    helo_value = "helo.example.com"
+    initial_mail_from = "initial@example.com"
+    initial_header = client_main._ensure_message_id_header(
+        "From: Initial Sender <initial@example.com>\nSubject: 재시도 템플릿\n",
+        auto_enabled=True,
+        pattern_value=None,
+        mail_from=initial_mail_from,
+        helo=helo_value,
+    )
+
+    config_snapshot = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": helo_value,
+        "mail_from": initial_mail_from,
+        "header": initial_header,
+        "message_id_auto": True,
+        "message_id_pattern": None,
+    }
+    substitution_template = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": helo_value,
+        "mail_from": initial_mail_from,
+        "header": (
+            "From: Token Sender <initial@example.com>\n"
+            "Subject: ${TITLE}\n"
+        ),
+        "message_id_auto": True,
+        "message_id_pattern": None,
+    }
+    substitution_rules = [
+        {
+            "key": "TITLE",
+            "source": "제목-${랜덤:영소:4}",
+            "encoding": "mime_b64_utf8",
+            "value": "=?UTF-8?B?7IS47JqUIOydtA==?=",
+            "mode": "static",
+            "values": [],
+            "description": "",
+        }
+    ]
+    substitution_payload = {
+        "template": copy.deepcopy(substitution_template),
+        "rules": copy.deepcopy(substitution_rules),
+    }
+    smtp_context = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": helo_value,
+        "mail_from": initial_mail_from,
+        "header": initial_header,
+        "config_snapshot": copy.deepcopy(config_snapshot),
+        "substitution": copy.deepcopy(substitution_payload),
+    }
+
+    captured_values: list[str] = []
+
+    def fake_render(base_config, payload):  # type: ignore[override]
+        rules = payload.get("rules") or []
+        if rules:
+            captured_values.append(str(rules[0].get("value") or ""))
+        refreshed = dict(base_config)
+        header_subject = payload["template"]["header"].replace(
+            "${TITLE}",
+            rules[0]["value"] if rules else "fallback",
+        )
+        refreshed["header"] = client_main._ensure_message_id_header(
+            header_subject,
+            auto_enabled=True,
+            pattern_value=None,
+            mail_from=refreshed.get("mail_from"),
+            helo=refreshed.get("helo"),
+        )
+        return refreshed, set()
+
+    monkeypatch.setattr(client, "_render_all_headers_unique_config", fake_render)
+
+    verify_calls = []
+
+    def fake_verify_delivery(*, message_id=None, **kwargs):
+        verify_calls.append(message_id)
+        if len(verify_calls) < 3:
+            return {
+                "status": "failure",
+                "reason": "latency exceeded",
+                "latency": None,
+                "received_at": None,
+                "sent_display": "sent",
+                "received_display": "-",
+            }
+        return {
+            "status": "success",
+            "latency": 0.5,
+            "received_at": datetime.now(timezone.utc).isoformat(),
+            "reason": None,
+            "sent_display": "sent",
+            "received_display": "received",
+        }
+
+    monkeypatch.setattr(client_main, "verify_delivery", fake_verify_delivery)
+
+    def fake_run_sent_probe_mail(*, smtp_context, **kwargs):  # type: ignore[override]
+        header_text = smtp_context.get("header") or ""
+        message_id = client_main._extract_message_id_from_text(header_text) or "FALLBACK-ID"
+        return client_main.SentProbeResult(
+            success=True,
+            sent_at=datetime.now(timezone.utc),
+            status_line="250 2.0.0 OK",
+            detail_line=None,
+            message_id=message_id,
+            mail_from=smtp_context.get("mail_from"),
+            header_from=f"Tester <{smtp_context.get('mail_from')}>",
+            rcpt_to="imap-user@naver.com",
+        )
+
+    monkeypatch.setattr(client, "_run_sent_probe_mail", fake_run_sent_probe_mail)
+
+    probe = _probe_result("PROBE-ID")
+    future = client._submit_imap_check(
+        domain="naver",
+        job_id="job-reencode",
+        send_type="sent-threshold",
+        mail_from=initial_mail_from,
+        header_from="Initial Sender <initial@example.com>",
+        sent_at=datetime.now(timezone.utc),
+        has_anchor=False,
+        delay_before_check=0,
+        allowed_delay=15,
+        context_reason="threshold reached (1)",
+        force=False,
+        sent_window_count=1,
+        sent_threshold=1,
+        smtp_context=smtp_context,
+        probe_result=probe,
+        precheck_purge=None,
+        message_id_snapshot=None,
+        recheck_attempts=3,
+    )
+
+    report = future.result()
+    assert report["status"] == "success"
+    assert report["reroll_applied"] is True
+    assert len(captured_values) == 2, "2차 재시도까지 치환 값이 재계산되어야 합니다."
+    first_value, second_value = captured_values
+    assert first_value.startswith("=?UTF-8?B?")
+    assert second_value.startswith("=?UTF-8?B?")
+    assert first_value != second_value, "각 재시도마다 인코딩된 값이 달라져야 합니다."
 
 
 def test_submit_imap_check_skips_reroll_when_locked(monkeypatch: pytest.MonkeyPatch) -> None:

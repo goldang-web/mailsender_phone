@@ -40,6 +40,7 @@ from lib.naver_imap import (
     purge_imap_folder,
 )
 from lib import substitution as substitution_lib
+from lib.encoding_utils import encode_substitution_value
 
 
 APP_VERSION = "0.0.87"
@@ -2165,6 +2166,64 @@ class MailClient:
             merged[key] = value
         return merged, missing
 
+    def _recalculate_substitution_rules_for_reroll(
+        self,
+        *,
+        domain: str,
+        job_id: Optional[str],
+        substitution_payload: Dict[str, Any],
+        rng: Optional[random.Random] = None,
+    ) -> Tuple[int, Set[str]]:
+        if not isinstance(substitution_payload, dict):
+            return 0, set()
+        rules = substitution_payload.get("rules")
+        if not isinstance(rules, list) or not rules:
+            return 0, set()
+        generator = rng or random.SystemRandom()
+        context = substitution_lib.build_substitution_context(rules)
+        if not isinstance(context, dict):
+            context = {}
+        static_map = context.get("static")
+        if not isinstance(static_map, dict):
+            static_map = {}
+            context["static"] = static_map
+        recalculated = 0
+        missing_tokens: Set[str] = set()
+        for entry in rules:
+            if not isinstance(entry, dict):
+                continue
+            source = entry.get("source")
+            encoding = entry.get("encoding")
+            if source is None or encoding is None:
+                continue
+            key_name = str(entry.get("key") or "").strip()
+            substituted, missing = substitution_lib.substitute_tokens(
+                str(source),
+                rules,
+                random_generator=generator,
+                context=context,
+            )
+            if missing:
+                missing_tokens.update(missing)
+            encoded_value = encode_substitution_value(
+                substituted,
+                encoding,
+                random_choice=generator.choice if hasattr(generator, "choice") else None,
+                random_generator=generator,
+            )
+            entry["value"] = encoded_value
+            if key_name:
+                static_map[key_name] = encoded_value
+            recalculated += 1
+        if missing_tokens:
+            self._log_substitution_missing(
+                domain,
+                job_id or "",
+                missing_tokens,
+                "imap_retry_reencode",
+            )
+        return recalculated, missing_tokens
+
     def _log_substitution_missing(
         self,
         domain: str,
@@ -3093,7 +3152,7 @@ class MailClient:
                 if not reroll_allowed:
                     if reroll_on_retry_enabled:
                         self._log_imap_console(
-                            f"IMAP 재시도 {sequence_index}차 · 재롤 생략 (고정 모드 활성)",
+                            f"IMAP 재시도 {sequence_index}차 · 재롤/인코딩 재계산 생략 (고정 모드)",
                             domain=normalized,
                             tag="IMAP-메일헤더재롤",
                         )
@@ -3110,6 +3169,23 @@ class MailClient:
                         tag="IMAP-메일헤더재롤",
                     )
                     return False
+                reencoded_count, _ = self._recalculate_substitution_rules_for_reroll(
+                    domain=normalized,
+                    job_id=job_id,
+                    substitution_payload=substitution_payload,
+                )
+                if reencoded_count > 0:
+                    self._log_imap_console(
+                        f"IMAP 재시도 {sequence_index}차 · 치환 인코딩 재계산 {reencoded_count}개",
+                        domain=normalized,
+                        tag="IMAP-메일헤더재롤",
+                    )
+                else:
+                    self._log_imap_console(
+                        f"IMAP 재시도 {sequence_index}차 · 치환 인코딩 재계산 대상 없음",
+                        domain=normalized,
+                        tag="IMAP-메일헤더재롤",
+                    )
                 base_config = (
                     copy.deepcopy(config_snapshot_base)
                     if isinstance(config_snapshot_base, dict)
