@@ -78,7 +78,7 @@ RECIPIENT_LIMIT_MARKERS = (
 )
 
 IMAP_LOG_HEADER_SEPARATOR = "****************************"
-IMAP_LOG_FOOTER_SEPARATOR = "***************************"
+IMAP_LOG_FOOTER_SEPARATOR = "****************************"
 
 
 def utc_now() -> datetime:
@@ -2229,8 +2229,8 @@ class MailClient:
                 config["message_id_pattern"] = context_clone.get("message_id_pattern")
             if snapshot_clone:
                 config["config_snapshot"] = copy.deepcopy(snapshot_clone)
-        if substitution_payload and isinstance(substitution_payload.get("template"), dict) and snapshot_clone:
-            substitution_payload["template"] = copy.deepcopy(snapshot_clone)
+        if isinstance(substitution_payload, dict) and snapshot_clone:
+            substitution_payload["last_snapshot"] = copy.deepcopy(snapshot_clone)
         header_from = report.get("header_from")
         if not header_from and header_text:
             header_from = self._extract_header_from(header_text, mail_from_value)
@@ -3175,7 +3175,7 @@ class MailClient:
                 if message_id_pattern_value is not None:
                     smtp_context["message_id_pattern"] = message_id_pattern_value
                 if substitution_payload_base:
-                    smtp_context["substitution"] = copy.deepcopy(substitution_payload_base)
+                    substitution_clone_payload = copy.deepcopy(substitution_payload_base)
                 smtp_context["reroll_on_retry"] = reroll_on_retry_enabled
                 snapshot_clone = copy.deepcopy(refreshed_config)
                 snapshot_clone["mail_from"] = new_mail_from
@@ -3184,6 +3184,11 @@ class MailClient:
                     snapshot_clone["message_id_auto"] = message_id_auto_flag
                 if message_id_pattern_value is not None:
                     snapshot_clone["message_id_pattern"] = message_id_pattern_value
+                if substitution_payload_base:
+                    substitution_clone_payload["last_snapshot"] = copy.deepcopy(snapshot_clone)
+                    smtp_context["substitution"] = substitution_clone_payload
+                else:
+                    smtp_context.pop("substitution", None)
                 smtp_context["config_snapshot"] = snapshot_clone
                 mail_from = new_mail_from
                 new_header_from = self._extract_header_from(header_text_candidate, mail_from) if header_text_candidate else None
