@@ -1369,6 +1369,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_recheck_attempts INTEGER NOT NULL DEFAULT {IMAP_RECHECK_ATTEMPTS_DEFAULT},
                 imap_sent_threshold INTEGER NOT NULL DEFAULT 90,
                 imap_sent_since_last_check INTEGER NOT NULL DEFAULT 0,
+                imap_reroll_success_count INTEGER NOT NULL DEFAULT 0,
                 imap_sent_last_reset_at TEXT,
                 imap_last_status TEXT DEFAULT '',
                 imap_last_checked_at TEXT,
@@ -1406,6 +1407,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_recheck_attempts,
                 imap_sent_threshold,
                 imap_sent_since_last_check,
+                imap_reroll_success_count,
                 imap_sent_last_reset_at,
                 imap_last_status, imap_last_checked_at, imap_last_latency,
                 imap_last_error, imap_last_mail_from, imap_last_sent_at,
@@ -1431,6 +1433,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 {recheck_default} AS imap_recheck_attempts,
                 {threshold_default} AS imap_sent_threshold,
                 0 AS imap_sent_since_last_check,
+                0 AS imap_reroll_success_count,
                 NULL AS imap_sent_last_reset_at,
                 imap_last_status, imap_last_checked_at, imap_last_latency,
                 imap_last_error, imap_last_mail_from, imap_last_sent_at,
@@ -1688,6 +1691,10 @@ def _init_db() -> None:
         if "imap_sent_since_last_check" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_sent_since_last_check INTEGER NOT NULL DEFAULT 0"
+            )
+        if "imap_reroll_success_count" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_reroll_success_count INTEGER NOT NULL DEFAULT 0"
             )
         if "imap_sent_last_reset_at" not in config_columns:
             conn.execute(
@@ -2000,6 +2007,11 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     except (TypeError, ValueError):
         sent_since_last_check = 0
     sent_since_last_check = max(0, sent_since_last_check)
+    try:
+        reroll_success_count = int(row.get("imap_reroll_success_count") or 0)
+    except (TypeError, ValueError):
+        reroll_success_count = 0
+    reroll_success_count = max(0, reroll_success_count)
     imap_sent_last_reset = row.get("imap_sent_last_reset_at")
     imap_failure_action = sanitize_imap_failure_action(row.get("imap_failure_action"))
     imap_notify_before_stop_all = sanitize_imap_notify_before_stop_all(
@@ -2093,6 +2105,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "imap_recheck_attempts": imap_recheck_attempts,
         "imap_sent_threshold": imap_sent_threshold,
         "imap_sent_since_last_check": sent_since_last_check,
+        "imap_reroll_success_count": reroll_success_count,
         "imap_sent_last_reset_at": imap_sent_last_reset,
         "imap_delay_seconds": imap_allowed_latency,
         "imap_last_status": imap_status,
@@ -3308,6 +3321,7 @@ class ImapReportPayload(BaseModel):
     purge_deleted_count: Optional[int] = None
     purge_remaining_count: Optional[int] = None
     purge_elapsed_seconds: Optional[float] = None
+    reroll_success_count: Optional[int] = None
 
 
 class HeartbeatRequest(BaseModel):
@@ -5767,6 +5781,19 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     sent_window_count = max(0, int(sent_window_raw))
                 except (TypeError, ValueError):
                     sent_window_count = None
+            try:
+                existing_reroll_success = int(config_snapshot.get("imap_reroll_success_count") or 0)
+            except (TypeError, ValueError):
+                existing_reroll_success = 0
+            existing_reroll_success = max(0, existing_reroll_success)
+            reroll_success_raw = getattr(report, "reroll_success_count", None)
+            if reroll_success_raw is None:
+                reroll_success_total = existing_reroll_success
+            else:
+                try:
+                    reroll_success_total = max(0, int(reroll_success_raw))
+                except (TypeError, ValueError):
+                    reroll_success_total = existing_reroll_success
             stored_threshold = sanitize_imap_sent_threshold(
                 config_snapshot.get("imap_sent_threshold"),
                 default=DEFAULT_DOMAIN_CONFIG.get("imap_sent_threshold"),
@@ -5896,6 +5923,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     imap_allowed_latency_seconds=?,
                     imap_sent_threshold=?,
                     imap_sent_since_last_check=?,
+                    imap_reroll_success_count=?,
                     imap_sent_last_reset_at=?,
                     updated_at=?
                 WHERE device_id=? AND domain=?
@@ -5912,6 +5940,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     allowed_storage_value,
                     new_threshold_value,
                     new_sent_since,
+                    reroll_success_total,
                     sent_reset_at_value,
                     now,
                     device_id,

@@ -1,6 +1,9 @@
 import sys
 import types
+from datetime import datetime, timezone
 from pathlib import Path
+
+import pytest
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -93,3 +96,50 @@ def test_manual_check_prefers_payload_message_id():
     client.handle_imap_manual_check("naver", payload, "job-2")
 
     assert captured["message_id"] == "PAYLOAD-ID"
+
+
+def test_manual_check_forces_single_recheck(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _build_client()
+    settings = client._imap_settings_for_domain("naver")
+    settings["recheck_attempts"] = 3
+    settings["purge_before_check"] = False
+
+    probe = client_main.SentProbeResult(
+        success=True,
+        sent_at=datetime.now(timezone.utc),
+        status_line="250 2.0.0 OK",
+        detail_line=None,
+        message_id="PROBE-ID",
+        mail_from="test@example.com",
+        header_from="Tester <test@example.com>",
+        rcpt_to="imap-user@naver.com",
+    )
+
+    monkeypatch.setattr(client, "_run_sent_probe_mail", lambda **kwargs: probe)
+
+    captured = {}
+
+    def fake_submit(**kwargs):
+        captured["recheck_attempts"] = kwargs.get("recheck_attempts")
+        return None
+
+    monkeypatch.setattr(client, "_submit_imap_check", fake_submit)
+
+    client._execute_imap_guard_flow(
+        domain="naver",
+        job_id="job-manual",
+        send_type="manual",
+        mail_from="test@example.com",
+        message_id="PROBE-ID",
+        header_from="Tester <test@example.com>",
+        has_anchor=False,
+        context_reason="사용자 수동 도착 확인",
+        delay_before_check=None,
+        allowed_delay=None,
+        smtp_context={"mail_from": "test@example.com"},
+        force=True,
+        counter_mode="manual",
+        report_probe_failure=False,
+    )
+
+    assert captured.get("recheck_attempts") == 1

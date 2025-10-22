@@ -885,6 +885,11 @@ class MailClient:
             except (TypeError, ValueError):
                 last_threshold_multiple = 0
             last_threshold_multiple = max(0, last_threshold_multiple)
+            try:
+                reroll_success_count = int(entry.get("reroll_success_count") or 0)
+            except (TypeError, ValueError):
+                reroll_success_count = 0
+            reroll_success_count = max(0, reroll_success_count)
             self.imap_settings[domain] = {
                 "enabled": bool(entry.get("enabled")),
                 "username": normalize_imap_string(entry.get("username")),
@@ -899,6 +904,7 @@ class MailClient:
                 "sent_since_last_check": sent_since_last_check,
                 "sent_last_reset_at": entry.get("sent_last_reset_at"),
                 "last_threshold_multiple": last_threshold_multiple,
+                "reroll_success_count": reroll_success_count,
             }
         self._substitution_lock_modes: Dict[str, str] = {domain: "auto" for domain in DOMAINS}
         self._substitution_lock_active: Dict[str, bool] = {domain: False for domain in DOMAINS}
@@ -919,6 +925,15 @@ class MailClient:
                 )
             except (TypeError, ValueError):
                 self._imap_threshold_multiples[domain] = 0
+        self._imap_reroll_success_counts: Dict[str, int] = {}
+        for domain in DOMAINS:
+            try:
+                self._imap_reroll_success_counts[domain] = max(
+                    0,
+                    int(self.imap_settings.get(domain, {}).get("reroll_success_count") or 0),
+                )
+            except (TypeError, ValueError):
+                self._imap_reroll_success_counts[domain] = 0
         self._imap_settings_dirty: Set[str] = set()
         self._schedule_events: Dict[str, Dict[str, object]] = {}
         self.session = self._create_session()
@@ -1376,6 +1391,11 @@ class MailClient:
             except (TypeError, ValueError):
                 last_multiple = 0
             last_multiple = max(0, last_multiple)
+            try:
+                reroll_success_count = int(settings.get("reroll_success_count") or 0)
+            except (TypeError, ValueError):
+                reroll_success_count = 0
+            reroll_success_count = max(0, reroll_success_count)
             serialized[domain] = {
                 "enabled": bool(settings.get("enabled")),
                 "username": normalize_imap_string(settings.get("username")),
@@ -1397,6 +1417,7 @@ class MailClient:
                 "sent_since_last_check": sent_since,
                 "sent_last_reset_at": settings.get("sent_last_reset_at"),
                 "last_threshold_multiple": last_multiple,
+                "reroll_success_count": reroll_success_count,
             }
         return serialized
 
@@ -1729,6 +1750,8 @@ class MailClient:
             settings.get("recheck_attempts"),
             default=IMAP_DEFAULT_RECHECK_ATTEMPTS,
         )
+        if send_type == "manual":
+            recheck_attempts_value = 1
         purge_context: Optional[Dict[str, object]] = None
         if purge_before_check_enabled and rcpt_username and password_value:
             purge_context = self._run_imap_precheck_purge(
@@ -2125,8 +2148,17 @@ class MailClient:
                 "sent_since_last_check": 0,
                 "sent_last_reset_at": None,
                 "last_threshold_multiple": 0,
+                "reroll_success_count": 0,
             }
             self.imap_settings[normalized] = settings
+        if normalized not in self._imap_reroll_success_counts:
+            try:
+                self._imap_reroll_success_counts[normalized] = max(
+                    0,
+                    int(settings.get("reroll_success_count") or 0),
+                )
+            except (TypeError, ValueError):
+                self._imap_reroll_success_counts[normalized] = 0
         return settings
 
     def _is_substitution_lock_active(self, domain: Optional[str]) -> bool:
@@ -2223,6 +2255,31 @@ class MailClient:
                 "imap_retry_reencode",
             )
         return recalculated, missing_tokens
+
+    def _get_reroll_success_count(self, domain: str) -> int:
+        normalized = (domain or "").lower()
+        try:
+            return max(0, int(self._imap_reroll_success_counts.get(normalized, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _set_reroll_success_count(self, domain: str, value: int) -> None:
+        normalized = (domain or "").lower()
+        try:
+            count = max(0, int(value or 0))
+        except (TypeError, ValueError):
+            count = 0
+        self._imap_reroll_success_counts[normalized] = count
+        settings = self._imap_settings_for_domain(normalized)
+        if settings.get("reroll_success_count") != count:
+            settings["reroll_success_count"] = count
+            self._imap_settings_dirty.add(normalized)
+
+    def _increment_reroll_success_count(self, domain: str) -> int:
+        current = self._get_reroll_success_count(domain)
+        new_total = current + 1
+        self._set_reroll_success_count(domain, new_total)
+        return new_total
 
     def _log_substitution_missing(
         self,
@@ -2472,6 +2529,13 @@ class MailClient:
             payload.get("imap_recheck_attempts"),
             default=settings.get("recheck_attempts"),
         )
+
+        try:
+            reroll_success_count = int(payload.get("imap_reroll_success_count") or 0)
+        except (TypeError, ValueError):
+            reroll_success_count = 0
+        reroll_success_count = max(0, reroll_success_count)
+        self._set_reroll_success_count(normalized, reroll_success_count)
 
         server_reset_raw = payload.get("imap_sent_last_reset_at")
         local_reset_raw = settings.get("sent_last_reset_at")
@@ -3604,7 +3668,16 @@ class MailClient:
                 "purge_elapsed_seconds": purge_elapsed_seconds if purge_attempted else None,
             }
             reroll_success = bool(reroll_applied and status == "success")
+            reroll_success_total = self._get_reroll_success_count(normalized)
+            if reroll_success:
+                reroll_success_total = self._increment_reroll_success_count(normalized)
+                self._log_imap_console(
+                    f"IMAP 재시도 성공 · 재롤 누적 {reroll_success_total}회",
+                    domain=normalized,
+                    tag="IMAP-메일헤더재롤",
+                )
             report["reroll_applied"] = reroll_success
+            report["reroll_success_count"] = reroll_success_total
             if reroll_success:
                 report["smtp_context"] = copy.deepcopy(smtp_context_base)
                 if isinstance(config_snapshot_base, dict):

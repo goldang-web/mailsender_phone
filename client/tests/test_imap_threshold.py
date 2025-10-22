@@ -1,5 +1,6 @@
 import copy
 import random
+from collections import deque
 import sys
 from concurrent.futures import Future
 from datetime import datetime, timezone
@@ -367,6 +368,7 @@ def test_submit_imap_check_reroll_updates_context(monkeypatch: pytest.MonkeyPatc
     report = future.result()
     assert report["status"] == "success"
     assert report["reroll_applied"] is True
+    assert report["reroll_success_count"] == 1
     assert report["mail_from"] == new_mail_from
     assert report.get("smtp_context", {}).get("mail_from") == new_mail_from
     assert isinstance(report.get("config_snapshot"), dict)
@@ -545,6 +547,7 @@ def test_submit_imap_check_reroll_keeps_template_and_refreshes_snapshot(
     assert client_main._extract_message_id_from_text(last_snapshot_header) == report["message_id"]
     config_snapshot_header = report.get("smtp_context", {}).get("config_snapshot", {}).get("header")
     assert config_snapshot_header and "Value-1" in config_snapshot_header
+    assert report["reroll_success_count"] == 1
 
 
 def test_submit_imap_check_reroll_reencodes_rule_values(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -717,6 +720,153 @@ def test_submit_imap_check_reroll_reencodes_rule_values(monkeypatch: pytest.Monk
     assert first_value.startswith("=?UTF-8?B?")
     assert second_value.startswith("=?UTF-8?B?")
     assert first_value != second_value, "각 재시도마다 인코딩된 값이 달라져야 합니다."
+    assert report["reroll_success_count"] == 1
+
+
+def test_reroll_success_counter_accumulates(monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _build_client()
+    settings = client._imap_settings_for_domain("naver")
+    settings.update(
+        {
+            "reroll_on_retry": True,
+            "enabled": True,
+            "recheck_attempts": 3,
+        }
+    )
+    client._substitution_lock_active["naver"] = False
+    client._substitution_lock_modes["naver"] = "auto"
+
+    helo_value = "helo.example.com"
+    initial_mail_from = "initial@example.com"
+    base_header = client_main._ensure_message_id_header(
+        "From: Initial Sender <initial@example.com>\nSubject: Reroll Counter\n",
+        auto_enabled=True,
+        pattern_value=None,
+        mail_from=initial_mail_from,
+        helo=helo_value,
+    )
+    config_snapshot = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": helo_value,
+        "mail_from": initial_mail_from,
+        "header": base_header,
+        "message_id_auto": True,
+        "message_id_pattern": None,
+    }
+    substitution_payload = {
+        "template": copy.deepcopy(config_snapshot),
+        "rules": [],
+    }
+    smtp_context = {
+        "smtp_host": "smtp.example.com",
+        "smtp_port": 25,
+        "helo": helo_value,
+        "mail_from": initial_mail_from,
+        "header": base_header,
+        "config_snapshot": copy.deepcopy(config_snapshot),
+        "substitution": copy.deepcopy(substitution_payload),
+    }
+
+    rerender_attempts = []
+
+    def fake_render(base_config, payload):  # type: ignore[override]
+        rerender_attempts.append(1)
+        refreshed = dict(base_config)
+        attempt_index = len(rerender_attempts)
+        refreshed["mail_from"] = f"reroll{attempt_index}@example.com"
+        refreshed["header"] = client_main._ensure_message_id_header(
+            f"From: Reroll {attempt_index} <reroll{attempt_index}@example.com>\nSubject: Reroll Counter\n",
+            auto_enabled=True,
+            pattern_value=None,
+            mail_from=refreshed["mail_from"],
+            helo=helo_value,
+        )
+        refreshed["message_id_auto"] = True
+        refreshed["message_id_pattern"] = None
+        return refreshed, set()
+
+    monkeypatch.setattr(client, "_render_all_headers_unique_config", fake_render)
+
+    probe = _probe_result("PROBE-ID")
+    monkeypatch.setattr(client, "_run_sent_probe_mail", lambda **kwargs: probe)
+
+    verify_results = deque(
+        [
+            {
+                "status": "failure",
+                "reason": "latency exceeded",
+                "latency": None,
+                "received_at": None,
+                "sent_display": "sent",
+                "received_display": "-",
+            },
+            {
+                "status": "success",
+                "latency": 0.7,
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                "reason": None,
+                "sent_display": "sent",
+                "received_display": "received",
+            },
+            {
+                "status": "failure",
+                "reason": "latency exceeded",
+                "latency": None,
+                "received_at": None,
+                "sent_display": "sent",
+                "received_display": "-",
+            },
+            {
+                "status": "success",
+                "latency": 0.6,
+                "received_at": datetime.now(timezone.utc).isoformat(),
+                "reason": None,
+                "sent_display": "sent",
+                "received_display": "received",
+            },
+        ]
+    )
+
+    def fake_verify_delivery(*, message_id=None, **kwargs):
+        assert verify_results, "verify_delivery 호출 초과"
+        return verify_results.popleft()
+
+    monkeypatch.setattr(client_main, "verify_delivery", fake_verify_delivery)
+
+    def run_check():
+        future = client._submit_imap_check(
+            domain="naver",
+            job_id="job-counter",
+            send_type="sent-threshold",
+            mail_from=initial_mail_from,
+            header_from="Initial Sender <initial@example.com>",
+            sent_at=datetime.now(timezone.utc),
+            has_anchor=False,
+            delay_before_check=0,
+            allowed_delay=15,
+            context_reason="threshold reached (1)",
+            force=False,
+            sent_window_count=1,
+            sent_threshold=1,
+            smtp_context=copy.deepcopy(smtp_context),
+            probe_result=probe,
+            precheck_purge=None,
+            message_id_snapshot=None,
+            recheck_attempts=3,
+        )
+        return future.result()
+
+    first_report = run_check()
+    assert first_report["reroll_applied"] is True
+    assert first_report["reroll_success_count"] == 1
+    assert client._get_reroll_success_count("naver") == 1
+
+    second_report = run_check()
+    assert second_report["reroll_applied"] is True
+    assert second_report["reroll_success_count"] == 2
+    assert client._get_reroll_success_count("naver") == 2
+    assert not verify_results
 
 
 def test_submit_imap_check_skips_reroll_when_locked(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -831,6 +981,7 @@ def test_submit_imap_check_skips_reroll_when_locked(monkeypatch: pytest.MonkeyPa
     report = future.result()
     assert report["status"] == "success"
     assert report["reroll_applied"] is False
+    assert report["reroll_success_count"] == 0
     assert "smtp_context" not in report or report["smtp_context"]["mail_from"] == "old@example.com"
     assert len(verify_calls) == 2
     assert verify_calls[0] == verify_calls[1] == "PROBE-ID"

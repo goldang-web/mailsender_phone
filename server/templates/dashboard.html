@@ -7182,6 +7182,7 @@ function bestConfig(device, domain) {
     imap_single_delay_seconds: IMAP_DEFAULT_SINGLE_DELAY,
     imap_sent_threshold: IMAP_DEFAULT_SENT_THRESHOLD,
     imap_sent_since_last_check: 0,
+    imap_reroll_success_count: 0,
     imap_sent_last_reset_at: null,
     imap_failure_action: "none",
     imap_notify_before_stop_all: false,
@@ -7760,6 +7761,7 @@ function renderImapSection(card, device, domain) {
     block.dataset.imapSingleDelay = String(IMAP_DEFAULT_SINGLE_DELAY);
     block.dataset.imapSentThreshold = String(IMAP_DEFAULT_SENT_THRESHOLD);
     block.dataset.imapSentSince = "0";
+    block.dataset.imapRerollSuccessCount = "0";
     block.dataset.imapSentLastReset = "";
     block.dataset.imapFailureAction = "none";
     block.dataset.imapNotifyBeforeStopAll = "0";
@@ -7782,6 +7784,9 @@ function renderImapSection(card, device, domain) {
     if (thresholdMetaEl) {
       thresholdMetaEl.textContent = "Sent 누적 확인: 사용 안 함";
       thresholdMetaEl.title = "네이버 도메인에서만 Sent 누적 기준으로 IMAP 확인을 제공합니다.";
+    }
+    if (rerollMetaEl) {
+      rerollMetaEl.textContent = "재롤 누적 성공: -";
     }
     if (configMetaEl) {
       configMetaEl.textContent = "IMAP 설정: 사용 안 함";
@@ -7806,6 +7811,7 @@ function renderImapSection(card, device, domain) {
   const statusEl = block.querySelector('[data-role="imapStatus"]');
   const metaEl = block.querySelector('[data-role="imapMeta"]');
   const thresholdMetaEl = block.querySelector('[data-role="imapThresholdMeta"]');
+  const rerollMetaEl = block.querySelector('[data-role="imapRerollMeta"]');
   const holdStatus = block.dataset.imapHoldStatus || "";
   const holdCheckedAt = block.dataset.imapHoldCheckedAt || "";
   const holdSetAt = Number(block.dataset.imapHoldSetAt || "0");
@@ -7926,6 +7932,7 @@ function renderImapSection(card, device, domain) {
     IMAP_DEFAULT_RECHECK_ATTEMPTS,
   );
   const imapSentSinceValue = Math.max(0, Number(config.imap_sent_since_last_check || 0));
+  const rerollSuccessCount = Math.max(0, Number(config.imap_reroll_success_count || 0));
   const failureActionValue = IMAP_FAILURE_ACTIONS.includes(config.imap_failure_action)
     ? config.imap_failure_action
     : "none";
@@ -7964,6 +7971,7 @@ function renderImapSection(card, device, domain) {
     summaryLines.push(`대기 시간: 단일 ${imapSingleDelayValue}초`);
     summaryLines.push(`재확인 횟수: ${imapRecheckValue}회`);
     summaryLines.push(`Sent 누적 확인: ${imapSentThresholdValue}건마다`);
+    summaryLines.push(`재롤 누적 성공: ${rerollSuccessCount}회`);
     configMetaEl.textContent = summaryLines.join("\n");
     configMetaEl.title = "";
   }
@@ -7980,6 +7988,9 @@ function renderImapSection(card, device, domain) {
       thresholdMetaEl.title = `${resetInfo}. Sent가 기준에 도달하면 단일 대기 시간을 적용해 IMAP 확인을 실행하며, 성공 시 카운터를 초기화하고 실패 시 설정된 대응을 즉시 적용합니다.`;
     }
   }
+  if (rerollMetaEl) {
+    rerollMetaEl.textContent = `재롤 누적 성공: ${rerollSuccessCount}회`;
+  }
   block.dataset.imapUsername = config.imap_username || "";
   block.dataset.imapAllowedLatency = String(imapAllowedValue);
   block.dataset.imapSingleDelay = String(imapSingleDelayValue);
@@ -7994,6 +8005,7 @@ function renderImapSection(card, device, domain) {
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
   block.dataset.imapLastCheckedAt = currentCheckedMarker;
   block.dataset.imapLastStatus = lastStatus || "";
+  block.dataset.imapRerollSuccessCount = String(rerollSuccessCount);
   if (!(holdStatus === "checking" && !holdExpired && holdCheckedAt === currentCheckedMarker)) {
     clearImapCountdown(card);
   }
@@ -8869,6 +8881,7 @@ function buildDeviceCard(device) {
       </div>
       <div class="imap-meta" data-role="imapMeta">네이버 발송 시 도착 여부를 자동으로 확인합니다.</div>
       <div class="imap-threshold-meta" data-role="imapThresholdMeta" title="Sent 누적 기준으로 IMAP 확인을 실행합니다.">Sent 누적 확인: 사용 안 함</div>
+      <div class="imap-reroll-meta" data-role="imapRerollMeta">재롤 누적 성공: 0회</div>
       <div class="imap-config-meta" data-role="imapConfigMeta">IMAP 설정: 사용 안 함</div>
       <div class="imap-actions" data-role="imapActions">
         <button type="button" class="secondary small" data-action="imap-delivery-check">도착 확인</button>
