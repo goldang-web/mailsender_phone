@@ -2864,6 +2864,17 @@ def record_job_progress(
                 email = item.get("email")
                 delivery = str(item.get("delivery_status") or "").lower()
                 success_flag = 1 if delivery == "sent" or log_line.lower().startswith("sent|") else 0
+                if success_flag == 0:
+                    detail_value = item.get("detail")
+                    if detail_value:
+                        detail_text = str(detail_value).strip()
+                        if detail_text:
+                            normalized_detail = detail_text.replace("|", "/").replace("\r", "\n")
+                            normalized_detail = " ".join(normalized_detail.replace("\n", " ").split())
+                            if normalized_detail:
+                                if len(normalized_detail) > 260:
+                                    normalized_detail = normalized_detail[:257] + "..."
+                                log_line = f"{log_line} | detail={normalized_detail}"
                 entries.append(
                     (
                         job_row["device_id"],

@@ -43,7 +43,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.89"
+APP_VERSION = "0.0.90"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -4086,8 +4086,18 @@ class MailClient:
         state = self._get_schedule_state(domain)
         if not state.get("enabled"):
             return None
+        event = self._schedule_events.get(domain)
+        if event and not state.get("needs_sync"):
+            self._schedule_events.pop(domain, None)
+            return None
         today_iso = self._local_now().date().isoformat()
         if state.get("last_run") != today_iso:
+            if event:
+                self._schedule_events.pop(domain, None)
+            return None
+        if not state.get("needs_sync"):
+            if event:
+                self._schedule_events.pop(domain, None)
             return None
         event = self._schedule_events.get(domain)
         if event and event.get("reason"):
@@ -5148,6 +5158,16 @@ class MailClient:
             (data_response or {}).get("code"),
             (data_response or {}).get("message"),
         )
+        def _normalize_detail_text(value: Optional[object]) -> Optional[str]:
+            if value is None:
+                return None
+            text = str(value).strip()
+            if not text:
+                return None
+            text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
+            if not text:
+                return None
+            return text[:400] if len(text) > 400 else text
         sequence_domain = (normalized_domain or (self.active_domain or "naver")).lower()
         recipient_keys: List[str] = []
         primary_key = self._normalize_email_key(rcpt_to)
@@ -5166,6 +5186,24 @@ class MailClient:
         else:
             accumulated_total = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
         current_batch_success = self._sent_log_progress(sequence_domain, accumulated_total)
+        detail_payload = _normalize_detail_text(detail_line) or _normalize_detail_text(status_line)
+        failure_detail = None
+        if not session_success:
+            detail_candidates: List[Optional[object]] = [
+                detail_line,
+                status_line,
+                (data_response or {}).get("message") if isinstance(data_response, dict) else None,
+                response_text,
+            ]
+            for candidate in detail_candidates:
+                normalized_candidate = _normalize_detail_text(candidate)
+                if normalized_candidate:
+                    failure_detail = normalized_candidate
+                    break
+        if failure_detail:
+            detail_payload = failure_detail
+        if not detail_payload and not session_success:
+            detail_payload = "발송 실패"
         log_line = self._format_dispatch_log_line(
             "Sent" if session_success else "Fail",
             current_batch_success,
@@ -5181,7 +5219,7 @@ class MailClient:
                 "email": rcpt_to,
                 "sequence": accumulated_total,
                 "delivery_status": delivery_status,
-                "detail": detail_line or status_line,
+                "detail": detail_payload,
                 "bcc_total": len(bcc_emails),
                 "anchor_total": 0,
                 "is_primary": True,
@@ -5192,6 +5230,9 @@ class MailClient:
                 "bcc_recipients": list(bcc_emails),
             }
         ]
+        if not session_success and detail_payload:
+            dispatch_logs[0]["display"] = f"{log_line} · {detail_payload}"
+            dispatch_logs[0]["error"] = detail_payload
         print(log_line)
         status = "success" if session_success else "failed"
         if delivery_status == "sent" and normalized_domain and self._imap_enabled(normalized_domain):
@@ -5243,7 +5284,7 @@ class MailClient:
             "rcpt_to": rcpt_to,
             "domain": domain,
             "summary": status_line,
-            "detail": detail_line,
+            "detail": detail_payload,
             "bcc": bcc_emails,
             "delivery_status": delivery_status,
             "logs": dispatch_logs,
@@ -5251,7 +5292,7 @@ class MailClient:
             "nouser_emails": nouser_emails_display,
             "data_response": data_response,
         }
-        error_message = None if session_success else (detail_line or status_line or "발송 실패")
+        error_message = None if session_success else (detail_payload or "발송 실패")
         current_sequence_total = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
         primary_log = (
             dispatch_logs[0]["log"]

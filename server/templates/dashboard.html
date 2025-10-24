@@ -6326,10 +6326,19 @@ function buildLogDisplayText(entry) {
     }
   }
   const emailTarget = parsed.email || entry?.rcpt_to || "";
-  if (!emailTarget) {
-    return `${labelText}${suffix}`;
+  let baseText = `${labelText}${suffix}`;
+  if (emailTarget) {
+    baseText = `${labelText} - ${emailTarget}${suffix}`;
   }
-  return `${labelText} - ${emailTarget}${suffix}`;
+  const isSuccess = Boolean(entry?.success);
+  if (!isSuccess) {
+    const detailSource = parsed.meta?.detail || parsed.meta?.error || entry?.detail || entry?.error;
+    const detailText = typeof detailSource === "string" ? detailSource : (detailSource != null ? String(detailSource) : "");
+    if (detailText && detailText.trim()) {
+      baseText = `${baseText} · ${detailText.trim()}`;
+    }
+  }
+  return baseText;
 }
 
 function latestChangeIpJob(device) {
