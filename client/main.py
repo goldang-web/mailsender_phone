@@ -5880,10 +5880,12 @@ class MailClient:
                     session_mail_from = self._effective_mail_from(normalized, session_config)
                     injected_emails = [email for email in (group.injected or []) if email]
                     bcc_recipients = [item.email for item in group.bcc if item.email]
+                    anchor_separate_send = bool(injected_emails) and not bcc_recipients
                     payload_bcc: List[str] = []
-                    if injected_emails:
+                    if injected_emails and not anchor_separate_send:
                         payload_bcc.extend(injected_emails)
                     payload_bcc.extend(bcc_recipients)
+                    anchor_payload_for_telnet = injected_emails if not anchor_separate_send else []
                     raw_header_value = session_config.get("header")
                     session_message_id_auto = _normalize_bool_flag(
                         session_config.get("message_id_auto"),
@@ -5913,13 +5915,93 @@ class MailClient:
                         rcpt_to=rcpt_to,
                         header_text=dispatch_header,
                         bcc_emails=payload_bcc,
-                        anchor_emails=injected_emails,
+                        anchor_emails=anchor_payload_for_telnet,
                         debug=self.telnet_debug_mode,
                     )
+                    anchor_followup_details: List[Dict[str, object]] = []
+                    anchor_followup_responses: List[str] = []
+                    anchor_followup_success = True
+                    anchor_failure_status_line: Optional[str] = None
+                    anchor_failure_detail_line: Optional[str] = None
+                    anchor_failure_delivery_status: Optional[str] = None
+                    anchor_failure_data_code: Optional[str] = None
+                    anchor_failure_data_message: Optional[str] = None
+                    if anchor_separate_send:
+                        for anchor_email in injected_emails:
+                            followup_header = dispatch_header
+                            if session_message_id_auto:
+                                followup_header = _ensure_message_id_header(
+                                    raw_header_value,
+                                    auto_enabled=True,
+                                    pattern_value=session_message_id_pattern,
+                                    mail_from=session_mail_from,
+                                    helo=session_config.get("helo"),
+                                )
+                            (
+                                anchor_success,
+                                anchor_response_text,
+                                _anchor_completed_at,
+                                anchor_rcpt_details,
+                                anchor_data_response,
+                            ) = send_via_telnet(
+                                smtp_host=session_config.get("smtp_host", ""),
+                                smtp_port=int(session_config.get("smtp_port") or 25),
+                                helo=session_config.get("helo", ""),
+                                mail_from=session_mail_from,
+                                rcpt_to=anchor_email,
+                                header_text=followup_header,
+                                bcc_emails=[],
+                                anchor_emails=[anchor_email],
+                                debug=self.telnet_debug_mode,
+                            )
+                            if anchor_rcpt_details:
+                                anchor_followup_details.extend(anchor_rcpt_details)
+                            anchor_followup_responses.append(anchor_response_text or "")
+                            if not anchor_success:
+                                anchor_followup_success = False
+                                if anchor_failure_status_line is None:
+                                    anchor_failure_delivery_status = self._classify_delivery(
+                                        anchor_success,
+                                        anchor_response_text,
+                                    )
+                                    (
+                                        anchor_failure_status_line,
+                                        anchor_failure_detail_line,
+                                    ) = self._smtp_status_and_detail(anchor_response_text)
+                                    anchor_failure_data_code = str((anchor_data_response or {}).get("code", ""))
+                                    anchor_failure_data_message = (anchor_data_response or {}).get("message")
+                    if anchor_followup_details:
+                        merged_details = list(rcpt_details or [])
+                        merged_details.extend(anchor_followup_details)
+                        rcpt_details = merged_details
+                    if anchor_followup_responses:
+                        combined_response_parts = [response_text or ""]
+                        combined_response_parts.extend(
+                            f"[ANCHOR] {entry}" for entry in anchor_followup_responses if entry
+                        )
+                        response_text = "\n".join(part for part in combined_response_parts if part)
+                    if anchor_separate_send and not anchor_followup_success:
+                        success = False
+                        if anchor_failure_delivery_status:
+                            delivery_status_override = anchor_failure_delivery_status
+                        else:
+                            delivery_status_override = self._classify_delivery(success, response_text)
+                        status_line_override, detail_line_override = self._smtp_status_and_detail(response_text)
+                        session_snapshot = dict(session_config)
+                        if anchor_failure_detail_line and not anchor_failure_data_message:
+                            anchor_failure_data_message = anchor_failure_detail_line
+                        data_response = {
+                            "code": anchor_failure_data_code or "",
+                            "message": anchor_failure_data_message,
+                        }
+                        status_line = anchor_failure_status_line or status_line_override
+                        detail_line = anchor_failure_detail_line or detail_line_override
+                    else:
+                        delivery_status_override = self._classify_delivery(success, response_text)
+                        status_line, detail_line = self._smtp_status_and_detail(response_text)
                     response_text = response_text or ""
                     sent_at = completed_at if isinstance(completed_at, datetime) else utc_now()
-                    delivery_status = self._classify_delivery(success, response_text)
-                    status_line, detail_line = self._smtp_status_and_detail(response_text)
+                    delivery_status = delivery_status_override
                     return DispatchOutcome(
                         success=success,
                         response_text=response_text,
@@ -6418,12 +6500,21 @@ class MailClient:
                         outcome.data_response_code,
                         outcome.data_response_message,
                     )
+                    anchor_success_count = 0
+                    if outcome.rcpt_details:
+                        anchor_success_count = sum(
+                            1
+                            for entry in outcome.rcpt_details
+                            if entry.get("is_anchor") and entry.get("success")
+                        )
+                    if anchor_success_count == 0 and anchor_count > 0 and data_ok:
+                        anchor_success_count = anchor_count
+                    anchor_success_count = min(anchor_success_count, anchor_count)
+                    anchor_retry_count = max(0, anchor_count - anchor_success_count)
                     recipient_keys = [self._normalize_email_key(record.email) for record in recipients]
                     db_nouser_flags = [key in nouser_map for key in recipient_keys]
                     db_nouser_count = sum(1 for flag in db_nouser_flags if flag)
                     nouser_count += db_nouser_count
-                    anchor_success_count = anchor_count if data_ok else 0
-                    anchor_retry_count = anchor_count - anchor_success_count
                     db_successful_recipient_count = 0
 
                     for prev_status in previous_statuses:
