@@ -57,6 +57,7 @@ class VerifyDeliveryTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "failure")
         self.assertEqual(result["reason"], "발신자 주소가 일치하는 메일을 찾지 못했습니다.")
+        self.assertEqual(result["folder"], "Junk")
 
     def test_verify_delivery_accepts_matching_sender(self) -> None:
         now = datetime.now(timezone.utc)
@@ -78,6 +79,7 @@ class VerifyDeliveryTests(unittest.TestCase):
         self.assertEqual(result["status"], "success")
         self.assertIsNotNone(result["latency"])
         self.assertIsNone(result["reason"])
+        self.assertEqual(result["folder"], "Junk")
 
     def test_verify_delivery_accepts_sender_with_garbled_display(self) -> None:
         now = datetime.now(timezone.utc)
@@ -98,6 +100,7 @@ class VerifyDeliveryTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertIsNone(result["reason"])
+        self.assertEqual(result["folder"], "Junk")
 
     def test_verify_delivery_accepts_sender_with_split_angle_brackets(self) -> None:
         now = datetime.now(timezone.utc)
@@ -117,6 +120,53 @@ class VerifyDeliveryTests(unittest.TestCase):
         )
 
         self.assertEqual(result["status"], "success")
+        self.assertIsNone(result["reason"])
+        self.assertEqual(result["folder"], "Junk")
+
+    def test_verify_delivery_checks_inbox_when_spam_empty(self) -> None:
+        now = datetime.now(timezone.utc)
+        inbox_header = (
+            f"From: Expected <expected@example.com>\r\n"
+            f"Date: {format_datetime(now)}\r\n\r\n"
+        ).encode()
+
+        class _FallbackIMAP:
+            def __init__(self, host, port, timeout=30):  # pylint: disable=unused-argument
+                self._selected = None
+
+            def login(self, email_id, password):  # pylint: disable=unused-argument
+                return "OK", []
+
+            def select(self, mailbox, readonly=True):  # pylint: disable=unused-argument
+                self._selected = mailbox
+                return "OK", [mailbox.encode()]
+
+            def search(self, charset, criterion):  # pylint: disable=unused-argument
+                if self._selected == "Junk":
+                    return "OK", [b""]
+                return "OK", [b"1"]
+
+            def fetch(self, num, query):  # pylint: disable=unused-argument
+                if self._selected == "INBOX":
+                    return "OK", [(b"1", inbox_header)]
+                return "OK", []
+
+            def logout(self):
+                return "BYE", []
+
+        with patch("client.lib.naver_imap.imaplib.IMAP4_SSL", _FallbackIMAP):
+            result = naver_imap.verify_delivery(
+                email_id="user@naver.com",
+                password="pass",
+                mail_from="expected@example.com",
+                sent_at=now,
+                allowed_delay=30,
+                max_messages=3,
+                folders=["Junk", "INBOX"],
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["folder"], "INBOX")
         self.assertIsNone(result["reason"])
 
 

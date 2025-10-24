@@ -73,6 +73,8 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "imap_notify_before_stop_all": False,
     "imap_purge_before_check": False,
     "imap_reroll_on_retry": False,
+    "imap_check_spam": True,
+    "imap_check_inbox": False,
     "imap_recheck_attempts": IMAP_RECHECK_ATTEMPTS_DEFAULT,
     "imap_sent_threshold": IMAP_SENT_THRESHOLD_DEFAULT,
     "imap_sent_since_last_check": 0,
@@ -1366,6 +1368,8 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 imap_notify_before_stop_all INTEGER NOT NULL DEFAULT 0,
                 imap_purge_before_check INTEGER NOT NULL DEFAULT 0,
                 imap_reroll_on_retry INTEGER NOT NULL DEFAULT 0,
+                imap_check_spam INTEGER NOT NULL DEFAULT 1,
+                imap_check_inbox INTEGER NOT NULL DEFAULT 0,
                 imap_recheck_attempts INTEGER NOT NULL DEFAULT {IMAP_RECHECK_ATTEMPTS_DEFAULT},
                 imap_sent_threshold INTEGER NOT NULL DEFAULT 90,
                 imap_sent_since_last_check INTEGER NOT NULL DEFAULT 0,
@@ -1679,6 +1683,14 @@ def _init_db() -> None:
         if "imap_reroll_on_retry" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN imap_reroll_on_retry INTEGER NOT NULL DEFAULT 0"
+            )
+        if "imap_check_spam" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_check_spam INTEGER NOT NULL DEFAULT 1"
+            )
+        if "imap_check_inbox" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN imap_check_inbox INTEGER NOT NULL DEFAULT 0"
             )
         if "imap_recheck_attempts" not in config_columns:
             conn.execute(
@@ -2023,6 +2035,18 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     imap_reroll_on_retry = sanitize_imap_reroll_on_retry(
         row.get("imap_reroll_on_retry")
     )
+    imap_check_spam_raw = row.get("imap_check_spam")
+    if imap_check_spam_raw is None:
+        imap_check_spam = bool(DEFAULT_DOMAIN_CONFIG.get("imap_check_spam", True))
+    else:
+        imap_check_spam = sanitize_stop_schedule_enabled(imap_check_spam_raw)
+    imap_check_inbox_raw = row.get("imap_check_inbox")
+    if imap_check_inbox_raw is None:
+        imap_check_inbox = bool(DEFAULT_DOMAIN_CONFIG.get("imap_check_inbox", False))
+    else:
+        imap_check_inbox = sanitize_stop_schedule_enabled(imap_check_inbox_raw)
+    if not imap_check_spam and not imap_check_inbox:
+        imap_check_spam = True
     imap_recheck_attempts = sanitize_imap_recheck_attempts(
         row.get("imap_recheck_attempts"),
         default=DEFAULT_DOMAIN_CONFIG.get("imap_recheck_attempts"),
@@ -2102,6 +2126,8 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "imap_notify_before_stop_all": imap_notify_before_stop_all,
         "imap_purge_before_check": imap_purge_before_check,
         "imap_reroll_on_retry": imap_reroll_on_retry,
+        "imap_check_spam": imap_check_spam,
+        "imap_check_inbox": imap_check_inbox,
         "imap_recheck_attempts": imap_recheck_attempts,
         "imap_sent_threshold": imap_sent_threshold,
         "imap_sent_since_last_check": sent_since_last_check,
@@ -3225,6 +3251,8 @@ class ImapSettingsPayload(BaseModel):
     notify_before_stop_all: Optional[bool] = None
     purge_before_check: Optional[bool] = None
     reroll_on_retry: Optional[bool] = None
+    check_spam: Optional[bool] = None
+    check_inbox: Optional[bool] = None
     recheck_attempts: Optional[int] = None
     delay_seconds: Optional[int] = None  # legacy alias for allowed latency
 
@@ -4390,6 +4418,26 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
             if payload.reroll_on_retry is not None
             else config.get("imap_reroll_on_retry")
         )
+        check_spam_source = (
+            payload.check_spam
+            if payload.check_spam is not None
+            else config.get("imap_check_spam")
+        )
+        if check_spam_source is None:
+            imap_check_spam_value = bool(DEFAULT_DOMAIN_CONFIG.get("imap_check_spam", True))
+        else:
+            imap_check_spam_value = sanitize_stop_schedule_enabled(check_spam_source)
+        check_inbox_source = (
+            payload.check_inbox
+            if payload.check_inbox is not None
+            else config.get("imap_check_inbox")
+        )
+        if check_inbox_source is None:
+            imap_check_inbox_value = bool(DEFAULT_DOMAIN_CONFIG.get("imap_check_inbox", False))
+        else:
+            imap_check_inbox_value = sanitize_stop_schedule_enabled(check_inbox_source)
+        if not imap_check_spam_value and not imap_check_inbox_value:
+            imap_check_spam_value = True
         recheck_attempts_value = sanitize_imap_recheck_attempts(
             payload.recheck_attempts
             if payload.recheck_attempts is not None
@@ -4426,6 +4474,8 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 imap_notify_before_stop_all=?,
                 imap_purge_before_check=?,
                 imap_reroll_on_retry=?,
+                imap_check_spam=?,
+                imap_check_inbox=?,
                 imap_recheck_attempts=?,
                 imap_sent_threshold=?,
                 imap_last_status=?,
@@ -4449,6 +4499,8 @@ def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettin
                 1 if notify_before_stop_value else 0,
                 1 if purge_before_check_value else 0,
                 1 if reroll_on_retry_value else 0,
+                1 if imap_check_spam_value else 0,
+                1 if imap_check_inbox_value else 0,
                 recheck_attempts_value,
                 sent_threshold_value,
                 status_value,

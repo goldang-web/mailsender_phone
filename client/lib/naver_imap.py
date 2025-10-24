@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timezone
 from email.header import decode_header, make_header
 from email.utils import parseaddr, parsedate_to_datetime
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 
 class IMAPNetworkError(Exception):
@@ -450,8 +450,9 @@ def verify_delivery(
     max_messages=15,
     check_delay=None,
     message_id=None,
+    folders=None,
 ):
-    """네이버 스팸메일함에서 발신자 메일 도착 여부를 확인합니다."""
+    """네이버 IMAP 폴더(스팸함·받은메일함 등)에서 발신자 메일 도착 여부를 확인합니다."""
 
     if not email_id or not password:
         raise ValueError("IMAP 계정 정보가 필요합니다.")
@@ -517,11 +518,38 @@ def verify_delivery(
         print(f"[IMAP 확인] 발신 {sent_line}", flush=True)
         print(f"[IMAP 확인] 수신 {received_line}", flush=True)
 
-    mail = None
-    try:
-        mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=30)
-        mail.login(email_id, password)
-        mail.select("Junk", readonly=True)
+    folder_sequence: List[str] = []
+    if folders:
+        for raw_folder in folders:
+            if raw_folder is None:
+                continue
+            folder_name = str(raw_folder).strip()
+            if not folder_name:
+                continue
+            if folder_name not in folder_sequence:
+                folder_sequence.append(folder_name)
+    if not folder_sequence:
+        folder_sequence.append("Junk")
+
+    def _check_folder(folder_name: str) -> Dict[str, object]:
+        folder_label = folder_name or "Junk"
+        print(f"[IMAP 확인] 폴더 {folder_label} 검사 시작", flush=True)
+        status, _ = mail.select(folder_label, readonly=True)
+        if status != "OK":
+            _log_sent_received(default_received_line)
+            print(f"[IMAP 확인] 폴더 {folder_label} 선택 실패 · 상태 {status}", flush=True)
+            return {
+                "status": "error",
+                "latency": None,
+                "received_at": None,
+                "reason": f"{folder_label} 메일함을 열 수 없습니다.",
+                "allowed_latency": allowed,
+                "sent_at": sent_dt.isoformat(),
+                "delay_before_check": delay_before_check,
+                "sent_display": sent_line,
+                "received_display": default_received_line,
+                "folder": folder_label,
+            }
         status, messages = mail.search(None, "ALL")
         if status != "OK":
             _log_sent_received(default_received_line)
@@ -535,8 +563,9 @@ def verify_delivery(
                 "delay_before_check": delay_before_check,
                 "sent_display": sent_line,
                 "received_display": default_received_line,
+                "folder": folder_label,
             }
-        mail_ids = messages[0].split()
+        mail_ids = messages[0].split() if messages else []
         if not mail_ids:
             _log_sent_received(default_received_line)
             print("[IMAP 확인] 지연: 측정 불가", flush=True)
@@ -552,11 +581,11 @@ def verify_delivery(
                 "delay_before_check": delay_before_check,
                 "sent_display": sent_line,
                 "received_display": default_received_line,
+                "folder": folder_label,
             }
 
         candidates = list(reversed(mail_ids[-search_limit:]))
         sender_mismatch_found = False
-        matched = False
         for num in candidates:
             status, data = mail.fetch(num, "(RFC822.HEADER)")
             if status != "OK" or not data or data[0] is None:
@@ -629,17 +658,16 @@ def verify_delivery(
                 "sent_at": sent_dt.isoformat(),
                 "sent_display": sent_line,
                 "received_display": received_line,
+                "folder": folder_label,
             }
             if latency <= allowed:
                 print("[IMAP 확인] 판정: 성공", flush=True)
                 result_payload["reason"] = None
                 result_payload["status"] = "success"
-                mail.logout()
                 return result_payload
             print("[IMAP 확인] 판정: 허용 지연 초과", flush=True)
             result_payload["reason"] = f"허용 지연 {allowed}s 초과 (절대값 {latency:.1f}s)"
             result_payload["status"] = "failure"
-            mail.logout()
             return result_payload
 
         _log_sent_received(default_received_line)
@@ -661,6 +689,39 @@ def verify_delivery(
             "delay_before_check": delay_before_check,
             "sent_display": sent_line,
             "received_display": default_received_line,
+            "folder": folder_label,
+        }
+
+    mail = None
+    try:
+        mail = imaplib.IMAP4_SSL("imap.naver.com", 993, timeout=30)
+        mail.login(email_id, password)
+        results: List[Dict[str, object]] = []
+        for folder_name in folder_sequence:
+            result = _check_folder(folder_name)
+            results.append(result)
+            status = str(result.get("status") or "").lower()
+            if status == "success":
+                return result
+            if status not in {"failure"}:
+                return result
+        if results:
+            return results[-1]
+        _log_sent_received(default_received_line)
+        print("[IMAP 확인] 지연: 측정 불가", flush=True)
+        print(f"[IMAP 확인] 허용지연: {allowed}초", flush=True)
+        print("[IMAP 확인] 판정: 유효한 메일을 찾지 못했습니다.", flush=True)
+        return {
+            "status": "failure",
+            "latency": None,
+            "received_at": None,
+            "reason": "유효한 메일을 찾지 못했습니다.",
+            "allowed_latency": allowed,
+            "sent_at": sent_dt.isoformat(),
+            "delay_before_check": delay_before_check,
+            "sent_display": sent_line,
+            "received_display": default_received_line,
+            "folder": folder_sequence[-1] if folder_sequence else "Junk",
         }
     except imaplib.IMAP4.abort as exc:
         raise IMAPNetworkError(f"IMAP 세션이 예기치 않게 종료되었습니다: {exc}", original=exc) from exc

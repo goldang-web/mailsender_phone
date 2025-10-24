@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.91"
+APP_VERSION = "0.0.92"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -406,6 +406,8 @@ IMAP_SENT_THRESHOLD_MAX = 1000
 IMAP_RECHECK_ATTEMPTS_MIN = 1
 IMAP_RECHECK_ATTEMPTS_MAX = 3
 IMAP_DEFAULT_RECHECK_ATTEMPTS = 2
+IMAP_DEFAULT_CHECK_SPAM = True
+IMAP_DEFAULT_CHECK_INBOX = False
 
 OFFLINE_PROBE_INTERVAL_SECONDS = 10
 OFFLINE_HEALTH_PATH = "/health"
@@ -891,6 +893,29 @@ class MailClient:
             except (TypeError, ValueError):
                 reroll_success_count = 0
             reroll_success_count = max(0, reroll_success_count)
+            check_spam_raw = entry.get("check_spam")
+            if check_spam_raw is None:
+                check_spam_raw = entry.get("imap_check_spam")
+            if check_spam_raw is None:
+                check_spam = IMAP_DEFAULT_CHECK_SPAM
+            else:
+                check_spam = sanitize_bool_flag(check_spam_raw)
+            check_inbox_raw = entry.get("check_inbox")
+            if check_inbox_raw is None:
+                check_inbox_raw = entry.get("imap_check_inbox")
+            if check_inbox_raw is None:
+                check_inbox = IMAP_DEFAULT_CHECK_INBOX
+            else:
+                check_inbox = sanitize_bool_flag(check_inbox_raw)
+            if not check_spam and not check_inbox:
+                check_spam = True
+            recheck_attempts_raw = entry.get("recheck_attempts")
+            if recheck_attempts_raw is None:
+                recheck_attempts_raw = entry.get("imap_recheck_attempts")
+            recheck_attempts = sanitize_imap_recheck_attempts(
+                recheck_attempts_raw,
+                default=IMAP_DEFAULT_RECHECK_ATTEMPTS,
+            )
             self.imap_settings[domain] = {
                 "enabled": bool(entry.get("enabled")),
                 "username": normalize_imap_string(entry.get("username")),
@@ -901,6 +926,9 @@ class MailClient:
                 "notify_before_stop_all": sanitize_bool_flag(entry.get("notify_before_stop_all")),
                 "purge_before_check": sanitize_bool_flag(entry.get("purge_before_check")),
                 "reroll_on_retry": sanitize_bool_flag(entry.get("reroll_on_retry")),
+                "check_spam": check_spam,
+                "check_inbox": check_inbox,
+                "recheck_attempts": recheck_attempts,
                 "sent_threshold": sent_threshold,
                 "sent_since_last_check": sent_since_last_check,
                 "sent_last_reset_at": entry.get("sent_last_reset_at"),
@@ -1397,6 +1425,22 @@ class MailClient:
             except (TypeError, ValueError):
                 reroll_success_count = 0
             reroll_success_count = max(0, reroll_success_count)
+            check_spam_value = settings.get("check_spam")
+            if check_spam_value is None:
+                check_spam_flag = IMAP_DEFAULT_CHECK_SPAM
+            else:
+                check_spam_flag = sanitize_bool_flag(check_spam_value)
+            check_inbox_value = settings.get("check_inbox")
+            if check_inbox_value is None:
+                check_inbox_flag = IMAP_DEFAULT_CHECK_INBOX
+            else:
+                check_inbox_flag = sanitize_bool_flag(check_inbox_value)
+            if not check_spam_flag and not check_inbox_flag:
+                check_spam_flag = True
+            recheck_attempts = sanitize_imap_recheck_attempts(
+                settings.get("recheck_attempts"),
+                default=IMAP_DEFAULT_RECHECK_ATTEMPTS,
+            )
             serialized[domain] = {
                 "enabled": bool(settings.get("enabled")),
                 "username": normalize_imap_string(settings.get("username")),
@@ -1414,6 +1458,9 @@ class MailClient:
                 "notify_before_stop_all": sanitize_bool_flag(settings.get("notify_before_stop_all")),
                 "purge_before_check": sanitize_bool_flag(settings.get("purge_before_check")),
                 "reroll_on_retry": sanitize_bool_flag(settings.get("reroll_on_retry")),
+                "check_spam": check_spam_flag,
+                "check_inbox": check_inbox_flag,
+                "recheck_attempts": recheck_attempts,
                 "sent_threshold": sent_threshold,
                 "sent_since_last_check": sent_since,
                 "sent_last_reset_at": settings.get("sent_last_reset_at"),
@@ -2173,6 +2220,8 @@ class MailClient:
                 "notify_before_stop_all": False,
                 "purge_before_check": False,
                 "reroll_on_retry": False,
+                "check_spam": IMAP_DEFAULT_CHECK_SPAM,
+                "check_inbox": IMAP_DEFAULT_CHECK_INBOX,
                 "recheck_attempts": IMAP_DEFAULT_RECHECK_ATTEMPTS,
                 "sent_threshold": IMAP_DEFAULT_SENT_THRESHOLD,
                 "sent_since_last_check": 0,
@@ -2573,6 +2622,22 @@ class MailClient:
         settings["reroll_on_retry"] = sanitize_bool_flag(
             payload.get("imap_reroll_on_retry")
         )
+        check_spam_payload = payload.get("imap_check_spam")
+        check_inbox_payload = payload.get("imap_check_inbox")
+        check_spam_flag = (
+            sanitize_bool_flag(check_spam_payload)
+            if check_spam_payload is not None
+            else settings.get("check_spam", IMAP_DEFAULT_CHECK_SPAM)
+        )
+        check_inbox_flag = (
+            sanitize_bool_flag(check_inbox_payload)
+            if check_inbox_payload is not None
+            else settings.get("check_inbox", IMAP_DEFAULT_CHECK_INBOX)
+        )
+        if not check_spam_flag and not check_inbox_flag:
+            check_spam_flag = True
+        settings["check_spam"] = check_spam_flag
+        settings["check_inbox"] = check_inbox_flag
         settings["sent_threshold"] = sanitize_imap_sent_threshold(
             payload.get("imap_sent_threshold"),
             default=settings.get("sent_threshold")
@@ -3142,6 +3207,16 @@ class MailClient:
         )
         smtp_context = dict(smtp_context or {})
         reroll_on_retry_enabled = sanitize_bool_flag(settings.get("reroll_on_retry"))
+        check_spam_flag = sanitize_bool_flag(settings.get("check_spam"))
+        check_inbox_flag = sanitize_bool_flag(settings.get("check_inbox"))
+        if not check_spam_flag and not check_inbox_flag:
+            check_spam_flag = IMAP_DEFAULT_CHECK_SPAM
+            check_inbox_flag = IMAP_DEFAULT_CHECK_INBOX
+        folder_sequence: List[str] = []
+        if check_spam_flag:
+            folder_sequence.append("Junk")
+        if check_inbox_flag:
+            folder_sequence.append("INBOX")
         lock_active = self._is_substitution_lock_active(normalized)
         reroll_allowed = reroll_on_retry_enabled and not lock_active
         smtp_context["reroll_on_retry"] = reroll_allowed
@@ -3530,6 +3605,7 @@ class MailClient:
                 attempt_reason: Optional[str] = None
                 attempt_latency = None
                 attempt_received_at = None
+                folder_used: Optional[str] = None
 
                 try:
                     candidate_message_id = sent_message_id or (current_probe.message_id if current_probe else None)
@@ -3543,6 +3619,7 @@ class MailClient:
                         max_messages=10,
                         check_delay=delay_seconds,
                         message_id=candidate_message_id,
+                        folders=folder_sequence,
                     )
                     attempt_status = str(result.get("status") or "error")
                     attempt_latency = result.get("latency")
@@ -3550,12 +3627,14 @@ class MailClient:
                     attempt_reason = result.get("reason")
                     sent_display = result.get("sent_display")
                     received_display = result.get("received_display")
-                    
+                    folder_used = result.get("folder")
+
                     latency_label = (
                         f"{attempt_latency:.1f}s" if isinstance(attempt_latency, (int, float)) else "-"
                     )
+                    folder_segment = f" · 폴더 {folder_used}" if folder_used else ""
                     self._log_imap_console(
-                        f"IMAP 확인 결과 {sequence_index}차 · 상태 {attempt_status} · 지연 {latency_label} · 허용 {allowed_delay_value}s",
+                        f"IMAP 확인 결과 {sequence_index}차 · 상태 {attempt_status} · 지연 {latency_label} · 허용 {allowed_delay_value}s{folder_segment}",
                         domain=normalized,
                         tag="IMAP-메일확인결과",
                     )
@@ -3599,6 +3678,7 @@ class MailClient:
                         "attempt": 1,
                         "status": attempt_status,
                         "reason": attempt_reason or "",
+                        "folder": folder_used or "",
                     }
                 )
 

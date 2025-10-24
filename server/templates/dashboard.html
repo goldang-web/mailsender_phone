@@ -2547,6 +2547,20 @@ button:not(:disabled):hover {
           </div>
         </div>
         <div class="field checkbox-group">
+          <span>확인할 폴더</span>
+          <div class="checkbox-stack">
+            <label class="inline-checkbox" id="imapCheckSpamLabel" title="네이버 스팸함(Junk)에서 도착 여부를 확인합니다.">
+              <input type="checkbox" id="imapCheckSpam">
+              <span>스팸함</span>
+            </label>
+            <label class="inline-checkbox" id="imapCheckInboxLabel" title="받은메일함(INBOX)에서도 도착 여부를 확인합니다.">
+              <input type="checkbox" id="imapCheckInbox">
+              <span>받은메일함</span>
+            </label>
+          </div>
+          <p class="field-hint">최소 한 개 이상 선택해야 하며, 여러 폴더를 선택하면 순서대로 확인합니다.</p>
+        </div>
+        <div class="field checkbox-group">
           <span>추가 확인 옵션</span>
           <div class="checkbox-stack">
             <label class="inline-checkbox" id="imapPurgeBeforeCheckLabel" title="IMAP 확인을 시작하기 전에 네이버 스팸함을 비우고 진행합니다.">
@@ -7196,6 +7210,8 @@ function bestConfig(device, domain) {
     imap_failure_action: "none",
     imap_notify_before_stop_all: false,
     imap_reroll_on_retry: IMAP_DEFAULT_REROLL_ON_RETRY,
+    imap_check_spam: true,
+    imap_check_inbox: false,
     imap_recheck_attempts: IMAP_DEFAULT_RECHECK_ATTEMPTS,
     imap_last_status: "",
     imap_last_checked_at: null,
@@ -7775,6 +7791,8 @@ function renderImapSection(card, device, domain) {
     block.dataset.imapFailureAction = "none";
     block.dataset.imapNotifyBeforeStopAll = "0";
     block.dataset.imapPurgeBeforeCheck = "0";
+    block.dataset.imapCheckSpam = "0";
+    block.dataset.imapCheckInbox = "0";
     block.dataset.imapPasswordSaved = "0";
     delete block.dataset.imapHoldStatus;
     delete block.dataset.imapHoldCheckedAt;
@@ -7813,6 +7831,8 @@ function renderImapSection(card, device, domain) {
     return;
   }
   const config = bestConfig(device, domain);
+  const checkSpam = config.imap_check_spam !== undefined ? Boolean(config.imap_check_spam) : true;
+  const checkInbox = config.imap_check_inbox !== undefined ? Boolean(config.imap_check_inbox) : false;
   const toggle = block.querySelector('[data-field="imap_enabled"]');
   if (toggle) {
     toggle.checked = Boolean(config.imap_enabled);
@@ -7960,6 +7980,10 @@ function renderImapSection(card, device, domain) {
       statusParts.push(`계정 ${displayUsername}`);
     }
     summaryLines.push(`IMAP 설정: ${statusParts.join(" · ")}`);
+    const folderSummaryParts = [];
+    if (checkSpam) folderSummaryParts.push("스팸함");
+    if (checkInbox) folderSummaryParts.push("받은메일함");
+    summaryLines.push(`확인 폴더: ${folderSummaryParts.length ? folderSummaryParts.join(" · ") : "스팸함"}`);
     const failureActionLabels = {
       none: "추가 동작 없음",
       stop_device: "디바이스 중지",
@@ -8010,6 +8034,8 @@ function renderImapSection(card, device, domain) {
   block.dataset.imapNotifyBeforeStopAll = config.imap_notify_before_stop_all ? "1" : "0";
   block.dataset.imapPurgeBeforeCheck = config.imap_purge_before_check ? "1" : "0";
   block.dataset.imapRerollOnRetry = config.imap_reroll_on_retry ? "1" : "0";
+  block.dataset.imapCheckSpam = checkSpam ? "1" : "0";
+  block.dataset.imapCheckInbox = checkInbox ? "1" : "0";
   block.dataset.imapRecheckAttempts = String(imapRecheckValue);
   block.dataset.imapPasswordSaved = config.imap_password_saved ? "1" : "0";
   block.dataset.imapLastCheckedAt = currentCheckedMarker;
@@ -9524,6 +9550,8 @@ function openImapModal(card, device, domain, options = {}) {
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
   const rerollCheckbox = document.getElementById("imapRerollOnRetry");
+  const checkSpamInput = document.getElementById("imapCheckSpam");
+  const checkInboxInput = document.getElementById("imapCheckInbox");
   const passwordToggle = document.querySelector('[data-action="imap-password-toggle"]');
 
   usernameInput.value = config.imap_username || "";
@@ -9542,6 +9570,8 @@ function openImapModal(card, device, domain, options = {}) {
   const blockNotifyRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapNotifyBeforeStopAll;
   const blockPurgeRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapPurgeBeforeCheck;
   const blockRerollRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapRerollOnRetry;
+  const blockCheckSpamRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapCheckSpam;
+  const blockCheckInboxRaw = card?.querySelector('[data-role="imapBlock"]')?.dataset?.imapCheckInbox;
   const allowedLatencyValue = clampNumber(
     blockAllowedLatency ?? config.imap_allowed_latency_seconds ?? IMAP_DEFAULT_ALLOWED_LATENCY,
     IMAP_ALLOWED_MIN,
@@ -9597,6 +9627,19 @@ function openImapModal(card, device, domain, options = {}) {
     const configReroll = Boolean(config.imap_reroll_on_retry);
     const blockReroll = parseFlag(blockRerollRaw);
     rerollCheckbox.checked = blockReroll ?? configReroll ?? IMAP_DEFAULT_REROLL_ON_RETRY;
+  }
+  if (checkSpamInput) {
+    const configSpam = config.imap_check_spam !== undefined ? Boolean(config.imap_check_spam) : true;
+    const blockSpam = parseFlag(blockCheckSpamRaw);
+    checkSpamInput.checked = blockSpam ?? configSpam;
+  }
+  if (checkInboxInput) {
+    const configInbox = config.imap_check_inbox !== undefined ? Boolean(config.imap_check_inbox) : false;
+    const blockInbox = parseFlag(blockCheckInboxRaw);
+    checkInboxInput.checked = blockInbox ?? configInbox;
+  }
+  if (checkSpamInput && checkInboxInput && !checkSpamInput.checked && !checkInboxInput.checked) {
+    checkSpamInput.checked = true;
   }
   updateImapNotifyControl(failureActionSelect?.value || "none");
 
@@ -9691,6 +9734,12 @@ async function submitImapModal() {
     setImapModalMessage("비밀번호를 입력하세요.");
     return;
   }
+  const checkSpam = Boolean(checkSpamInput && checkSpamInput.checked);
+  const checkInbox = Boolean(checkInboxInput && checkInboxInput.checked);
+  if (!checkSpam && !checkInbox) {
+    setImapModalMessage("확인할 폴더를 최소 한 개 이상 선택하세요.");
+    return;
+  }
 
   const payload = {
     enabled: true,
@@ -9705,6 +9754,8 @@ async function submitImapModal() {
     ),
     purge_before_check: Boolean(purgeCheckbox && purgeCheckbox.checked),
     reroll_on_retry: Boolean(rerollCheckbox && rerollCheckbox.checked),
+    check_spam: checkSpam,
+    check_inbox: checkInbox,
   };
   if (rawPassword) {
     payload.password = rawPassword;
