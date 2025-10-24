@@ -1747,7 +1747,7 @@ button.card-delete-btn:disabled {
 }
 
 #imapModal .modal-card {
-  width: 380px;
+  width: 460px;
   max-width: calc(100vw - 40px);
 }
 
@@ -2578,7 +2578,8 @@ button:not(:disabled):hover {
     </div>
     <div class="modal-footer">
       <button type="button" class="ghost" data-action="imap-cancel">취소</button>
-      <button type="button" class="secondary" id="imapFetchLatestBtn" data-action="imap-fetch-latest">최신 메일 확인</button>
+      <button type="button" class="secondary" id="imapFetchLatestSpamBtn" data-action="imap-fetch-latest" data-folder="Junk" data-folder-label="스팸함" data-label="최신메일확인-스팸함">최신메일확인-스팸함</button>
+      <button type="button" class="secondary" id="imapFetchLatestInboxBtn" data-action="imap-fetch-latest" data-folder="INBOX" data-folder-label="받은메일함" data-label="최신메일확인-받은메일함">최신메일확인-받은메일함</button>
       <button type="button" class="secondary" id="imapTestBtn" data-action="imap-test">연결 테스트</button>
       <button type="button" class="secondary" id="imapPurgeSpamBtn" data-action="imap-purge-spam">스팸함 비우기</button>
       <button type="button" id="imapSaveBtn" data-action="imap-save">저장</button>
@@ -9652,11 +9653,16 @@ function openImapModal(card, device, domain, options = {}) {
     testBtn.disabled = false;
     testBtn.textContent = "연결 테스트";
   }
-  const latestBtn = document.getElementById("imapFetchLatestBtn");
-  if (latestBtn) {
-    latestBtn.disabled = false;
-    latestBtn.textContent = "최신 메일 확인";
-  }
+  document
+    .querySelectorAll('#imapModal [data-action="imap-fetch-latest"]')
+    .forEach((button) => {
+      button.disabled = false;
+      const label = button.dataset.label;
+      if (label) {
+        button.textContent = label;
+      }
+      delete button.dataset.originalLabel;
+    });
 }
 
 function closeImapModal() {
@@ -9690,6 +9696,8 @@ async function submitImapModal() {
   const notifyCheckbox = document.getElementById("imapNotifyBeforeStopAll");
   const purgeCheckbox = document.getElementById("imapPurgeBeforeCheck");
   const rerollCheckbox = document.getElementById("imapRerollOnRetry");
+  const checkSpamInput = document.getElementById("imapCheckSpam");
+  const checkInboxInput = document.getElementById("imapCheckInbox");
   const allowedLatencyValue = clampNumber(
     allowedLatencyInput.value,
     IMAP_ALLOWED_MIN,
@@ -9783,9 +9791,16 @@ async function submitImapModal() {
   }
 }
 
-async function submitImapFetchLatest() {
+async function submitImapFetchLatest(event) {
   const { deviceId, domain, passwordSaved } = state.imapModal;
   if (!deviceId || !domain) return;
+  const trigger =
+    event && event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  const folderRaw = trigger && trigger.dataset ? trigger.dataset.folder : "";
+  const folder = (folderRaw || "").trim() || "Junk";
+  const folderLabel =
+    (trigger && trigger.dataset ? trigger.dataset.folderLabel : "") ||
+    (folder.toUpperCase() === "INBOX" ? "받은메일함" : "스팸함");
   const username = document.getElementById("imapUsername").value.trim();
   const passwordInput = document.getElementById("imapPassword");
   const rawPassword = passwordInput.value;
@@ -9798,17 +9813,27 @@ async function submitImapFetchLatest() {
     setImapModalMessage("비밀번호를 입력하거나 기존 비밀번호를 먼저 저장하세요.");
     return;
   }
-  const payload = { username };
+  const payload = { username, folder };
   if (rawPassword) {
     payload.password = rawPassword;
   } else if (useSavedPassword) {
     payload.use_saved_password = true;
   }
-  const latestBtn = document.getElementById("imapFetchLatestBtn");
-  if (latestBtn) {
-    latestBtn.disabled = true;
-    latestBtn.textContent = "가져오는 중...";
-  }
+  const fetchButtons = Array.from(
+    document.querySelectorAll('#imapModal [data-action="imap-fetch-latest"]')
+  );
+  fetchButtons.forEach((button) => {
+    button.disabled = true;
+    if (button === trigger) {
+      button.dataset.originalLabel = button.textContent;
+      button.textContent = "가져오는 중...";
+    } else {
+      const label = button.dataset.label;
+      if (label) {
+        button.textContent = label;
+      }
+    }
+  });
   state.imapModal.latestJobId = null;
   setImapModalMessage("");
 
@@ -9850,19 +9875,30 @@ async function submitImapFetchLatest() {
     } else if (status !== "success" && result.reason) {
       message = `${message} · ${result.reason}`;
     }
-    setImapModalMessage(message, status === "success" ? "success" : "error");
+    const prefixedMessage = folderLabel ? `[${folderLabel}] ${message}` : message;
+    setImapModalMessage(prefixedMessage, status === "success" ? "success" : "error");
     if (state.imapModal.card) {
-      setNotice(state.imapModal.card, message, status === "success" ? "success" : "error");
+      setNotice(
+        state.imapModal.card,
+        prefixedMessage,
+        status === "success" ? "success" : "error"
+      );
     }
     await loadDevices({ silent: true });
   } catch (err) {
-    setImapModalMessage(err.message || "최신 메일 확인 요청에 실패했습니다.");
+    const errorMessage = err.message || "최신 메일 확인 요청에 실패했습니다.";
+    const prefixedError = folderLabel ? `[${folderLabel}] ${errorMessage}` : errorMessage;
+    setImapModalMessage(prefixedError);
   } finally {
     state.imapModal.latestJobId = null;
-    if (latestBtn) {
-      latestBtn.disabled = false;
-      latestBtn.textContent = "최신 메일 확인";
-    }
+    fetchButtons.forEach((button) => {
+      button.disabled = false;
+      const label = button.dataset.label || button.dataset.originalLabel;
+      if (label) {
+        button.textContent = label;
+      }
+      delete button.dataset.originalLabel;
+    });
   }
 }
 
@@ -10827,10 +10863,11 @@ document.getElementById("fileModal").addEventListener("click", (event) => {
 });
 
 document.querySelector('[data-action="imap-save"]').addEventListener("click", submitImapModal);
-const imapFetchBtn = document.querySelector('[data-action="imap-fetch-latest"]');
-if (imapFetchBtn) {
-  imapFetchBtn.addEventListener("click", submitImapFetchLatest);
-}
+document
+  .querySelectorAll('#imapModal [data-action="imap-fetch-latest"]')
+  .forEach((button) => {
+    button.addEventListener("click", submitImapFetchLatest);
+  });
 const imapTestBtn = document.querySelector('[data-action="imap-test"]');
 if (imapTestBtn) {
   imapTestBtn.addEventListener("click", submitImapTest);
