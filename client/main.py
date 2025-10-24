@@ -19,7 +19,7 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from email import policy
 from email.parser import Parser
-from email.utils import format_datetime, parseaddr
+from email.utils import format_datetime
 from pathlib import Path
 from typing import Any, Deque, Dict, Iterable, List, Optional, Set, Tuple
 from datetime import datetime, timezone, timedelta
@@ -38,12 +38,13 @@ from lib.naver_imap import (
     verify_delivery,
     fetch_latest_message_summary,
     purge_imap_folder,
+    extract_email_address,
 )
 from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.90"
+APP_VERSION = "0.0.91"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -1919,8 +1920,8 @@ class MailClient:
                 text = str(candidate).strip()
                 if not text:
                     continue
-                _, parsed = parseaddr(text)
-                normalized_addr = (parsed or text).strip().strip("<>").strip().lower()
+                extracted = extract_email_address(text)
+                normalized_addr = (extracted or "").strip().lower()
                 if normalized_addr and normalized_addr not in purge_targets:
                     purge_targets.append(normalized_addr)
 
@@ -2474,8 +2475,8 @@ class MailClient:
             text = str(candidate).strip()
             if not text:
                 return
-            _, parsed = parseaddr(text)
-            normalized = (parsed or text).strip().strip("<>").strip().lower()
+            extracted = extract_email_address(text)
+            normalized = (extracted or "").strip().lower()
             if normalized and normalized not in targets:
                 targets.append(normalized)
 

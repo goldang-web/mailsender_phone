@@ -1,5 +1,6 @@
 import email
 import imaplib
+import re
 import socket
 import ssl
 import time
@@ -29,6 +30,39 @@ def decode_mime_header_value(value):
             except Exception:
                 return value.decode("latin-1", errors="replace").strip()
         return str(value).strip()
+
+
+_EMAIL_ADDRESS_PATTERN = re.compile(
+    r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*"
+)
+
+
+def _coerce_text(value: object) -> str:
+    if isinstance(value, bytes):
+        try:
+            return value.decode("utf-8", errors="ignore")
+        except Exception:
+            return value.decode("latin-1", errors="ignore")
+    return str(value)
+
+
+def extract_email_address(raw_value: object) -> str:
+    if not raw_value:
+        return ""
+    sources = []
+    primary = _coerce_text(raw_value)
+    if primary:
+        sources.append(primary)
+    decoded = decode_mime_header_value(raw_value)
+    if decoded and decoded not in sources:
+        sources.append(decoded)
+    for source in sources:
+        match = _EMAIL_ADDRESS_PATTERN.search(source)
+        if match:
+            candidate = match.group(0).strip()
+            if candidate:
+                return candidate
+    return ""
 
 
 def fetch_latest_message_summary(email_id: str, password: str, *, folder: str = "Junk", limit: int = 1) -> dict:
@@ -93,6 +127,7 @@ def fetch_latest_message_summary(email_id: str, password: str, *, folder: str = 
         decoded_subject = decode_mime_header_value(subject_header)
         name_part, address_part = parseaddr(from_header)
         decoded_name = decode_mime_header_value(name_part)
+        extracted_address = extract_email_address(from_header)
         received_at_iso = None
         received_at_local = None
         if date_header:
@@ -118,7 +153,7 @@ def fetch_latest_message_summary(email_id: str, password: str, *, folder: str = 
                 "sequence": sequence_id,
                 "from": decoded_from,
                 "from_name": decoded_name,
-                "from_address": address_part.strip(),
+                "from_address": (extracted_address or address_part or "").strip(),
                 "subject": decoded_subject,
                 "date_header": date_header or "",
                 "received_at_iso": received_at_iso,
@@ -173,16 +208,8 @@ def purge_imap_folder(
     matched_total = 0
 
     def _normalize_address(value: object) -> str:
-        if not value:
-            return ""
-        text = str(value).strip()
-        if not text:
-            return ""
-        _, parsed = parseaddr(text)
-        candidate = (parsed or text).strip().strip("<>").strip()
-        if not candidate:
-            return ""
-        return candidate.lower()
+        candidate = extract_email_address(value)
+        return candidate.lower() if candidate else ""
 
     target_addresses: List[str] = []
     if from_addresses:
@@ -450,8 +477,8 @@ def verify_delivery(
         return " ".join(candidate.split()).lower().strip()
 
     def _parse_address_lower(raw_value: str) -> str:
-        _, address = parseaddr(raw_value or "")
-        return (address or "").strip().lower()
+        address = extract_email_address(raw_value)
+        return address.lower() if address else ""
 
     expected_header_source = header_from or mail_from
     expected_header_display = decode_mime_header_value(expected_header_source) if expected_header_source else ""
@@ -541,8 +568,8 @@ def verify_delivery(
             from_header = msg.get("From") or ""
             decoded_from = decode_mime_header_value(from_header)
             normalized_header = _normalize_from_compare(from_header)
-            _, sender_address = parseaddr(from_header)
-            normalized_sender = (sender_address or "").strip().lower()
+            sender_address = extract_email_address(from_header)
+            normalized_sender = sender_address.lower() if sender_address else ""
             if expected_address_lower:
                 if not normalized_sender:
                     sender_mismatch_found = True
