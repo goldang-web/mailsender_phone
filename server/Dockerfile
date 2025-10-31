@@ -34,4 +34,4 @@ EXPOSE 8000
 
 # 8. 컨테이너가 시작되면 uvicorn을 통해 FastAPI 애플리케이션을 실행합니다.
 #    --host 0.0.0.0: 모든 인터페이스 수신, --port 8000: 기본 포트.
-CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
