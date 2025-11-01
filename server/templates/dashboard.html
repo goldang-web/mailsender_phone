@@ -2264,6 +2264,10 @@ button:not(:disabled):hover {
             <input type="checkbox" id="globalMessageIdAuto">
             <span>Message-ID 자동 삽입</span>
           </label>
+          <label class="inline-checkbox">
+            <input type="checkbox" id="globalAllHeadersUnique">
+            <span>모든 헤더 개별화</span>
+          </label>
         </div>
       </div>
       <div class="global-split">
@@ -2594,6 +2598,7 @@ const GLOBAL_FIELD_LIST = [
   "helo",
   "mail_from",
   "header",
+  "all_headers_unique",
   "session_count",
   "bcc_count",
   "stop_schedule_enabled",
@@ -2608,6 +2613,7 @@ const GLOBAL_DEFAULTS = {
   helo: "",
   mail_from: "",
   header: "",
+  all_headers_unique: false,
   session_count: "1",
   bcc_count: "0",
   stop_schedule_enabled: false,
@@ -2623,6 +2629,7 @@ const GLOBAL_INPUT_IDS = {
   helo: "globalHelo",
   mail_from: "globalMailFrom",
   header: "globalHeader",
+  all_headers_unique: "globalAllHeadersUnique",
   session_count: "globalSessionCount",
   bcc_count: "globalBccCount",
   stop_schedule_enabled: "globalStopScheduleToggle",
@@ -2713,6 +2720,7 @@ const state = {
     helo: false,
     mail_from: false,
     header: false,
+    all_headers_unique: false,
     session_count: false,
     bcc_count: false,
     stop_schedule_enabled: false,
@@ -4357,6 +4365,9 @@ function normalizeGlobalFieldValue(field, value) {
   }
   if (field === "stop_schedule_time") {
     return sanitizeScheduleTime(value ?? "");
+  }
+  if (field === "all_headers_unique") {
+    return Boolean(value);
   }
   if (field === "message_id_auto") {
     return Boolean(value ?? true);
@@ -6033,6 +6044,13 @@ function initGlobalForm() {
           state.globalScheduleError = "";
         }
         updateGlobalScheduleUI({ error: null });
+      });
+      return;
+    }
+    if (field === "all_headers_unique") {
+      input.addEventListener("change", () => {
+        state.globalDirty[field] = true;
+        state.globalDraft[field] = Boolean(input.checked);
       });
       return;
     }
@@ -8413,15 +8431,37 @@ function attachCardEvents(card) {
         "naver";
       const sanitizedDomain = sanitizeGlobalDomain(domain);
       const { payload } = collectConfigPayload(card, currentDevice, domain);
+      const deviceConfig = bestConfig(currentDevice, domain) || {};
+      const scheduleToggleEl = card.querySelector('[data-field="stop_schedule_enabled"]');
+      const scheduleTimeEl = card.querySelector('[data-field="stop_schedule_time"]');
+      const rawScheduleInput = scheduleTimeEl?.value ?? "";
+      const formattedScheduleInput = formatScheduleInputValue(rawScheduleInput);
+      if (scheduleTimeEl && scheduleTimeEl.value !== formattedScheduleInput) {
+        scheduleTimeEl.value = formattedScheduleInput;
+      }
+      const sanitizedScheduleInput = sanitizeScheduleTime(formattedScheduleInput);
+      const storedScheduleTime = sanitizeScheduleTime(deviceConfig?.stop_schedule_time) || "";
+      const effectiveScheduleTime = sanitizedScheduleInput || storedScheduleTime;
+      if (scheduleTimeEl && effectiveScheduleTime && scheduleTimeEl.value !== effectiveScheduleTime) {
+        scheduleTimeEl.value = effectiveScheduleTime;
+      }
+      const wantsScheduleEnable = Boolean(scheduleToggleEl?.checked);
+      const finalScheduleEnabled = wantsScheduleEnable && Boolean(effectiveScheduleTime);
+      if (scheduleToggleEl) {
+        scheduleToggleEl.checked = finalScheduleEnabled;
+      }
       applyValuesToGlobalDraft({
         active_domain: sanitizedDomain,
         helo: payload.helo,
         mail_from: payload.mail_from,
         header: payload.header,
+        all_headers_unique: payload.all_headers_unique,
         session_count: payload.session_count,
         bcc_count: payload.bcc_count,
         message_id_auto: payload.message_id_auto,
         message_id_pattern: payload.message_id_pattern,
+        stop_schedule_enabled: finalScheduleEnabled,
+        stop_schedule_time: effectiveScheduleTime,
       });
       setGlobalStatus("선택한 카드 설정을 전체 기기에 적용합니다...", "info");
       copyGlobalBtn.disabled = true;
@@ -8433,10 +8473,13 @@ function attachCardEvents(card) {
             helo: payload.helo,
             mail_from: payload.mail_from,
             header: payload.header,
+            all_headers_unique: payload.all_headers_unique,
             session_count: payload.session_count,
             bcc_count: payload.bcc_count,
             message_id_auto: payload.message_id_auto,
             message_id_pattern: payload.message_id_pattern,
+            stop_schedule_enabled: finalScheduleEnabled,
+            stop_schedule_time: effectiveScheduleTime,
           },
         });
       } finally {
@@ -10331,6 +10374,7 @@ async function handleGlobalApply(options = {}) {
   const headerInput = document.getElementById("globalHeader");
   const sessionInput = document.getElementById("globalSessionCount");
   const bccInput = document.getElementById("globalBccCount");
+  const allHeadersUniqueInput = document.getElementById("globalAllHeadersUnique");
   const messageIdAutoInput = document.getElementById("globalMessageIdAuto");
   const messageIdPatternInput = document.getElementById("globalMessageIdPattern");
   const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
@@ -10344,10 +10388,13 @@ async function handleGlobalApply(options = {}) {
   const hasHeloOverride = Object.prototype.hasOwnProperty.call(overrides, "helo");
   const hasMailFromOverride = Object.prototype.hasOwnProperty.call(overrides, "mail_from");
   const hasHeaderOverride = Object.prototype.hasOwnProperty.call(overrides, "header");
+  const hasAllHeadersOverride = Object.prototype.hasOwnProperty.call(overrides, "all_headers_unique");
   const hasSessionOverride = Object.prototype.hasOwnProperty.call(overrides, "session_count");
   const hasBccOverride = Object.prototype.hasOwnProperty.call(overrides, "bcc_count");
   const hasMessageIdAutoOverride = Object.prototype.hasOwnProperty.call(overrides, "message_id_auto");
   const hasMessageIdPatternOverride = Object.prototype.hasOwnProperty.call(overrides, "message_id_pattern");
+  const hasStopScheduleEnabledOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_enabled");
+  const hasStopScheduleTimeOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_time");
 
   let activeDomainValue;
   if (hasActiveDomainOverride) {
@@ -10405,6 +10452,19 @@ async function handleGlobalApply(options = {}) {
     }
   }
 
+  let allHeadersUniqueValue;
+  if (hasAllHeadersOverride) {
+    allHeadersUniqueValue = Boolean(overrides.all_headers_unique);
+  } else if (allHeadersUniqueInput) {
+    allHeadersUniqueValue = Boolean(allHeadersUniqueInput.checked);
+  } else {
+    allHeadersUniqueValue = Boolean(state.globalDraft.all_headers_unique ?? GLOBAL_DEFAULTS.all_headers_unique);
+  }
+  state.globalDraft.all_headers_unique = allHeadersUniqueValue;
+  if (allHeadersUniqueInput) {
+    allHeadersUniqueInput.checked = allHeadersUniqueValue;
+  }
+
   let sessionValue;
   if (hasSessionOverride) {
     sessionValue = sanitizeSessionValue(String(overrides.session_count ?? ""));
@@ -10459,6 +10519,28 @@ async function handleGlobalApply(options = {}) {
   state.globalDraft.message_id_pattern = messageIdPatternValue;
   if (messageIdPatternInput && messageIdPatternInput.value !== messageIdPatternValue) {
     messageIdPatternInput.value = messageIdPatternValue;
+  }
+  let stopScheduleEnabledOverrideValue;
+  if (hasStopScheduleEnabledOverride) {
+    stopScheduleEnabledOverrideValue = Boolean(overrides.stop_schedule_enabled);
+    if (scheduleToggle) {
+      scheduleToggle.checked = stopScheduleEnabledOverrideValue;
+    }
+    state.globalDraft.stop_schedule_enabled = stopScheduleEnabledOverrideValue;
+    state.globalDirty.stop_schedule_enabled = true;
+  }
+  let stopScheduleTimeOverrideValue;
+  if (hasStopScheduleTimeOverride) {
+    const overrideRawValue = overrides.stop_schedule_time;
+    const overrideString =
+      overrideRawValue === null || overrideRawValue === undefined ? "" : String(overrideRawValue);
+    const formattedOverride = formatScheduleInputValue(overrideString);
+    const sanitizedOverride = sanitizeScheduleTime(formattedOverride) || "";
+    if (scheduleTimeInput) {
+      scheduleTimeInput.value = sanitizedOverride;
+    }
+    state.globalDraft.stop_schedule_time = sanitizedOverride;
+    state.globalDirty.stop_schedule_time = true;
   }
   const telegramTokenValue = telegramTokenInput?.value.trim() ?? "";
   const telegramChatValue = telegramChatInput?.value.trim() ?? "";
@@ -10524,6 +10606,9 @@ async function handleGlobalApply(options = {}) {
   }
   if (messageIdPatternValue !== undefined && (hasMessageIdPatternOverride || messageIdPatternInput)) {
     payload.message_id_pattern = messageIdPatternValue;
+  }
+  if (allHeadersUniqueValue !== undefined && (hasAllHeadersOverride || allHeadersUniqueInput)) {
+    payload.all_headers_unique = Boolean(allHeadersUniqueValue);
   }
   payload.stop_schedule_enabled = toggleChecked && Boolean(sanitizedSchedule);
   payload.stop_schedule_time = sanitizedSchedule || "";

@@ -116,6 +116,7 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "helo": "",
     "mail_from": "",
     "header": "",
+    "all_headers_unique": False,
     "bcc_count": 0,
     "session_count": 1,
     "active_domain": "naver",
@@ -128,7 +129,16 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
     "imap_reroll_on_retry": False,
 }
-GLOBAL_CONFIG_DEVICE_FIELDS = ("helo", "mail_from", "header", "bcc_count", "session_count", "message_id_auto", "message_id_pattern")
+GLOBAL_CONFIG_DEVICE_FIELDS = (
+    "helo",
+    "mail_from",
+    "header",
+    "all_headers_unique",
+    "bcc_count",
+    "session_count",
+    "message_id_auto",
+    "message_id_pattern",
+)
 MAX_DEVICE_LOG_HISTORY = 10
 SUBSTITUTION_PATTERN = re.compile(r"\$\{([^{}]+)\}")
 FIELD_TOKEN_PATTERN = re.compile(r"^필드:([A-Za-z0-9_]+)$")
@@ -1097,6 +1107,14 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized["helo"] = str(raw.get("helo") or "").strip()
     sanitized["mail_from"] = str(raw.get("mail_from") or "").strip()
     sanitized["header"] = str(raw.get("header") or "")
+    raw_all_headers = raw.get("all_headers_unique")
+    if isinstance(raw_all_headers, str):
+        lowered = raw_all_headers.strip().lower()
+        sanitized["all_headers_unique"] = lowered in {"1", "true", "yes", "on"}
+    elif raw_all_headers is None:
+        sanitized["all_headers_unique"] = bool(DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
+    else:
+        sanitized["all_headers_unique"] = bool(raw_all_headers)
     sanitized["bcc_count"] = clamp_bcc_count(raw.get("bcc_count"))
     sanitized["session_count"] = sanitize_session_count(raw.get("session_count"))
     sanitized["active_domain"] = sanitize_global_active_domain(raw.get("active_domain"))
@@ -3552,6 +3570,7 @@ class GlobalConfigPayload(BaseModel):
     helo: Optional[str] = None
     mail_from: Optional[str] = None
     header: Optional[str] = None
+    all_headers_unique: Optional[bool] = None
     bcc_count: Optional[int] = None
     session_count: Optional[int] = None
     active_domain: Optional[str] = None
@@ -3568,6 +3587,7 @@ class GlobalConfigResponse(BaseModel):
     helo: str
     mail_from: str
     header: str
+    all_headers_unique: bool
     bcc_count: int
     session_count: int
     active_domain: str
@@ -3705,6 +3725,14 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
     schedule_enabled = sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled"))
     if schedule_enabled and not schedule_time:
         schedule_enabled = False
+    raw_all_headers = config.get("all_headers_unique")
+    if isinstance(raw_all_headers, str):
+        lowered = raw_all_headers.strip().lower()
+        all_headers_unique = lowered in {"1", "true", "yes", "on"}
+    elif raw_all_headers is None:
+        all_headers_unique = bool(DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
+    else:
+        all_headers_unique = bool(raw_all_headers)
     raw_message_auto = config.get("message_id_auto")
     if isinstance(raw_message_auto, str):
         lowered = raw_message_auto.strip().lower()
@@ -3718,6 +3746,7 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
         helo=config.get("helo", ""),
         mail_from=config.get("mail_from", ""),
         header=config.get("header", ""),
+        all_headers_unique=all_headers_unique,
         bcc_count=clamp_bcc_count(config.get("bcc_count", 0)),
         session_count=sanitize_session_count(config.get("session_count", 1)),
         active_domain=sanitize_global_active_domain(config.get("active_domain")),
@@ -3778,6 +3807,11 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
             elif field == "session_count":
                 value_to_apply = sanitize_session_count(raw_value)
                 should_apply = raw_value is not None
+            elif field == "all_headers_unique":
+                if raw_value is None:
+                    continue
+                value_to_apply = 1 if raw_value else 0
+                should_apply = True
             elif field == "message_id_auto":
                 if raw_value is None:
                     continue
@@ -3793,7 +3827,7 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 continue
             if should_apply:
                 apply_values[field] = value_to_apply
-                if field == "message_id_auto":
+                if field in ("message_id_auto", "all_headers_unique"):
                     stored_config[field] = bool(value_to_apply)
                 else:
                     stored_config[field] = value_to_apply
