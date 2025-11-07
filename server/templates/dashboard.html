@@ -3189,6 +3189,36 @@ function normalizeDeviceDomain(value) {
   return "naver";
 }
 
+function normalizeOptionalDomain(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+  const candidate = String(value).trim().toLowerCase();
+  if (candidate === "naver" || candidate === "daum") {
+    return candidate;
+  }
+  return null;
+}
+
+function recordMatchesDomain(recordDomain, targetDomain, options = {}) {
+  if (!targetDomain) {
+    return true;
+  }
+  const normalizedTarget = normalizeDeviceDomain(targetDomain);
+  const normalizedRecord = normalizeOptionalDomain(recordDomain);
+  if (normalizedRecord) {
+    return normalizedRecord === normalizedTarget;
+  }
+  if (options.allowCommon !== false) {
+    const fallback = normalizeOptionalDomain(options.fallbackDomain);
+    if (fallback) {
+      return fallback === normalizedTarget;
+    }
+    return true;
+  }
+  return false;
+}
+
 function sanitizeScheduleTime(value) {
   if (value === undefined || value === null) {
     return "";
@@ -3885,7 +3915,26 @@ async function ensureConfigSynced(card, currentDevice, domain) {
 }
 
 function getActiveDomain(card, fallback) {
-  return card.dataset.activeDomain || fallback || "naver";
+  if (card?.dataset?.activeDomain) {
+    return normalizeDeviceDomain(card.dataset.activeDomain);
+  }
+  if (fallback) {
+    return normalizeDeviceDomain(fallback);
+  }
+  return "naver";
+}
+
+function applyActiveDomain(card, device, domain) {
+  const resolved = normalizeDeviceDomain(
+    domain || card?.dataset?.activeDomain || device?.active_domain || "naver",
+  );
+  if (device && device.active_domain !== resolved) {
+    device.active_domain = resolved;
+  }
+  if (card) {
+    card.dataset.activeDomain = resolved;
+  }
+  return resolved;
 }
 
 function formatDate(iso) {
@@ -6374,11 +6423,20 @@ function buildLogDisplayText(entry) {
   return baseText;
 }
 
-function latestChangeIpJob(device) {
+function latestChangeIpJob(device, domain) {
   if (!device?.jobs?.length) {
     return null;
   }
-  const candidates = device.jobs.filter((job) => job.job_type === "change_ip");
+  const normalizedDomain = domain ? normalizeDeviceDomain(domain) : null;
+  const candidates = device.jobs.filter((job) => {
+    if ((job?.job_type || "").toLowerCase() !== "change_ip") {
+      return false;
+    }
+    if (!normalizedDomain) {
+      return true;
+    }
+    return recordMatchesDomain(job?.domain, normalizedDomain, { fallbackDomain: device?.active_domain });
+  });
   if (!candidates.length) {
     return null;
   }
@@ -6395,8 +6453,7 @@ function latestSingleJob(device, domain) {
     if (!SINGLE_JOB_TYPES.has(jobType)) {
       return false;
     }
-    const jobDomain = normalizeDeviceDomain(job.domain || device.active_domain || targetDomain);
-    return jobDomain === targetDomain;
+    return recordMatchesDomain(job?.domain, targetDomain, { fallbackDomain: device?.active_domain });
   });
   if (!candidates.length) {
     return null;
@@ -6414,8 +6471,7 @@ function latestImapManualJob(device, domain) {
     if (!IMAP_CHECK_JOB_TYPES.has(jobType)) {
       return false;
     }
-    const jobDomain = normalizeDeviceDomain(job.domain || device.active_domain || targetDomain);
-    return jobDomain === targetDomain;
+    return recordMatchesDomain(job?.domain, targetDomain, { fallbackDomain: device?.active_domain });
   });
   if (!candidates.length) {
     return null;
@@ -6423,11 +6479,20 @@ function latestImapManualJob(device, domain) {
   return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
 }
 
-function latestBatchJob(device) {
+function latestBatchJob(device, domain) {
   if (!device?.jobs?.length) {
     return null;
   }
-  const candidates = device.jobs.filter((job) => job.job_type === "batch_send");
+  const normalizedDomain = domain ? normalizeDeviceDomain(domain) : null;
+  const candidates = device.jobs.filter((job) => {
+    if ((job?.job_type || "").toLowerCase() !== "batch_send") {
+      return false;
+    }
+    if (!normalizedDomain) {
+      return true;
+    }
+    return recordMatchesDomain(job?.domain, normalizedDomain, { fallbackDomain: device?.active_domain });
+  });
   if (!candidates.length) {
     return null;
   }
@@ -6568,6 +6633,46 @@ function applyScheduledSingleSendJob(card, currentDevice, scheduledJob) {
   card.__deviceData = updatedDevice;
   updateSingleSendControls(card, updatedDevice);
   return updatedDevice;
+}
+
+function syncDeviceJobInState(deviceId, job) {
+  if (!deviceId || !job || !Array.isArray(state.devices)) {
+    return;
+  }
+  const index = state.devices.findIndex((item) => item.id === deviceId);
+  if (index < 0) {
+    return;
+  }
+  const device = state.devices[index];
+  const jobs = Array.isArray(device.jobs) ? [...device.jobs] : [];
+  const normalizedJob = {
+    ...job,
+    progress: Array.isArray(job.progress) ? job.progress : [],
+  };
+  const existingIdx = jobs.findIndex((entry) => entry?.id === normalizedJob.id);
+  if (existingIdx >= 0) {
+    jobs[existingIdx] = { ...jobs[existingIdx], ...normalizedJob };
+  } else {
+    jobs.unshift(normalizedJob);
+  }
+  state.devices[index] = { ...device, jobs };
+}
+
+function refreshCardRuntimeState(card, device, options = {}) {
+  if (!card || !device) {
+    return;
+  }
+  const domain = getActiveDomain(card, device.active_domain);
+  updateSingleSendControls(card, device);
+  updateBatchControls(card, device);
+  updateIpControls(card, device);
+  updateSuccessCounter(card, device);
+  if (options.refreshLogs) {
+    const logListEl = card.querySelector('[data-role="logList"]');
+    if (logListEl) {
+      renderLogList(device, logListEl, domain);
+    }
+  }
 }
 
 function hasActiveBatchJob(device) {
@@ -6990,7 +7095,8 @@ function markImapStatusChecking(card, options = {}) {
 function updateBatchControls(card, device) {
   const batchBtn = card.querySelector('button[data-action="batch"]');
   const cancelBtn = card.querySelector('button[data-action="cancel-batch"]');
-  const job = latestBatchJob(device);
+  const activeDomain = normalizeDeviceDomain(getActiveDomain(card, device?.active_domain));
+  const job = latestBatchJob(device, activeDomain);
   if (!job) {
     if (batchBtn) {
       batchBtn.disabled = false;
@@ -7002,11 +7108,13 @@ function updateBatchControls(card, device) {
       cancelBtn.textContent = "중지";
     }
     card.dataset.currentBatchJobId = "";
+    card.dataset.currentBatchJobDomain = "";
     return;
   }
   const cancelRequested = Boolean(job.cancel_requested);
   const isActive = ACTIVE_JOB_STATES.has(job.status);
   card.dataset.currentBatchJobId = (isActive || cancelRequested) ? (job.id || "") : "";
+  card.dataset.currentBatchJobDomain = isActive || cancelRequested ? activeDomain : "";
   if (batchBtn) {
     if (isActive || cancelRequested) {
       batchBtn.disabled = true;
@@ -7039,6 +7147,7 @@ function updateIpControls(card, device) {
   const ipRow = card.querySelector('[data-role="ipRow"]');
   const ipValue = (device?.public_ip || "").trim();
   const isOnline = device?.status === "connected";
+  const activeDomain = normalizeDeviceDomain(getActiveDomain(card, device?.active_domain));
   if (publicIpEl) {
     if (ipValue) {
       publicIpEl.textContent = ipValue;
@@ -7052,7 +7161,7 @@ function updateIpControls(card, device) {
     ipRow.classList.toggle("offline", !isOnline);
   }
   if (changeBtn) {
-    const job = latestChangeIpJob(device);
+    const job = latestChangeIpJob(device, activeDomain);
     const inProgress = job ? ACTIVE_JOB_STATES.has(job.status) : false;
     if (!isOnline) {
       changeBtn.disabled = true;
@@ -7312,19 +7421,36 @@ function renderLastSync() {
   el.textContent = `최근 새로고침: ${formatDate(state.lastSync)}`;
 }
 
-function renderLogList(device, container) {
-  const logs = device.logs || [];
+function renderLogList(device, container, domain) {
+  if (!device || !container) {
+    return;
+  }
   const card = container.closest(".card");
+  const resolvedDomain = normalizeDeviceDomain(
+    domain
+      || card?.dataset?.activeDomain
+      || device.active_domain
+      || "naver",
+  );
+  const logs = (device.logs || []).filter((entry) => {
+    const entryDomain = normalizeOptionalDomain(entry?.domain);
+    if (!entryDomain) {
+      return true;
+    }
+    return entryDomain === resolvedDomain;
+  });
   const clearBtn = card?.querySelector('button[data-action="clear-logs"]');
   if (clearBtn) {
     clearBtn.disabled = !logs.length;
   }
   if (!logs.length) {
-    container.innerHTML = '<div class="meta">발송 로그가 없습니다.</div>';
+    const domainLabel = DOMAIN_LABELS[resolvedDomain] || resolvedDomain;
+    container.innerHTML = `<div class="meta">${domainLabel} 도메인 발송 로그가 없습니다.</div>`;
     return;
   }
   container.innerHTML = "";
   logs.slice(0, 10).forEach((entry) => {
+    const entryDomain = normalizeOptionalDomain(entry?.domain) || resolvedDomain;
     const item = document.createElement("div");
     item.className = `log-item ${entry.success ? "ok" : "fail"}`;
 
@@ -7335,7 +7461,7 @@ function renderLogList(device, container) {
 
     const meta = document.createElement("div");
     meta.className = "log-meta";
-    const label = DOMAIN_LABELS[entry.domain] || entry.domain || "-";
+    const label = DOMAIN_LABELS[entryDomain] || entry.domain || entryDomain || "도메인 미지정";
     meta.textContent = `${label} · ${formatDate(entry.created_at)}`;
     item.appendChild(meta);
 
@@ -7343,12 +7469,16 @@ function renderLogList(device, container) {
   });
 }
 
-function ensureSuccessTracker(deviceId) {
+function ensureSuccessTracker(deviceId, domain) {
   if (!deviceId) {
     return null;
   }
+  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
   if (!state.successCounters[deviceId]) {
-    state.successCounters[deviceId] = {
+    state.successCounters[deviceId] = {};
+  }
+  if (!state.successCounters[deviceId][normalizedDomain]) {
+    state.successCounters[deviceId][normalizedDomain] = {
       lastBatchId: null,
       resetCutoff: null,
       value: 0,
@@ -7358,7 +7488,7 @@ function ensureSuccessTracker(deviceId) {
       forceZero: false,
     };
   }
-  return state.successCounters[deviceId];
+  return state.successCounters[deviceId][normalizedDomain];
 }
 
 function parseTimestampMs(value) {
@@ -7457,15 +7587,16 @@ function describeElapsedStatus(job) {
   };
 }
 
-function updateSuccessTrackerFromDevice(device) {
+function updateSuccessTrackerFromDevice(device, domain) {
   if (!device || !device.id) {
     return null;
   }
-  const tracker = ensureSuccessTracker(device.id);
+  const normalizedDomain = normalizeDeviceDomain(domain || device.active_domain || "naver");
+  const tracker = ensureSuccessTracker(device.id, normalizedDomain);
   if (!tracker) {
     return null;
   }
-  const job = latestBatchJob(device);
+  const job = latestBatchJob(device, normalizedDomain);
   const jobId = job?.id || null;
   if (jobId && tracker.lastBatchId !== jobId) {
     tracker.lastBatchId = jobId;
@@ -7530,6 +7661,9 @@ function updateSuccessTrackerFromDevice(device) {
   let anchorFromLogs = 0;
   let sawSuccessLog = false;
   (device.logs || []).forEach((entry) => {
+    if (!recordMatchesDomain(entry?.domain, normalizedDomain, { fallbackDomain: device.active_domain })) {
+      return;
+    }
     if (!entry?.success) {
       return;
     }
@@ -7614,7 +7748,8 @@ function updateSuccessCounter(card, device) {
   if (!card || !device) {
     return;
   }
-  const result = updateSuccessTrackerFromDevice(device);
+  const activeDomain = normalizeDeviceDomain(getActiveDomain(card, device.active_domain));
+  const result = updateSuccessTrackerFromDevice(device, activeDomain);
   if (!result) {
     return;
   }
@@ -7798,6 +7933,8 @@ function renderImapSection(card, device, domain) {
   if (!block) return;
   const isNaver = domain === "naver";
   const configMetaEl = block.querySelector('[data-role="imapConfigMeta"]');
+  const thresholdMetaEl = block.querySelector('[data-role="imapThresholdMeta"]');
+  const rerollMetaEl = block.querySelector('[data-role="imapRerollMeta"]');
   block.classList.toggle("hidden", !isNaver);
   if (!isNaver) {
     block.dataset.imapUsername = "";
@@ -7826,7 +7963,6 @@ function renderImapSection(card, device, domain) {
     delete block.dataset.imapHoldKind;
     delete block.dataset.imapHoldMessage;
     delete block.dataset.imapHoldReason;
-    const thresholdMetaEl = block.querySelector('[data-role="imapThresholdMeta"]');
     if (thresholdMetaEl) {
       thresholdMetaEl.textContent = "Sent 누적 확인: 사용 안 함";
       thresholdMetaEl.title = "네이버 도메인에서만 Sent 누적 기준으로 IMAP 확인을 제공합니다.";
@@ -7858,8 +7994,6 @@ function renderImapSection(card, device, domain) {
   }
   const statusEl = block.querySelector('[data-role="imapStatus"]');
   const metaEl = block.querySelector('[data-role="imapMeta"]');
-  const thresholdMetaEl = block.querySelector('[data-role="imapThresholdMeta"]');
-  const rerollMetaEl = block.querySelector('[data-role="imapRerollMeta"]');
   const holdStatus = block.dataset.imapHoldStatus || "";
   const holdCheckedAt = block.dataset.imapHoldCheckedAt || "";
   const holdSetAt = Number(block.dataset.imapHoldSetAt || "0");
@@ -8066,10 +8200,10 @@ function renderImapSection(card, device, domain) {
 }
 
 function populateConfigForm(card, device, domain) {
-  const config = bestConfig(device, domain);
-  const cache = ensureFieldCache(device.id, domain, config);
-  card.dataset.activeDomain = domain;
-  renderDomainSummary(card, device, domain);
+  const activeDomain = applyActiveDomain(card, device, domain);
+  const config = bestConfig(device, activeDomain);
+  const cache = ensureFieldCache(device.id, activeDomain, config);
+  renderDomainSummary(card, device, activeDomain);
   const heloInput = card.querySelector('[data-field="helo"]');
   if (heloInput && document.activeElement !== heloInput) heloInput.value = cache.values.helo;
   const mailInput = card.querySelector('[data-field="mail_from"]');
@@ -8092,9 +8226,9 @@ function populateConfigForm(card, device, domain) {
   if (anchorEmailInput && document.activeElement !== anchorEmailInput) anchorEmailInput.value = cache.values.anchor_email;
   const rcptInput = card.querySelector('[data-field="rcpt_to"]');
   if (rcptInput && document.activeElement !== rcptInput) rcptInput.value = cache.values.rcpt_to;
-  updateCardLockUI(card, config, domain);
-  updateDeviceSchedule(card, device, domain, config);
-  renderImapSection(card, device, domain);
+  updateCardLockUI(card, config, activeDomain);
+  updateDeviceSchedule(card, device, activeDomain, config);
+  renderImapSection(card, device, activeDomain);
 }
 
 function attachCardEvents(card) {
@@ -8116,15 +8250,46 @@ function attachCardEvents(card) {
       const originalText = changeIpBtn.textContent;
       changeIpBtn.disabled = true;
       changeIpBtn.textContent = "IP 변경 중...";
+      let scheduledJob = null;
       try {
-        await fetchJSON(`/api/devices/${currentDevice.id}/actions/change-ip`, { method: "POST" });
+        const result = await fetchJSON(`/api/devices/${currentDevice.id}/actions/change-ip`, { method: "POST" });
+        scheduledJob = result?.job || null;
+        if (scheduledJob) {
+          const baseDevice = card.__deviceData || currentDevice || {};
+          const jobs = Array.isArray(baseDevice.jobs) ? [...baseDevice.jobs] : [];
+          const normalizedJob = {
+            ...scheduledJob,
+            job_type: (scheduledJob.job_type || "change_ip").toLowerCase(),
+            status: scheduledJob.status || "pending",
+            progress: Array.isArray(scheduledJob.progress) ? scheduledJob.progress : [],
+            cancel_requested: Boolean(scheduledJob.cancel_requested),
+          };
+          const existingIdx = jobs.findIndex((job) => job?.id === normalizedJob.id);
+          if (existingIdx >= 0) {
+            jobs[existingIdx] = { ...jobs[existingIdx], ...normalizedJob };
+          } else {
+            jobs.unshift(normalizedJob);
+          }
+          const updatedDevice = { ...baseDevice, jobs };
+          card.__deviceData = updatedDevice;
+          syncDeviceJobInState(currentDevice.id, normalizedJob);
+          refreshCardRuntimeState(card, updatedDevice);
+        } else {
+          refreshCardRuntimeState(card, card.__deviceData || currentDevice);
+        }
+        renderMonitoring();
         setNotice(card, "IP 변경 작업을 요청했습니다.");
         await loadDevices({ silent: true });
       } catch (err) {
         changeIpBtn.disabled = false;
         changeIpBtn.textContent = originalText || "IP 변경";
         setNotice(card, err.message || "IP 변경 요청에 실패했습니다.", "error");
+        updateIpControls(card, card.__deviceData || currentDevice);
+        return;
       }
+      changeIpBtn.disabled = false;
+      changeIpBtn.textContent = originalText || "IP 변경";
+      updateIpControls(card, card.__deviceData || currentDevice);
     });
   }
 
@@ -8170,8 +8335,22 @@ function attachCardEvents(card) {
         });
         currentDevice.active_domain = domain;
         card.__deviceData = { ...currentDevice };
-        populateConfigForm(card, currentDevice, domain);
-        updateSingleSendControls(card, card.__deviceData);
+        const updatedDevice = card.__deviceData;
+        const stateIndex = state.devices.findIndex((item) => item.id === currentDevice.id);
+        if (stateIndex >= 0) {
+          state.devices[stateIndex] = { ...state.devices[stateIndex], active_domain: domain };
+        }
+        populateConfigForm(card, updatedDevice, domain);
+        renderDomainSummary(card, updatedDevice, domain);
+        updateSingleSendControls(card, updatedDevice);
+        updateBatchControls(card, updatedDevice);
+        updateIpControls(card, updatedDevice);
+        const logListEl = card.querySelector('[data-role="logList"]');
+        if (logListEl) {
+          renderLogList(updatedDevice, logListEl, domain);
+        }
+        updateSuccessCounter(card, updatedDevice);
+        renderMonitoring();
         setNotice(card, `${DOMAIN_LABELS[domain]} 도메인으로 전환했습니다.`);
       } catch (err) {
         setNotice(card, err.message || "도메인 전환에 실패했습니다.", "error");
@@ -8528,7 +8707,12 @@ function attachCardEvents(card) {
           body: JSON.stringify(payload),
         });
         jobScheduled = true;
-        applyScheduledSingleSendJob(card, currentDevice, result?.job);
+        const updatedDevice = applyScheduledSingleSendJob(card, currentDevice, result?.job);
+        if (result?.job) {
+          syncDeviceJobInState(currentDevice.id, result.job);
+        }
+        refreshCardRuntimeState(card, updatedDevice);
+        renderMonitoring();
         setNotice(card, "단일 발송 작업을 추가했습니다.");
         try {
           await loadDevices();
@@ -8609,7 +8793,12 @@ function attachCardEvents(card) {
           });
           markImapStatusChecking(card, { delaySeconds: singleDelaySeconds, kind: "single" });
           jobScheduled = true;
-          applyScheduledSingleSendJob(card, currentDevice, result?.job);
+          const updatedDevice = applyScheduledSingleSendJob(card, currentDevice, result?.job);
+          if (result?.job) {
+            syncDeviceJobInState(currentDevice.id, result.job);
+          }
+          refreshCardRuntimeState(card, updatedDevice);
+          renderMonitoring();
           const purgeEnabled = (imapBlock?.dataset?.imapPurgeBeforeCheck || "0") === "1";
           const baseNotice = `IMAP 계정(${rcptTo})으로 수동 도착 확인 흐름을 시작했습니다.`;
           const noticeMessage = purgeEnabled
@@ -8770,7 +8959,7 @@ function attachCardEvents(card) {
         if (card.__deviceData) {
           card.__deviceData.logs = [];
         }
-        const tracker = ensureSuccessTracker(currentDevice.id);
+        const tracker = ensureSuccessTracker(currentDevice.id, activeDomain);
         if (tracker) {
           tracker.value = 0;
           tracker.current = 0;
@@ -8994,8 +9183,7 @@ function updateDeviceCard(card, device) {
   card.dataset.deviceId = device.id;
   const isOffline = device.status === "disconnected";
   card.classList.toggle("offline", isOffline);
-  const activeDomain = device.active_domain || card.dataset.activeDomain || "naver";
-  card.dataset.activeDomain = activeDomain;
+  const activeDomain = applyActiveDomain(card, device, device.active_domain);
 
   const nameEl = card.querySelector('[data-role="deviceName"]');
   if (nameEl) nameEl.textContent = device.name;
@@ -9020,7 +9208,7 @@ function updateDeviceCard(card, device) {
   updateSingleSendControls(card, device);
 
   const logListEl = card.querySelector('[data-role="logList"]');
-  if (logListEl) renderLogList(device, logListEl);
+  if (logListEl) renderLogList(device, logListEl, activeDomain);
   updateSuccessCounter(card, device);
   updateBatchControls(card, device);
 }
@@ -9091,7 +9279,9 @@ function renderMonitoring() {
   }
 
   const entries = devices.map((device) => {
-    const result = updateSuccessTrackerFromDevice(device);
+    const card = cardRegistry[device.id];
+    const activeDomain = applyActiveDomain(card, device, device.active_domain);
+    const result = updateSuccessTrackerFromDevice(device, activeDomain);
     const tracker = result?.tracker;
     const job = result?.job;
     const statusKey = resolveMonitoringStatus(device);
@@ -9262,7 +9452,14 @@ async function loadDevices(options = {}) {
   }
   try {
     const data = await fetchJSON("/api/devices", { method: "GET" });
-    state.devices = data.devices || [];
+    const devices = Array.isArray(data.devices) ? data.devices : [];
+    devices.forEach((device) => {
+      if (!device || typeof device !== "object") {
+        return;
+      }
+      device.active_domain = normalizeDeviceDomain(device.active_domain || "naver");
+    });
+    state.devices = devices;
     if (state.filterOnlineOnly) {
       const hasOnlineDevices = (state.devices || []).some((device) => device.status === "connected");
       const hasAnyDevices = (state.devices || []).length > 0;
