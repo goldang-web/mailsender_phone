@@ -4318,6 +4318,40 @@ class MailClient:
             return True
         return False
 
+    @staticmethod
+    def _format_data_end_detail(data_response: Optional[Dict[str, object]]) -> Optional[str]:
+        if not isinstance(data_response, dict):
+            return None
+        code = str(data_response.get("code") or "").strip()
+        message = str(data_response.get("message") or "").strip()
+        if not code and not message:
+            return None
+        if message:
+            display = message
+            if code and not message.lower().startswith(code.lower()):
+                display = f"{code} {message}".strip()
+        else:
+            display = code
+        if not display:
+            return None
+        if display.lower().startswith("data end"):
+            return display
+        return f"DATA END: {display}"
+
+    @staticmethod
+    def _merge_detail_texts(preferred: Optional[str], existing: Optional[str]) -> Optional[str]:
+        preferred_value = (preferred or "").strip()
+        existing_value = (existing or "").strip()
+        if preferred_value and existing_value:
+            if preferred_value.lower() in existing_value.lower():
+                return existing
+            return f"{preferred_value} / {existing_value}"
+        if preferred_value:
+            return preferred_value
+        if existing_value:
+            return existing_value
+        return None
+
     def _select_bcc_candidates(
         self,
         domain: str,
@@ -5235,10 +5269,18 @@ class MailClient:
                 if self._normalize_email_key(entry.get("address")) in nouser_map
             }
         )
+        data_response_code = (data_response or {}).get("code")
+        data_response_message = (data_response or {}).get("message")
+        data_response_detail = self._format_data_end_detail(data_response)
         data_ok = self._is_data_accepted(
-            (data_response or {}).get("code"),
-            (data_response or {}).get("message"),
+            data_response_code,
+            data_response_message,
         )
+        if data_response_detail:
+            if not data_ok:
+                detail_line = self._merge_detail_texts(data_response_detail, detail_line)
+            elif not detail_line:
+                detail_line = data_response_detail
         def _normalize_detail_text(value: Optional[object]) -> Optional[str]:
             if value is None:
                 return None
@@ -5267,10 +5309,15 @@ class MailClient:
         else:
             accumulated_total = max(0, int(self.sent_sequences.get(sequence_domain, 0)))
         current_batch_success = self._sent_log_progress(sequence_domain, accumulated_total)
-        detail_payload = _normalize_detail_text(detail_line) or _normalize_detail_text(status_line)
+        detail_payload = (
+            _normalize_detail_text(detail_line)
+            or _normalize_detail_text(status_line)
+            or _normalize_detail_text(data_response_detail)
+        )
         failure_detail = None
         if not session_success:
             detail_candidates: List[Optional[object]] = [
+                data_response_detail,
                 detail_line,
                 status_line,
                 (data_response or {}).get("message") if isinstance(data_response, dict) else None,
@@ -6080,6 +6127,16 @@ class MailClient:
                     else:
                         delivery_status_override = self._classify_delivery(success, response_text)
                         status_line, detail_line = self._smtp_status_and_detail(response_text)
+                    data_ok_snapshot = self._is_data_accepted(
+                        (data_response or {}).get("code"),
+                        (data_response or {}).get("message"),
+                    )
+                    data_response_detail = self._format_data_end_detail(data_response)
+                    if data_response_detail:
+                        if not data_ok_snapshot:
+                            detail_line = self._merge_detail_texts(data_response_detail, detail_line)
+                        elif not detail_line:
+                            detail_line = data_response_detail
                     response_text = response_text or ""
                     sent_at = completed_at if isinstance(completed_at, datetime) else utc_now()
                     delivery_status = delivery_status_override
