@@ -10780,6 +10780,10 @@ async function handleGlobalApply(options = {}) {
   const upcomingRulesSnapshot = JSON.stringify(substitutionPayload);
 
   const payload = {};
+  const targetDomainValue = activeDomainValue || sanitizeGlobalDomain(state.globalDraft.active_domain);
+  if (targetDomainValue) {
+    payload.target_domain = targetDomainValue;
+  }
   if (activeDomainValue !== undefined && (hasActiveDomainOverride || activeDomainRadio)) {
     payload.active_domain = activeDomainValue;
   }

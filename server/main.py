@@ -1298,9 +1298,16 @@ def save_global_config(conn: sqlite3.Connection, config: Dict[str, Any]) -> str:
 def apply_global_config_to_devices(
     conn: sqlite3.Connection,
     values: Dict[str, str],
+    *,
+    target_domain: Optional[str] = None,
 ) -> Tuple[int, int]:
     if not values:
         return 0, 0
+    if target_domain:
+        normalized_domain = normalize_domain(target_domain)
+        domains = (normalized_domain,)
+    else:
+        domains = DOMAINS
     fields = tuple(values.keys())
     now = now_ts()
     device_rows = conn.execute(
@@ -1315,7 +1322,7 @@ def apply_global_config_to_devices(
     total_updates = 0
     for row in device_rows:
         device_id = row["id"]
-        for domain in DOMAINS:
+        for domain in domains:
             params = base_params + [now, device_id, domain]
             conn.execute(query, params)
             total_updates += 1
@@ -3574,6 +3581,7 @@ class GlobalConfigPayload(BaseModel):
     bcc_count: Optional[int] = None
     session_count: Optional[int] = None
     active_domain: Optional[str] = None
+    target_domain: Optional[str] = None
     stop_schedule_enabled: Optional[bool] = None
     stop_schedule_time: Optional[str] = None
     substitution_rules: Optional[List[SubstitutionRule]] = None
@@ -3776,6 +3784,11 @@ def get_global_config_endpoint() -> GlobalConfigResponse:
 def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]:
     fields_set = getattr(payload, "__fields_set__", set())
     domain_update_requested = "active_domain" in fields_set
+    target_domain: Optional[str] = None
+    if "target_domain" in fields_set:
+        raw_target_domain = (payload.target_domain or "").strip().lower()
+        if raw_target_domain:
+            target_domain = normalize_domain(raw_target_domain)
     schedule_reset_last_run = False
     with db_lock, get_conn() as conn:
         current_config = load_global_config(conn=conn)
@@ -3900,7 +3913,11 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 stored_config["telegram_chat_id"] = sanitized_chat_id
         else:
             stored_config["telegram_chat_id"] = sanitize_telegram_chat_id(stored_config.get("telegram_chat_id"))
-        device_count, update_count = apply_global_config_to_devices(conn, apply_values)
+        device_count, update_count = apply_global_config_to_devices(
+            conn,
+            apply_values,
+            target_domain=target_domain,
+        )
         domain_update_count = 0
         if active_domain_changed:
             domain_update_count = apply_global_active_domain(conn, requested_active_domain)
