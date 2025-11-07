@@ -5358,10 +5358,13 @@ class MailClient:
                 "bcc_recipients": list(bcc_emails),
             }
         ]
+        console_log_line = log_line
         if not session_success and detail_payload:
-            dispatch_logs[0]["display"] = f"{log_line} · {detail_payload}"
+            enriched = f"{log_line} · {detail_payload}"
+            dispatch_logs[0]["display"] = enriched
             dispatch_logs[0]["error"] = detail_payload
-        print(log_line)
+            console_log_line = enriched
+        print(console_log_line)
         status = "success" if session_success else "failed"
         if delivery_status == "sent" and normalized_domain and self._imap_enabled(normalized_domain):
             if mail_from_value:
