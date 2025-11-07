@@ -4324,6 +4324,7 @@ class MailClient:
             return None
         code = str(data_response.get("code") or "").strip()
         message = str(data_response.get("message") or "").strip()
+        source = str(data_response.get("source") or "").strip()
         if not code and not message:
             return None
         if message:
@@ -4334,9 +4335,11 @@ class MailClient:
             display = code
         if not display:
             return None
-        if display.lower().startswith("data end"):
+        label = source or "DATA END"
+        normalized_label = label.lower()
+        if display.lower().startswith(normalized_label):
             return display
-        return f"DATA END: {display}"
+        return f"{label}: {display}"
 
     @staticmethod
     def _merge_detail_texts(preferred: Optional[str], existing: Optional[str]) -> Optional[str]:

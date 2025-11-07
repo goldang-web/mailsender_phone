@@ -90,6 +90,8 @@ def send_via_telnet(
         rcpt_details = []
         data_end_code = ""
         data_end_message = ""
+        quit_code = ""
+        quit_message = ""
         rcpt_success = True
         for label, message in response_entries:
             if not label:
@@ -119,15 +121,32 @@ def send_via_telnet(
                 detail_text = message or ""
                 data_end_code = detail_text.split()[0] if detail_text else ""
                 data_end_message = detail_text
+            elif label == "QUIT":
+                detail_text = message or ""
+                quit_code = detail_text.split()[0] if detail_text else ""
+                quit_message = detail_text
         if not rcpt_details:
             # 구형 응답 포맷 대비: RCPT 라인 없이 250만 있는 경우
             rcpt_success = True
-        final_ack_success = data_end_code.startswith("2") if data_end_code else False
+        final_ack_code = ""
+        final_ack_message = ""
+        final_ack_source = ""
+        if data_end_code or data_end_message:
+            final_ack_code = data_end_code
+            final_ack_message = data_end_message
+            final_ack_source = "DATA END"
+        elif quit_code or quit_message:
+            final_ack_code = quit_code
+            final_ack_message = quit_message
+            final_ack_source = "QUIT"
+        final_ack_success = final_ack_code.startswith("2") if final_ack_code else False
         success = rcpt_success and final_ack_success
         if success or host_candidate is None:
             break
     data_response = {
-        "code": data_end_code,
-        "message": data_end_message,
+        "code": final_ack_code,
+        "message": final_ack_message,
     }
+    if final_ack_source:
+        data_response["source"] = final_ack_source
     return success, response_text, completed_at, rcpt_details, data_response
