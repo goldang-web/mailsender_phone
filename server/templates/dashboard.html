@@ -2714,7 +2714,6 @@ const state = {
     purgeJobId: null,
   },
   pollingHandle: null,
-  bccToggles: {},
   successCounters: {},
   globalConfig: {
     ...GLOBAL_DEFAULTS,
@@ -3200,42 +3199,23 @@ function normalizeDeviceDomain(value) {
   return "naver";
 }
 
-function ensureBccToggleStore() {
-  if (!state.bccToggles || typeof state.bccToggles !== "object") {
-    state.bccToggles = {};
+function resolveCardBccCount(card, device, domain) {
+  if (!card) {
+    return 0;
   }
-  return state.bccToggles;
+  const bccInput = card.querySelector('[data-field="bcc_count"]');
+  if (bccInput) {
+    return parseBccInput(sanitizeBccValue(bccInput.value));
+  }
+  const deviceData = device && typeof device === "object" ? device : card.__deviceData || {};
+  const normalizedDomain = normalizeDeviceDomain(domain || deviceData.active_domain || "naver");
+  const config = bestConfig(deviceData, normalizedDomain);
+  return parseBccInput(config?.bcc_count ?? 0);
 }
 
-function makeBccToggleKey(deviceId, domain) {
-  const id = String(deviceId ?? "").trim();
-  if (!id) {
-    return null;
-  }
-  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
-  return `${id}::${normalizedDomain}`;
-}
-
-function isBccSendEnabled(deviceId, domain) {
-  const key = makeBccToggleKey(deviceId, domain);
-  if (!key) {
-    return false;
-  }
-  const store = ensureBccToggleStore();
-  return Boolean(store[key]);
-}
-
-function setBccSendEnabled(deviceId, domain, enabled) {
-  const key = makeBccToggleKey(deviceId, domain);
-  if (!key) {
-    return;
-  }
-  const store = ensureBccToggleStore();
-  if (enabled) {
-    store[key] = true;
-  } else if (Object.prototype.hasOwnProperty.call(store, key)) {
-    delete store[key];
-  }
+function formatSingleBccButtonLabel(count) {
+  const safeCount = Number.isFinite(count) ? Math.max(0, Math.floor(count)) : 0;
+  return `단일 발송 (BCC ${safeCount}명)`;
 }
 
 function normalizeOptionalDomain(value) {
@@ -6724,43 +6704,6 @@ function refreshCardRuntimeState(card, device, options = {}) {
   }
 }
 
-function updateBccToggleControls(card, device) {
-  const button = card.querySelector('button[data-action="toggle-bcc"]');
-  if (!button) {
-    return;
-  }
-  const deviceData = device || card.__deviceData || {};
-  const deviceId = deviceData.id || card.dataset.deviceId || "";
-  const domain = getActiveDomain(card, deviceData.active_domain);
-  if (!deviceId) {
-    button.disabled = true;
-    button.classList.remove("is-active");
-    button.textContent = "BCC 발송";
-    button.setAttribute("aria-pressed", "false");
-    button.title = "디바이스 정보를 불러오는 중입니다.";
-    return;
-  }
-  const config = bestConfig(deviceData, domain);
-  const bccCount = Number(config?.bcc_count ?? 0);
-  if (!Number.isFinite(bccCount) || bccCount <= 0) {
-    setBccSendEnabled(deviceId, domain, false);
-    button.disabled = true;
-    button.classList.remove("is-active");
-    button.textContent = "BCC 발송 (BCC 수 0)";
-    button.setAttribute("aria-pressed", "false");
-    button.title = "카드 설정의 BCC 수가 0이라 BCC 발송을 사용할 수 없습니다.";
-    return;
-  }
-  button.disabled = false;
-  const enabled = isBccSendEnabled(deviceId, domain);
-  button.classList.toggle("is-active", enabled);
-  button.setAttribute("aria-pressed", enabled ? "true" : "false");
-  button.textContent = enabled ? `BCC 발송 켜짐 (${bccCount}명)` : `BCC 발송 꺼짐 (${bccCount}명)`;
-  button.title = enabled
-    ? "단일 발송 시 DB에서 불러온 BCC 수신자를 함께 전송합니다."
-    : "단일 발송 시 설정된 RCPT_TO로만 전송합니다.";
-}
-
 function hasActiveBatchJob(device) {
   if (!device?.jobs?.length) {
     return false;
@@ -6797,11 +6740,27 @@ function updateSingleSendControls(card, device) {
   const singleActive = singleJob ? ACTIVE_JOB_STATES.has(singleJob.status) : false;
   const imapActive = imapJob ? ACTIVE_JOB_STATES.has(imapJob.status) : false;
   const imapHoldInfo = extractImapHoldInfo(imapJob);
+  const bccJobActive = Boolean(singleJob?.payload?.bcc_enabled);
+  let activeSingleMode = null;
+  if (singleActive) {
+    const storedMode = card.dataset.singleSendMode;
+    if (storedMode === "bcc" || storedMode === "normal") {
+      activeSingleMode = storedMode;
+    } else if (bccJobActive) {
+      activeSingleMode = "bcc";
+    } else {
+      activeSingleMode = "normal";
+    }
+    card.dataset.singleSendMode = activeSingleMode;
+  } else {
+    delete card.dataset.singleSendMode;
+  }
   card.dataset.currentSingleJobDomain = activeDomain;
   card.dataset.currentSingleJobId = singleActive ? (singleJob?.id || "") : "";
   card.dataset.currentImapJobId = imapActive ? (imapJob?.id || "") : "";
   const previewBtn = card.querySelector('button[data-action="single-preview"]');
-  if (previewBtn) {
+  if (previewBtn && !previewBtn.dataset.bound) {
+    previewBtn.dataset.bound = "true";
     previewBtn.addEventListener("click", async () => {
       if (previewBtn.disabled) return;
       if (!previewBtn.dataset.defaultLabel) {
@@ -6964,31 +6923,6 @@ function updateSingleSendControls(card, device) {
     });
   }
 
-  const bccToggleBtn = card.querySelector('button[data-action="toggle-bcc"]');
-  if (bccToggleBtn && !bccToggleBtn.dataset.bound) {
-    bccToggleBtn.dataset.bound = "true";
-    bccToggleBtn.addEventListener("click", () => {
-      const currentDevice = resolveCardDevice(card);
-      const deviceId = currentDevice?.id || card.dataset.deviceId;
-      if (!deviceId) {
-        setNotice(card, "디바이스 정보를 확인할 수 없습니다.", "error");
-        return;
-      }
-      const domain = getActiveDomain(card, currentDevice?.active_domain || "naver");
-      const configSource = card.__deviceData || currentDevice || { id: deviceId, configs: {} };
-      const config = bestConfig(configSource, domain);
-      const bccCount = Number(config?.bcc_count ?? 0);
-      if (!Number.isFinite(bccCount) || bccCount <= 0) {
-        setNotice(card, "BCC 수가 0이라 토글할 수 없습니다. 먼저 BCC 수를 저장하세요.", "error");
-        updateBccToggleControls(card, configSource);
-        return;
-      }
-      const nextState = !isBccSendEnabled(deviceId, domain);
-      setBccSendEnabled(deviceId, domain, nextState);
-      updateBccToggleControls(card, configSource);
-    });
-  }
-
   const singleBtn = card.querySelector('button[data-action="single"]');
   if (singleBtn) {
     if (!singleBtn.dataset.defaultLabel) {
@@ -6996,12 +6930,49 @@ function updateSingleSendControls(card, device) {
     }
     if (singleActive) {
       singleBtn.disabled = true;
-      singleBtn.classList.add("is-running");
-      singleBtn.textContent = "단일 발송 중...";
+      if (activeSingleMode === "bcc") {
+        singleBtn.classList.remove("is-running");
+        singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
+        singleBtn.title = "BCC 단일 발송이 진행 중입니다.";
+      } else {
+        singleBtn.classList.add("is-running");
+        singleBtn.textContent = "단일 발송 중...";
+        singleBtn.title = "단일 발송 작업이 진행 중입니다.";
+      }
     } else {
       singleBtn.classList.remove("is-running");
       singleBtn.disabled = false;
       singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
+      singleBtn.title = "";
+    }
+  }
+
+  const singleBccBtn = card.querySelector('button[data-action="single-bcc"]');
+  if (singleBccBtn) {
+    const bccCount = resolveCardBccCount(card, deviceData, activeDomain);
+    const label = formatSingleBccButtonLabel(bccCount);
+    const hasBccConfigured = Number.isFinite(bccCount) && bccCount > 0;
+    const otherSingleRunning = singleActive && activeSingleMode !== "bcc";
+    if (singleActive && activeSingleMode === "bcc") {
+      singleBccBtn.disabled = true;
+      singleBccBtn.classList.add("is-running");
+      singleBccBtn.textContent = "단일 BCC 발송 중...";
+      singleBccBtn.title = "단일 발송 작업이 진행 중입니다.";
+    } else if (!hasBccConfigured) {
+      singleBccBtn.disabled = true;
+      singleBccBtn.classList.remove("is-running");
+      singleBccBtn.textContent = label;
+      singleBccBtn.title = "BCC 수가 0이라 사용할 수 없습니다. 먼저 값을 저장하세요.";
+    } else if (otherSingleRunning) {
+      singleBccBtn.disabled = true;
+      singleBccBtn.classList.remove("is-running");
+      singleBccBtn.textContent = label;
+      singleBccBtn.title = "다른 단일 발송 작업이 실행 중입니다.";
+    } else {
+      singleBccBtn.disabled = false;
+      singleBccBtn.classList.remove("is-running");
+      singleBccBtn.textContent = label;
+      singleBccBtn.title = "단일 발송 시 DB에서 불러온 BCC 수신자를 함께 전송합니다.";
     }
   }
 
@@ -7118,7 +7089,6 @@ function updateSingleSendControls(card, device) {
     }
   }
 
-  updateBccToggleControls(card, deviceData);
 }
 
 function markImapStatusChecking(card, options = {}) {
@@ -8342,7 +8312,7 @@ function populateConfigForm(card, device, domain) {
   updateCardLockUI(card, config, activeDomain);
   updateDeviceSchedule(card, device, activeDomain, config);
   renderImapSection(card, device, activeDomain);
-  updateBccToggleControls(card, device);
+  updateSingleSendControls(card, device);
 }
 
 function attachCardEvents(card) {
@@ -8539,6 +8509,9 @@ function attachCardEvents(card) {
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       markFieldDirty(currentDevice.id, domain, fieldName, event.target.value);
+      if (fieldName === "bcc_count") {
+        updateSingleSendControls(card, card.__deviceData || currentDevice);
+      }
     });
   });
 
@@ -8584,6 +8557,7 @@ function attachCardEvents(card) {
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       markFieldDirty(currentDevice.id, domain, "bcc_count", sanitized);
+      updateSingleSendControls(card, card.__deviceData || currentDevice);
     });
   }
 
@@ -8783,72 +8757,94 @@ function attachCardEvents(card) {
   }
 
   const singleBtn = card.querySelector('button[data-action="single"]');
-  singleBtn.addEventListener("click", async () => {
-    if (singleBtn.disabled) return;
-    if (!singleBtn.dataset.defaultLabel) {
-      singleBtn.dataset.defaultLabel = singleBtn.textContent;
+  const singleBccBtn = card.querySelector('button[data-action="single-bcc"]');
+
+  const bindSingleSendButton = (button, { useBcc = false } = {}) => {
+    if (!button || button.dataset.singleBound) {
+      return;
     }
-
-    const currentDevice = getDevice();
-    const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
-    const rcpt = card.querySelector('[data-field="rcpt_to"]').value.trim();
-    let jobScheduled = false;
-
-    const resetButton = () => {
-      singleBtn.disabled = false;
-      singleBtn.classList.remove("is-loading", "is-running");
-      singleBtn.textContent = singleBtn.dataset.defaultLabel || "단일 발송";
-      updateSingleSendControls(card, card.__deviceData || currentDevice);
-    };
-
-    singleBtn.disabled = true;
-    singleBtn.classList.add("is-loading", "is-running");
-    singleBtn.textContent = "단일 발송 중...";
-
-    try {
-      try {
-        await ensureConfigSynced(card, currentDevice, domain);
-      } catch (err) {
-        setNotice(card, err.message || "설정 저장에 실패했습니다.", "error");
-        resetButton();
-        return;
+    button.dataset.singleBound = "true";
+    button.addEventListener("click", async () => {
+      if (button.disabled) return;
+      if (!button.dataset.defaultLabel) {
+        button.dataset.defaultLabel = button.textContent;
       }
 
-      const bccEnabled = isBccSendEnabled(currentDevice.id, domain);
-      const payload = { domain, rcpt_to: rcpt || null, bcc_enabled: bccEnabled };
-      try {
-        const result = await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-single`, {
-          method: "POST",
-          body: JSON.stringify(payload),
-        });
-        jobScheduled = true;
-        const updatedDevice = applyScheduledSingleSendJob(card, currentDevice, result?.job);
-        if (result?.job) {
-          syncDeviceJobInState(currentDevice.id, result.job);
+      const currentDevice = getDevice();
+      const domain = card.querySelector(`input[name="domain-${currentDevice.id}"]:checked`)?.value || currentDevice.active_domain || "naver";
+      const rcpt = card.querySelector('[data-field="rcpt_to"]').value.trim();
+      let jobScheduled = false;
+
+      const resetButtons = () => {
+        updateSingleSendControls(card, card.__deviceData || currentDevice);
+      };
+
+      if (useBcc) {
+        const effectiveBcc = resolveCardBccCount(card, card.__deviceData || currentDevice, domain);
+        if (!Number.isFinite(effectiveBcc) || effectiveBcc <= 0) {
+          setNotice(card, "BCC 수가 0이라 BCC 발송을 사용할 수 없습니다. 먼저 값을 저장하세요.", "error");
+          resetButtons();
+          return;
         }
-        refreshCardRuntimeState(card, updatedDevice);
-        renderMonitoring();
-        setNotice(card, "단일 발송 작업을 추가했습니다.");
+      }
+
+      card.dataset.singleSendMode = useBcc ? "bcc" : "normal";
+      button.disabled = true;
+      button.classList.add("is-loading", "is-running");
+      button.textContent = useBcc ? "단일 BCC 발송 중..." : "단일 발송 중...";
+      const siblingSelector = useBcc ? 'button[data-action="single"]' : 'button[data-action="single-bcc"]';
+      const sibling = card.querySelector(siblingSelector);
+      if (sibling) {
+        sibling.disabled = true;
+      }
+
+      try {
         try {
-          await loadDevices();
-        } catch (refreshErr) {
-          console.error(refreshErr);
+          await ensureConfigSynced(card, currentDevice, domain);
+        } catch (err) {
+          setNotice(card, err.message || "설정 저장에 실패했습니다.", "error");
+          resetButtons();
+          return;
         }
-      } catch (err) {
-        setNotice(card, err.message || "단일 발송 예약에 실패했습니다.", "error");
-        resetButton();
-        return;
+
+        const payload = { domain, rcpt_to: rcpt || null, bcc_enabled: useBcc };
+        try {
+          const result = await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-single`, {
+            method: "POST",
+            body: JSON.stringify(payload),
+          });
+          jobScheduled = true;
+          const updatedDevice = applyScheduledSingleSendJob(card, currentDevice, result?.job);
+          if (result?.job) {
+            syncDeviceJobInState(currentDevice.id, result.job);
+          }
+          refreshCardRuntimeState(card, updatedDevice);
+          renderMonitoring();
+          setNotice(card, useBcc ? "BCC 포함 단일 발송 작업을 추가했습니다." : "단일 발송 작업을 추가했습니다.");
+          try {
+            await loadDevices();
+          } catch (refreshErr) {
+            console.error(refreshErr);
+          }
+        } catch (err) {
+          setNotice(card, err.message || "단일 발송 예약에 실패했습니다.", "error");
+          resetButtons();
+          return;
+        }
+      } finally {
+        if (!button.isConnected) {
+          return;
+        }
+        button.classList.remove("is-loading");
+        if (!jobScheduled) {
+          resetButtons();
+        }
       }
-    } finally {
-      if (!singleBtn.isConnected) {
-        return;
-      }
-      singleBtn.classList.remove("is-loading");
-      if (!jobScheduled) {
-        resetButton();
-      }
-    }
-  });
+    });
+  };
+
+  bindSingleSendButton(singleBtn, { useBcc: false });
+  bindSingleSendButton(singleBccBtn, { useBcc: true });
 
   const imapCheckBtn = card.querySelector('button[data-action="imap-delivery-check"]');
   if (imapCheckBtn) {
@@ -9233,8 +9229,8 @@ function buildDeviceCard(device) {
           <button class="ghost" data-action="lock-refresh">다시 뽑기</button>
           <button class="ghost" data-action="lock-toggle">고정 모드</button>
           <button class="ghost" data-action="lock-copy" title="고정된 값을 다른 카드로 복사합니다.">고정값 복사</button>
-          <button class="ghost" data-action="toggle-bcc" aria-pressed="false">BCC 발송 꺼짐</button>
           <button class="secondary" data-action="single">단일 발송</button>
+          <button class="secondary" data-action="single-bcc" disabled title="BCC 수가 0이라 사용할 수 없습니다.">단일 발송 (BCC 0명)</button>
           <button data-action="batch">전체 발송</button>
           <button class="danger" data-action="cancel-batch" style="display:none;">중지</button>
         </div>
