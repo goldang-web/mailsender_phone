@@ -3423,6 +3423,7 @@ class SingleSendRequest(BaseModel):
     rcpt_to: Optional[str] = None
     header_override: Optional[str] = None
     force_imap_check: Optional[bool] = False
+    bcc_enabled: Optional[bool] = False
 
 
 class BatchSendRequest(BaseModel):
@@ -5083,7 +5084,9 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
         config_snapshot = build_config_snapshot(configs, domain)
-        config_snapshot["bcc_count"] = 0
+        enable_bcc = bool(payload.bcc_enabled)
+        if not enable_bcc:
+            config_snapshot["bcc_count"] = 0
         config_snapshot["anchor_interval"] = 0
         rcpt_to = (payload.rcpt_to or "").strip() or config_snapshot.get("rcpt_to")
         if not rcpt_to:
@@ -5133,6 +5136,8 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             "config": resolved_config,
             "force_imap_check": force_imap_check,
         }
+        if enable_bcc:
+            base_payload["bcc_enabled"] = True
         if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
             base_payload["substitution"] = {
                 "template": template_config,

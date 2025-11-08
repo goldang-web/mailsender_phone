@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.92"
+APP_VERSION = "0.0.93"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -5199,8 +5199,30 @@ class MailClient:
             candidate_bcc_entries = raw_bcc_entries
         else:
             candidate_bcc_entries = []
-        bcc_emails = self._sanitize_email_list(candidate_bcc_entries, limit=30)
+        bcc_payload_emails = self._sanitize_email_list(candidate_bcc_entries, limit=30)
+        bcc_enabled = _normalize_bool_flag(payload.get("bcc_enabled"), default=False)
+        requested_bcc = self._sanitize_bcc_count(config.get("bcc_count"))
         bcc_rows: List[sqlite3.Row] = []
+        bcc_emails: List[str] = []
+        if bcc_enabled and requested_bcc > 0:
+            limit = max(1, min(30, requested_bcc))
+            bcc_emails = list(bcc_payload_emails[:limit])
+            exclude_candidates: Set[str] = {email for email in bcc_emails}
+            if isinstance(rcpt_to, str) and rcpt_to.strip():
+                exclude_candidates.add(rcpt_to.strip().lower())
+            remaining_slots = max(0, limit - len(bcc_emails))
+            if remaining_slots > 0 and normalized_domain:
+                fetched_rows = self._select_bcc_candidates(normalized_domain, remaining_slots, exclude=exclude_candidates)
+                if fetched_rows:
+                    bcc_rows = list(fetched_rows)
+                    for row in fetched_rows:
+                        email_value = str(row["email"] or "").strip()
+                        if email_value:
+                            bcc_emails.append(email_value)
+            bcc_emails = self._sanitize_email_list(bcc_emails, limit=limit)
+            if bcc_rows:
+                valid_set = {email.lower() for email in bcc_emails}
+                bcc_rows = [row for row in bcc_rows if str(row["email"] or "").strip().lower() in valid_set]
         mail_from_value = self._effective_mail_from(normalized_domain, config)
         header_from_value = self._extract_header_from(config.get("header"), mail_from_value)
         message_id_auto = _normalize_bool_flag(config.get("message_id_auto"), default=True)
@@ -5342,6 +5364,7 @@ class MailClient:
             include_anchor=False,
             recipient=rcpt_to,
             extra_recipient_count=len(bcc_emails),
+            bcc_recipients=bcc_emails,
         )
         dispatch_logs: List[Dict[str, object]] = [
             {
@@ -5438,6 +5461,7 @@ class MailClient:
                 include_anchor=False,
                 recipient=rcpt_to,
                 extra_recipient_count=len(bcc_emails),
+                bcc_recipients=bcc_emails,
             )
         )
         job_result = JobResult(
@@ -7776,6 +7800,7 @@ class MailClient:
         include_anchor: bool = False,
         recipient: Optional[str] = None,
         extra_recipient_count: int = 0,
+        bcc_recipients: Optional[Iterable[str]] = None,
     ) -> str:
         safe_label = "Sent" if (label or "").strip().lower() == "sent" else "Fail"
         batch_success = max(0, int(current_batch_success or 0))
@@ -7792,6 +7817,11 @@ class MailClient:
                 line += f" | {recipient_value} 외 {extras}개"
             else:
                 line += f" | {recipient_value}"
+        if bcc_recipients:
+            bcc_list = [str(item or "").strip() for item in bcc_recipients]
+            bcc_list = [item for item in bcc_list if item]
+            if bcc_list:
+                line += " | BCC: " + ", ".join(bcc_list)
         return line
 
     @staticmethod
