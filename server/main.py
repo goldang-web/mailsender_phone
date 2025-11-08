@@ -480,7 +480,7 @@ def clamp_bcc_count(value: Any) -> int:
         count = int(value)
     except (TypeError, ValueError):
         return 0
-    return max(0, min(30, count))
+    return max(0, count)
 
 
 def clamp_anchor_interval(value: Any) -> int:

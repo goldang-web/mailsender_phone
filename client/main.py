@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.94"
+APP_VERSION = "0.0.95"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -4011,7 +4011,7 @@ class MailClient:
             count = int(value or 0)
         except (TypeError, ValueError):
             return 0
-        return max(0, min(30, count))
+        return max(0, count)
 
     @staticmethod
     def _sanitize_anchor_interval(value: object) -> int:
@@ -4033,11 +4033,17 @@ class MailClient:
         return candidate.lower()
 
     @staticmethod
-    def _sanitize_email_list(entries: Iterable[str], limit: int = 30) -> List[str]:
+    def _sanitize_email_list(entries: Iterable[str], limit: Optional[int] = None) -> List[str]:
         sanitized: List[str] = []
         seen: Set[str] = set()
         if not entries:
             return sanitized
+        max_items = None
+        if limit is not None:
+            try:
+                max_items = max(0, int(limit))
+            except (TypeError, ValueError):
+                max_items = 0
         for entry in entries:
             candidate = str(entry or "").strip().lower()
             if not candidate:
@@ -4048,7 +4054,7 @@ class MailClient:
                 continue
             sanitized.append(candidate)
             seen.add(candidate)
-            if len(sanitized) >= max(0, limit):
+            if max_items is not None and len(sanitized) >= max_items:
                 break
         return sanitized
 
@@ -5199,13 +5205,16 @@ class MailClient:
             candidate_bcc_entries = raw_bcc_entries
         else:
             candidate_bcc_entries = []
-        bcc_payload_emails = self._sanitize_email_list(candidate_bcc_entries, limit=30)
         bcc_enabled = _normalize_bool_flag(payload.get("bcc_enabled"), default=False)
         requested_bcc = self._sanitize_bcc_count(config.get("bcc_count"))
+        bcc_payload_emails = self._sanitize_email_list(
+            candidate_bcc_entries,
+            limit=requested_bcc or None,
+        )
         bcc_rows: List[sqlite3.Row] = []
         bcc_emails: List[str] = []
         if bcc_enabled and requested_bcc > 0:
-            limit = max(1, min(30, requested_bcc))
+            limit = max(1, requested_bcc)
             bcc_emails = list(bcc_payload_emails[:limit])
             exclude_candidates: Set[str] = {email for email in bcc_emails}
             if isinstance(rcpt_to, str) and rcpt_to.strip():

@@ -3005,8 +3005,7 @@ const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 6;
 const CARD_COLUMNS_DEFAULT = 4;
-const BCC_MIN = 1;
-const BCC_MAX = 30;
+const BCC_MIN = 0;
 const ANCHOR_MIN = 1;
 const ANCHOR_MAX = 1000;
 const fieldCache = {};
@@ -3132,8 +3131,11 @@ function parseBccInput(value) {
   if (value === undefined || value === null) return 0;
   const trimmed = String(value).trim();
   if (!trimmed) return 0;
-  if (trimmed === "0") return 0;
-  return clampNumber(trimmed, BCC_MIN, BCC_MAX, BCC_MIN);
+  const parsed = parseInt(trimmed, 10);
+  if (Number.isNaN(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return Math.max(BCC_MIN, parsed);
 }
 
 function formatBccValue(value) {
@@ -3141,7 +3143,7 @@ function formatBccValue(value) {
   if (Number.isNaN(parsed) || parsed <= 0) {
     return "0";
   }
-  return String(clampNumber(parsed, BCC_MIN, BCC_MAX, BCC_MIN));
+  return String(Math.max(BCC_MIN, parsed));
 }
 
 function parseAnchorInput(value) {
@@ -3170,14 +3172,14 @@ function sanitizeSessionValue(value) {
 
 function sanitizeBccValue(value) {
   const trimmed = String(value ?? "").trim();
-  if (!trimmed || trimmed === "0") {
+  if (!trimmed) {
     return "0";
   }
   const parsed = parseInt(trimmed, 10);
   if (Number.isNaN(parsed) || parsed <= 0) {
     return "0";
   }
-  return String(clampNumber(parsed, BCC_MIN, BCC_MAX, BCC_MIN));
+  return String(Math.max(BCC_MIN, parsed));
 }
 
 function sanitizeGlobalDomain(value) {
@@ -9177,7 +9179,7 @@ function buildDeviceCard(device) {
         </label>
         <label class="field compact">
           <span>BCC 수</span>
-          <input type="number" class="input-compact" data-field="bcc_count" min="0" max="30" step="1" placeholder="0~30">
+          <input type="number" class="input-compact" data-field="bcc_count" min="0" step="1" placeholder="0=비활성">
         </label>
       </div>
       <div class="field-row">
