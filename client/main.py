@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.98"
+APP_VERSION = "0.0.99"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -83,6 +83,7 @@ RECIPIENT_LIMIT_MARKERS = (
 IMAP_LOG_HEADER_SEPARATOR = "****************************"
 IMAP_LOG_FOOTER_SEPARATOR = "****************************"
 TO_PLACEHOLDER_PATTERN = re.compile(r"\{\$TO\}", re.IGNORECASE)
+FROM_PLACEHOLDER_PATTERN = re.compile(r"\{\$FROM\}", re.IGNORECASE)
 
 
 def utc_now() -> datetime:
@@ -193,17 +194,38 @@ def _compose_to_header_value(
     return ", ".join(recipients)
 
 
+def _render_from_placeholder_value(mail_from: Optional[object]) -> str:
+    if mail_from is None:
+        return ""
+    text = str(mail_from).strip()
+    if not text:
+        return ""
+    return text.replace("\r", "").replace("\n", "")
+
+
 def _apply_to_placeholder(
     header_text: Optional[object],
     primary: Optional[str],
     extra_recipients: Optional[Iterable[str]] = None,
+    *,
+    mail_from: Optional[object] = None,
 ) -> str:
     text = header_text if isinstance(header_text, str) else str(header_text or "")
-    if not text or not TO_PLACEHOLDER_PATTERN.search(text):
+    if not text:
         return text
-    rendered = _compose_to_header_value(primary, extra_recipients)
-    replacement = rendered or ""
-    return TO_PLACEHOLDER_PATTERN.sub(replacement, text)
+    needs_to_placeholder = bool(TO_PLACEHOLDER_PATTERN.search(text))
+    needs_from_placeholder = bool(FROM_PLACEHOLDER_PATTERN.search(text))
+    if not needs_to_placeholder and not needs_from_placeholder:
+        return text
+    result = text
+    if needs_to_placeholder:
+        rendered = _compose_to_header_value(primary, extra_recipients)
+        replacement = rendered or ""
+        result = TO_PLACEHOLDER_PATTERN.sub(replacement, result)
+    if needs_from_placeholder:
+        from_value = _render_from_placeholder_value(mail_from)
+        result = FROM_PLACEHOLDER_PATTERN.sub(from_value, result)
+    return result
 
 
 MESSAGE_ID_HEADER_PATTERN = re.compile(r"(?im)^(?P<indent>[ \t]*)Message-ID\s*:(?P<value>.*(?:\n[ \t].*)*)")
@@ -2861,7 +2883,7 @@ class MailClient:
                 f"Sent 누적 확인용 테스트 메일입니다. 발송 시각(UTC): {probe_started.isoformat()}.\n"
             )
             payload_header = header_override or default_header
-        payload_header = _apply_to_placeholder(payload_header, rcpt_to)
+        payload_header = _apply_to_placeholder(payload_header, rcpt_to, mail_from=mail_from)
         debug_enabled = bool(self.telnet_debug_mode)
         try:
             success, response_text, completed_at, _rcpt_details, _data_response = send_via_telnet(
@@ -3069,7 +3091,7 @@ class MailClient:
                     final_message = normalized_result.replace("\n", newline_hint)
                     if has_terminal_newline and not final_message.endswith(newline_hint):
                         final_message = f"{final_message}{newline_hint}"
-                    return _apply_to_placeholder(final_message, rcpt_value)
+                    return _apply_to_placeholder(final_message, rcpt_value, mail_from=mail_from_current)
                 date_header = format_datetime(probe_reference.astimezone(timezone.utc))
                 subject = f"[IMAP 체크] Sent 누적 확인 {probe_reference.astimezone().strftime('%H:%M:%S')}"
                 return _apply_to_placeholder(
@@ -3084,6 +3106,7 @@ class MailClient:
                     "\n"
                     f"Sent 누적 확인용 테스트 메일입니다. 발송 시각(UTC): {probe_reference.isoformat()}.\n",
                     rcpt_value,
+                    mail_from=mail_from_current,
                 )
 
             probe_header = build_probe_header(message_id_value)
@@ -5455,7 +5478,12 @@ class MailClient:
             )
         else:
             dispatch_header = raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
-        dispatch_header = _apply_to_placeholder(dispatch_header, rcpt_to, bcc_emails)
+        dispatch_header = _apply_to_placeholder(
+            dispatch_header,
+            rcpt_to,
+            bcc_emails,
+            mail_from=mail_from_value,
+        )
         config["header"] = dispatch_header
 
         success, response_text, completed_at, rcpt_details, data_response = send_via_telnet(
@@ -6280,7 +6308,12 @@ class MailClient:
                         dispatch_header = (
                             raw_header_value if isinstance(raw_header_value, str) else str(raw_header_value or "")
                         )
-                    dispatch_header = _apply_to_placeholder(dispatch_header, rcpt_to, payload_bcc)
+                    dispatch_header = _apply_to_placeholder(
+                        dispatch_header,
+                        rcpt_to,
+                        payload_bcc,
+                        mail_from=session_mail_from,
+                    )
                     session_config["header"] = dispatch_header
                     session_config["mail_from"] = session_mail_from
                     session_snapshot = dict(session_config)
@@ -6314,7 +6347,11 @@ class MailClient:
                                     mail_from=session_mail_from,
                                     helo=session_config.get("helo"),
                                 )
-                            followup_header = _apply_to_placeholder(followup_header, anchor_email)
+                            followup_header = _apply_to_placeholder(
+                                followup_header,
+                                anchor_email,
+                                mail_from=session_mail_from,
+                            )
                             (
                                 anchor_success,
                                 anchor_response_text,
