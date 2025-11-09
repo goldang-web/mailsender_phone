@@ -118,9 +118,16 @@ class DispatchLoggingTests(unittest.TestCase):
 
         with patch.object(client_main, "send_via_telnet", fake_send_partial):
             payload = {
-                "config": {"smtp_host": "", "smtp_port": 25, "helo": "", "mail_from": "sender@test"},
+                "config": {
+                    "smtp_host": "",
+                    "smtp_port": 25,
+                    "helo": "",
+                    "mail_from": "sender@test",
+                    "bcc_count": 1,
+                },
                 "rcpt_to": "user@example.com",
                 "bcc": ["bcc@test.com"],
+                "bcc_enabled": True,
             }
             result = self.client.handle_single_send("naver", payload, "job-2")
 
