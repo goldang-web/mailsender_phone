@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.95"
+APP_VERSION = "0.0.97"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -55,6 +55,7 @@ LOG_DIR = BASE_DIR / "logs"
 
 DOMAINS = ("naver", "daum")
 EMAIL_STATUSES = ("pending", "reserved", "sent", "block", "failed", "nouser", "removed")
+PENDING_PREVIEW_LIMIT = 100
 SMTP_RECIPIENT_LIMIT = 25
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 5.0
@@ -4446,6 +4447,8 @@ class MailClient:
         self,
         domain: str,
         totals: Dict[str, int],
+        pending_preview: Optional[List[Dict[str, object]]] = None,
+        preview_generated_at: Optional[str] = None,
     ) -> Dict[str, object]:
         total_count = sum(totals.values())
         normalized = (domain or "").lower()
@@ -4454,7 +4457,7 @@ class MailClient:
         block = totals.get("block", 0)
         remaining = pending + reserved + block
         cycle_info = self._cycle_snapshot(normalized)
-        return {
+        snapshot: Dict[str, object] = {
             "domain": normalized,
             "local_db_version": self.local_versions.get(normalized),
             "total": total_count,
@@ -4471,6 +4474,60 @@ class MailClient:
             "last_cycle_completed_at": cycle_info.get("last_cycle_completed_at"),
             "last_cycle_processed": cycle_info.get("last_cycle_processed"),
         }
+        if pending_preview is not None:
+            snapshot["pending_preview"] = pending_preview
+            snapshot["pending_preview_generated_at"] = (
+                preview_generated_at or now_iso()
+            )
+        return snapshot
+
+    def _collect_pending_preview_entries(
+        self,
+        conn: sqlite3.Connection,
+        limit: int = PENDING_PREVIEW_LIMIT,
+    ) -> List[Dict[str, object]]:
+        entries: List[Dict[str, object]] = []
+        if limit <= 0:
+            return entries
+        try:
+            cursor = conn.execute(
+                """
+                SELECT email, status, created_at, updated_at, priority
+                FROM emails
+                WHERE status='pending'
+                ORDER BY priority ASC, id ASC
+                LIMIT ?
+                """,
+                (limit,),
+            )
+        except sqlite3.Error:
+            return entries
+        for row in cursor:
+            email = str(row["email"] or "").strip()
+            if not email:
+                continue
+            status_raw = str(row["status"] or "pending").strip().lower()
+            entry: Dict[str, object] = {
+                "email": email[:320],
+                "status": status_raw or "pending",
+            }
+            created_at = row["created_at"]
+            if created_at:
+                entry["created_at"] = str(created_at)
+            updated_at = row["updated_at"]
+            if updated_at:
+                entry["updated_at"] = str(updated_at)
+            priority_value = row["priority"]
+            try:
+                priority = int(priority_value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                priority = None
+            if priority is not None:
+                entry["priority"] = priority
+            entries.append(entry)
+            if len(entries) >= limit:
+                break
+        return entries
 
     def register(self) -> None:
         self.refresh_public_ip(force=True)
@@ -4830,7 +4887,16 @@ class MailClient:
                         "SELECT status, COUNT(*) AS cnt FROM emails GROUP BY status"
                     ):
                         totals[row["status"]] = row["cnt"]
-                    snapshot = self._build_domain_state_snapshot(domain, totals)
+                    preview_entries = self._collect_pending_preview_entries(
+                        conn,
+                        PENDING_PREVIEW_LIMIT,
+                    )
+                    snapshot = self._build_domain_state_snapshot(
+                        domain,
+                        totals,
+                        pending_preview=preview_entries,
+                        preview_generated_at=now_iso(),
+                    )
                     states.append(attach_schedule(snapshot, domain))
                     if domain in self._state_errors:
                         self._state_errors.pop(domain, None)
@@ -4860,6 +4926,8 @@ class MailClient:
             return self.handle_inject(domain, payload, job_id)
         if job_type == "purge_domain":
             return self.handle_purge_domain(domain, payload, job_id)
+        if job_type == "shuffle_domain":
+            return self.handle_shuffle_domain(domain, payload, job_id)
         if job_type == "single_send":
             return self.handle_single_send(domain, payload, job_id)
         if job_type == "batch_send":
@@ -5183,6 +5251,84 @@ class MailClient:
                 message=f"{domain_label} DB 삭제 실패: {exc}",
                 error=str(exc),
             )
+
+    def handle_shuffle_domain(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
+        if not domain:
+            return JobResult(job_id=job_id, status="failed", message="도메인 정보가 없습니다.")
+        normalized = domain.lower()
+        domain_label = DOMAIN_LABELS.get(normalized, normalized)
+        db_path = self.domain_paths.get(normalized)
+        if not db_path or not db_path.exists():
+            message = f"{domain_label} DB가 없어 섞을 항목이 없습니다."
+            return JobResult(
+                job_id=job_id,
+                status="success",
+                message=message,
+                result={"domain": normalized, "shuffled": 0},
+            )
+        shuffled_count = 0
+        try:
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                rows = conn.execute(
+                    """
+                    SELECT id
+                    FROM emails
+                    WHERE status IN ('pending','block')
+                    ORDER BY id ASC
+                    """
+                ).fetchall()
+                if not rows:
+                    message = f"{domain_label} 대기/보류 이메일이 없어 섞을 항목이 없습니다."
+                    return JobResult(
+                        job_id=job_id,
+                        status="success",
+                        message=message,
+                        result={"domain": normalized, "shuffled": 0},
+                    )
+                rng = random.SystemRandom()
+                shuffled_ids = [int(row["id"]) for row in rows]
+                rng.shuffle(shuffled_ids)
+                now_stamp = now_iso()
+                batch_updates: List[Tuple[int, str, int]] = []
+                chunk_size = 1000
+                for priority, email_id in enumerate(shuffled_ids, start=1):
+                    batch_updates.append((priority, now_stamp, email_id))
+                    if len(batch_updates) >= chunk_size:
+                        conn.executemany(
+                            """
+                            UPDATE emails
+                            SET priority=?, updated_at=?
+                            WHERE id=?
+                            """,
+                            batch_updates,
+                        )
+                        batch_updates.clear()
+                if batch_updates:
+                    conn.executemany(
+                        """
+                        UPDATE emails
+                        SET priority=?, updated_at=?
+                        WHERE id=?
+                        """,
+                        batch_updates,
+                    )
+                conn.commit()
+                shuffled_count = len(shuffled_ids)
+        except sqlite3.Error as exc:
+            return JobResult(
+                job_id=job_id,
+                status="failed",
+                message=f"{domain_label} DB 섞기 실패: {exc}",
+                error=str(exc),
+            )
+        message = f"{domain_label} 대기/보류 이메일 {shuffled_count}건의 우선순위를 무작위로 재정렬했습니다."
+        return JobResult(
+            job_id=job_id,
+            status="success",
+            message=message,
+            result={"domain": normalized, "shuffled": shuffled_count},
+        )
 
     def handle_single_send(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
         config = dict(payload.get("config") or {})

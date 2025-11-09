@@ -27,6 +27,16 @@ from email.utils import make_msgid
 
 DOMAINS = ("naver", "daum")
 DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
+DOMAIN_PREVIEW_LIMIT = 100
+VALID_PREVIEW_STATUSES = {
+    "pending",
+    "reserved",
+    "sent",
+    "block",
+    "failed",
+    "nouser",
+    "removed",
+}
 
 IMAP_SENT_THRESHOLD_DEFAULT = 90
 MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${HELO}>"
@@ -1542,6 +1552,15 @@ def _init_db() -> None:
                 UNIQUE (device_id, domain, filename, version)
             );
 
+            CREATE TABLE IF NOT EXISTS device_domain_previews (
+                device_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                preview TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                PRIMARY KEY (device_id, domain),
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS jobs (
                 id TEXT PRIMARY KEY,
                 device_id TEXT NOT NULL,
@@ -1861,6 +1880,89 @@ def normalize_domain(domain: str) -> str:
     if lowered not in DOMAINS:
         raise HTTPException(status_code=400, detail="지원하지 않는 도메인입니다.")
     return lowered
+
+
+def _sanitize_preview_timestamp(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    candidate = str(value).strip()
+    if not candidate:
+        return None
+    return candidate[:64]
+
+
+def _prepare_domain_preview_payload(
+    entries: Optional[Sequence["DomainPreviewEntryPayload"]],
+    generated_at: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    if entries is None:
+        return None
+    sanitized: List[Dict[str, Any]] = []
+    for entry in entries:
+        if isinstance(entry, DomainPreviewEntryPayload):
+            entry_data = entry.dict()
+        elif isinstance(entry, dict):
+            entry_data = entry
+        else:
+            continue
+        email = str(entry_data.get("email") or "").strip()
+        if not email:
+            continue
+        email = email[:320]
+        raw_status = str(entry_data.get("status") or "pending").strip().lower()
+        status = raw_status if raw_status in VALID_PREVIEW_STATUSES else "pending"
+        created_at = str(entry_data.get("created_at") or "").strip()
+        updated_at = str(entry_data.get("updated_at") or "").strip()
+        priority_value = entry_data.get("priority")
+        try:
+            priority = int(priority_value)  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            priority = None
+        payload_entry: Dict[str, Any] = {
+            "email": email,
+            "status": status,
+        }
+        if created_at:
+            payload_entry["created_at"] = created_at
+        if updated_at:
+            payload_entry["updated_at"] = updated_at
+        if priority is not None:
+            payload_entry["priority"] = priority
+        sanitized.append(payload_entry)
+        if len(sanitized) >= DOMAIN_PREVIEW_LIMIT:
+            break
+    preview_payload: Dict[str, Any] = {
+        "items": sanitized if sanitized else [],
+    }
+    sanitized_generated = _sanitize_preview_timestamp(generated_at)
+    if sanitized_generated:
+        preview_payload["generated_at"] = sanitized_generated
+    return preview_payload
+
+
+def upsert_domain_preview(
+    conn: sqlite3.Connection,
+    device_id: str,
+    domain: str,
+    payload: Dict[str, Any],
+) -> None:
+    normalized = normalize_domain(domain)
+    now = now_ts()
+    conn.execute(
+        """
+        INSERT INTO device_domain_previews (device_id, domain, preview, updated_at)
+        VALUES (?, ?, ?, ?)
+        ON CONFLICT(device_id, domain) DO UPDATE SET
+            preview=excluded.preview,
+            updated_at=excluded.updated_at
+        """,
+        (
+            device_id,
+            normalized,
+            json.dumps(payload, ensure_ascii=False),
+            now,
+        ),
+    )
 
 
 def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) -> Dict[str, Any]:
@@ -3323,6 +3425,14 @@ class DeviceScheduleUpdateRequest(BaseModel):
     time: Optional[str] = None
 
 
+class DomainPreviewEntryPayload(BaseModel):
+    email: str
+    status: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    priority: Optional[int] = None
+
+
 class DomainStatePayload(BaseModel):
     domain: str
     local_db_version: Optional[int] = None
@@ -3339,6 +3449,8 @@ class DomainStatePayload(BaseModel):
     last_cycle_completed_at: Optional[str] = None
     last_cycle_processed: Optional[int] = None
     stop_schedule_last_run: Optional[str] = None
+    pending_preview: Optional[List[DomainPreviewEntryPayload]] = None
+    pending_preview_generated_at: Optional[str] = None
 
 
 class JobReportPayload(BaseModel):
@@ -5413,6 +5525,76 @@ def fetch_device_file(conn: sqlite3.Connection, device_id: str, domain: str, fil
     return row
 
 
+@app.get("/api/devices/{device_id}/domains/{domain}/preview")
+def get_domain_db_preview(device_id: str, domain: str) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        row = conn.execute(
+            """
+            SELECT preview, updated_at
+            FROM device_domain_previews
+            WHERE device_id=? AND domain=?
+            """,
+            (device_id, normalized),
+        ).fetchone()
+    items: List[Dict[str, Any]] = []
+    generated_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    if row:
+        updated_at = row["updated_at"]
+        raw_preview = row["preview"] or ""
+        try:
+            payload = json.loads(raw_preview) if raw_preview else {}
+        except json.JSONDecodeError:
+            payload = {}
+        raw_items: Any
+        if isinstance(payload, dict):
+            raw_candidates = payload.get("items")
+            raw_items = raw_candidates if isinstance(raw_candidates, list) else []
+            raw_generated = payload.get("generated_at")
+            if isinstance(raw_generated, str) and raw_generated.strip():
+                generated_at = raw_generated.strip()
+        else:
+            raw_items = payload if isinstance(payload, list) else []
+        for entry in raw_items[:DOMAIN_PREVIEW_LIMIT]:
+            if not isinstance(entry, dict):
+                continue
+            email = str(entry.get("email") or "").strip()
+            if not email:
+                continue
+            status_raw = str(entry.get("status") or "pending").strip().lower()
+            status = status_raw if status_raw in VALID_PREVIEW_STATUSES else "pending"
+            preview_entry: Dict[str, Any] = {
+                "email": email,
+                "status": status,
+            }
+            created_at = entry.get("created_at")
+            if isinstance(created_at, str) and created_at.strip():
+                preview_entry["created_at"] = created_at.strip()
+            updated_field = entry.get("updated_at")
+            if isinstance(updated_field, str) and updated_field.strip():
+                preview_entry["updated_at"] = updated_field.strip()
+            priority_value = entry.get("priority")
+            try:
+                priority = int(priority_value)  # type: ignore[arg-type]
+            except (TypeError, ValueError):
+                priority = None
+            if priority is not None:
+                preview_entry["priority"] = priority
+            items.append(preview_entry)
+    return {
+        "device_id": device_id,
+        "domain": normalized,
+        "items": items,
+        "generated_at": generated_at,
+        "updated_at": updated_at,
+        "limit": DOMAIN_PREVIEW_LIMIT,
+    }
+
+
 @app.get("/api/devices/{device_id}/domains/{domain}/files", response_model=FileListResponse)
 def list_domain_files(device_id: str, domain: str) -> FileListResponse:
     normalized = normalize_domain(domain)
@@ -5666,6 +5848,24 @@ def enqueue_domain_purge(device_id: str, domain: str) -> Dict[str, Any]:
     return {"job": job}
 
 
+@app.post("/api/devices/{device_id}/domains/{domain}/actions/shuffle")
+def enqueue_domain_shuffle(device_id: str, domain: str) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        job = create_job(
+            conn,
+            device_id,
+            normalized,
+            "shuffle_domain",
+            {"domain": normalized},
+        )
+        conn.commit()
+    return {"job": job}
+
+
 @app.post("/api/devices/{device_id}/heartbeat", response_model=HeartbeatResponse)
 def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
     normalized_active = normalize_domain(payload.active_domain or "naver")
@@ -5698,6 +5898,10 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                 cycle_completed_value = None
             else:
                 cycle_completed_value = 1 if state.cycle_completed else 0
+            preview_payload = _prepare_domain_preview_payload(
+                state.pending_preview,
+                state.pending_preview_generated_at,
+            )
             config_row = conn.execute(
                 """
                 SELECT stop_schedule_last_run
@@ -5754,6 +5958,8 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
                     domain,
                 ),
             )
+            if preview_payload is not None:
+                upsert_domain_preview(conn, device_id, domain, preview_payload)
         schedule_auto_stop_result: Optional[Dict[str, int]] = None
         if schedule_triggers:
             reason_parts = [f"{DOMAIN_LABELS.get(domain, domain)} 예약된 자동 정지 실행" for domain in schedule_triggers]

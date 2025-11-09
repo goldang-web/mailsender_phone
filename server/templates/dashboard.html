@@ -2193,6 +2193,73 @@ button:not(:disabled):hover {
   max-height: 220px;
   overflow-y: auto;
 }
+.db-preview-section {
+  margin-top: 20px;
+}
+.db-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.db-preview-head h4 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-muted-strong);
+}
+.db-preview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.db-preview-meta {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.db-preview-box {
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface-subtle);
+  max-height: 260px;
+  overflow: hidden;
+}
+.db-preview-empty {
+  padding: 16px;
+  font-size: 12px;
+  color: var(--color-muted);
+  text-align: center;
+}
+.db-preview-empty.error {
+  color: var(--color-danger);
+}
+.db-preview-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.db-preview-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--color-surface);
+  z-index: 1;
+}
+.db-preview-table th,
+.db-preview-table td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  white-space: nowrap;
+}
+.db-preview-table td:nth-child(2) {
+  white-space: normal;
+  word-break: break-all;
+}
+.db-preview-scroll {
+  max-height: 220px;
+  overflow-y: auto;
+}
 .modal-message {
   font-size: 12px;
   color: var(--color-danger-intense);
@@ -2381,12 +2448,25 @@ button:not(:disabled):hover {
           <input id="fileInput" type="file" accept=".db,.sqlite,.sqlite3,.txt">
         </label>
         <button id="fileUploadBtn">업로드</button>
+        <button class="secondary" id="shuffleDbBtn">DB 섞기</button>
         <button class="danger" id="purgeDbBtn">DB 전체 삭제</button>
       </div>
       <div id="fileListContainer"></div>
       <div>
         <h4 style="margin:16px 0 8px 0;font-size:13px;font-weight:600;">미리보기</h4>
         <div id="previewBox" class="preview-box">파일을 선택하면 미리보기가 표시됩니다.</div>
+      </div>
+      <div class="db-preview-section">
+        <div class="db-preview-head">
+          <h4>DB 미리보기</h4>
+          <div class="db-preview-actions">
+            <span class="db-preview-meta" id="dbPreviewMeta">업데이트 정보 없음</span>
+            <button type="button" class="ghost" id="dbPreviewRefreshBtn">새로고침</button>
+          </div>
+        </div>
+        <div id="dbPreviewBox" class="db-preview-box">
+          <div class="db-preview-empty">DB 미리보기를 불러오려면 새로고침을 눌러주세요.</div>
+        </div>
       </div>
 </div>
 </div>
@@ -2700,6 +2780,11 @@ const state = {
     deviceId: null,
     domain: null,
     deviceName: "",
+  },
+  dbPreview: {
+    items: [],
+    updatedAt: null,
+    generatedAt: null,
   },
   imapModal: {
     open: false,
@@ -3983,6 +4068,18 @@ function formatDate(iso) {
   } catch (err) {
     return iso;
   }
+}
+
+function escapeHtml(value) {
+  if (value === null || value === undefined) {
+    return "";
+  }
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 function formatRelativeTime(iso, options = {}) {
@@ -9832,6 +9929,95 @@ async function loadFileList(deviceId, domain) {
   }
 }
 
+function renderDbPreview() {
+  const box = document.getElementById("dbPreviewBox");
+  const metaEl = document.getElementById("dbPreviewMeta");
+  if (!box) return;
+  const previewState = state.dbPreview || {};
+  const items = Array.isArray(previewState.items) ? previewState.items : [];
+  if (metaEl) {
+    const parts = [];
+    if (previewState.updatedAt) {
+      parts.push(`서버 ${formatDate(previewState.updatedAt)}`);
+    }
+    if (previewState.generatedAt) {
+      parts.push(`클라이언트 ${formatDate(previewState.generatedAt)}`);
+    }
+    metaEl.textContent = parts.length ? parts.join(" · ") : "업데이트 정보 없음";
+  }
+  if (!items.length) {
+    box.innerHTML = '<div class="db-preview-empty">대기 중인 이메일이 없습니다.</div>';
+    return;
+  }
+  const table = document.createElement("table");
+  table.className = "db-preview-table";
+  table.innerHTML = `
+    <thead>
+      <tr>
+        <th>#</th>
+        <th>이메일</th>
+        <th>상태</th>
+        <th>등록 시간</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  `;
+  const tbody = table.querySelector("tbody");
+  items.forEach((item, index) => {
+    const row = document.createElement("tr");
+    const createdAt = item.created_at || item.updated_at || "";
+    row.innerHTML = `
+      <td>${index + 1}</td>
+      <td>${escapeHtml(item.email || "-")}</td>
+      <td>${escapeHtml((item.status || "pending").toUpperCase())}</td>
+      <td>${createdAt ? escapeHtml(formatDate(createdAt)) : "-"}</td>
+    `;
+    tbody.appendChild(row);
+  });
+  const scrollWrap = document.createElement("div");
+  scrollWrap.className = "db-preview-scroll";
+  scrollWrap.appendChild(table);
+  box.innerHTML = "";
+  box.appendChild(scrollWrap);
+}
+
+async function loadDbPreview(deviceId, domain, options = {}) {
+  const { silent = false } = options;
+  const box = document.getElementById("dbPreviewBox");
+  const metaEl = document.getElementById("dbPreviewMeta");
+  const refreshBtn = document.getElementById("dbPreviewRefreshBtn");
+  if (!box || !deviceId || !domain) return;
+  if (!silent) {
+    box.innerHTML = '<div class="db-preview-empty">DB 미리보기를 불러오는 중...</div>';
+    if (metaEl) {
+      metaEl.textContent = "불러오는 중...";
+    }
+  }
+  if (refreshBtn) {
+    refreshBtn.disabled = true;
+  }
+  try {
+    const response = await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/preview`);
+    state.dbPreview = {
+      items: Array.isArray(response.items) ? response.items : [],
+      updatedAt: response.updated_at || null,
+      generatedAt: response.generated_at || null,
+    };
+    renderDbPreview();
+  } catch (err) {
+    if (box) {
+      box.innerHTML = `<div class="db-preview-empty error">${escapeHtml(err.message || "DB 미리보기를 불러오지 못했습니다.")}</div>`;
+    }
+    if (metaEl) {
+      metaEl.textContent = "불러오기 실패";
+    }
+  } finally {
+    if (refreshBtn) {
+      refreshBtn.disabled = false;
+    }
+  }
+}
+
 function openFileModal(device, domain) {
   state.modal.open = true;
   state.modal.deviceId = device.id;
@@ -9843,7 +10029,21 @@ function openFileModal(device, domain) {
   document.getElementById("previewBox").textContent = "파일을 선택하면 미리보기가 표시됩니다.";
   document.getElementById("modalMessage").textContent = "";
   document.getElementById("fileInput").value = "";
+  state.dbPreview = {
+    items: [],
+    updatedAt: null,
+    generatedAt: null,
+  };
+  const dbPreviewBox = document.getElementById("dbPreviewBox");
+  if (dbPreviewBox) {
+    dbPreviewBox.innerHTML = '<div class="db-preview-empty">DB 미리보기를 불러오는 중...</div>';
+  }
+  const dbPreviewMeta = document.getElementById("dbPreviewMeta");
+  if (dbPreviewMeta) {
+    dbPreviewMeta.textContent = "불러오는 중...";
+  }
   loadFileList(device.id, domain);
+  loadDbPreview(device.id, domain);
 }
 
 function closeFileModal() {
@@ -10525,6 +10725,31 @@ async function handleDomainPurge(button) {
   }
 }
 
+async function handleDomainShuffle(button) {
+  const { deviceId, domain } = state.modal;
+  if (!deviceId || !domain) {
+    return;
+  }
+  const targetButton = button;
+  const originalText = targetButton?.textContent;
+  if (targetButton) {
+    targetButton.disabled = true;
+    targetButton.textContent = "섞는 중...";
+  }
+  try {
+    await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/actions/shuffle`, { method: "POST" });
+    showModalMessage("도메인 DB를 무작위로 재정렬했습니다.", "success");
+    await loadDevices({ silent: true });
+  } catch (err) {
+    showModalMessage(err.message || "DB 섞기에 실패했습니다.");
+  } finally {
+    if (targetButton) {
+      targetButton.disabled = false;
+      targetButton.textContent = originalText || "DB 섞기";
+    }
+  }
+}
+
 document.getElementById("fileUploadBtn").addEventListener("click", (event) => {
   event.preventDefault();
   handleFileUpload();
@@ -10535,6 +10760,14 @@ if (purgeBtn) {
   purgeBtn.addEventListener("click", async (event) => {
     event.preventDefault();
     await handleDomainPurge(purgeBtn);
+  });
+}
+
+const shuffleBtn = document.getElementById("shuffleDbBtn");
+if (shuffleBtn) {
+  shuffleBtn.addEventListener("click", async (event) => {
+    event.preventDefault();
+    await handleDomainShuffle(shuffleBtn);
   });
 }
 
@@ -11244,6 +11477,17 @@ async function handleLockCopyApply() {
     applyBtn.disabled = false;
     applyBtn.textContent = originalText;
   }
+}
+
+const dbPreviewRefreshBtn = document.getElementById("dbPreviewRefreshBtn");
+if (dbPreviewRefreshBtn) {
+  dbPreviewRefreshBtn.addEventListener("click", () => {
+    if (!state.modal.deviceId || !state.modal.domain) {
+      showModalMessage("DB 미리보기를 새로고침할 디바이스를 찾을 수 없습니다.");
+      return;
+    }
+    loadDbPreview(state.modal.deviceId, state.modal.domain, { silent: true });
+  });
 }
 
 document.getElementById("fileListContainer").addEventListener("click", (event) => {
