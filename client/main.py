@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.101"
+APP_VERSION = "0.0.102"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -56,7 +56,7 @@ LOG_DIR = BASE_DIR / "logs"
 DOMAINS = ("naver", "daum")
 EMAIL_STATUSES = ("pending", "reserved", "sent", "block", "failed", "nouser", "removed")
 PENDING_PREVIEW_LIMIT = 100
-SMTP_RECIPIENT_LIMIT = 25
+SMTP_RECIPIENT_LIMIT = 0  # 0이면 SMTP 수신자 수 상한을 적용하지 않음
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 5.0
 TELEGRAM_SUPPRESSION_WINDOW_SECONDS = 90.0
@@ -4100,6 +4100,15 @@ class MailClient:
         return max(0, count)
 
     @staticmethod
+    def _sanitize_recipient_limit(value: object) -> int:
+        default_limit = SMTP_RECIPIENT_LIMIT
+        try:
+            limit = int(value) if value is not None else default_limit
+        except (TypeError, ValueError):
+            limit = default_limit
+        return max(0, limit)
+
+    @staticmethod
     def _sanitize_anchor_interval(value: object) -> int:
         try:
             interval = int(value or 0)
@@ -5745,6 +5754,7 @@ class MailClient:
         session_count = max(1, self._sanitize_session_count(config.get("session_count")))
         bcc_count = self._sanitize_bcc_count(config.get("bcc_count"))
         group_size = max(1, 1 + bcc_count)
+        recipient_limit = self._sanitize_recipient_limit(config.get("smtp_recipient_limit"))
         anchor_interval = self._sanitize_anchor_interval(config.get("anchor_interval"))
         reserved_timeout_seconds = self._sanitize_reserved_timeout(config.get("reserved_timeout_seconds"))
         mail_from_value = self._effective_mail_from(normalized, config)
@@ -6454,7 +6464,7 @@ class MailClient:
                     if not group:
                         return group
                     group.injected = []
-                    max_total = max(0, int(SMTP_RECIPIENT_LIMIT))
+                    max_total = recipient_limit
                     if max_total > 0:
                         max_bcc_allowed = max(0, max_total - 1)
                         if len(group.bcc) > max_bcc_allowed:
