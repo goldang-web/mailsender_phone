@@ -58,6 +58,43 @@ class SmtpUtilsTests(unittest.TestCase):
         formatted = client_main.MailClient._format_data_end_detail(detail)
         self.assertEqual(formatted, "QUIT: 250 2.0.0 Message accepted for delivery")
 
+    def test_rcpt_details_include_sequence_index_and_role(self) -> None:
+        response_entries = [
+            ("MAIL FROM", "250 2.1.0 OK"),
+            ("RCPT:primary@test.com", "250 2.1.5 OK"),
+            ("RCPT:anchor@test.com", "250 2.1.5 OK"),
+            ("RCPT:bcc@test.com", "452 4.5.3 Too many recipients"),
+            ("DATA END", "250 2.0.0 OK"),
+        ]
+        response_text = "\n".join(f"{label}: {text}" for label, text in response_entries)
+        with patch.object(
+            smtp_utils.telnet_mailer,
+            "send_mail_telnet",
+            return_value=(response_text, response_entries),
+        ):
+            success, _text, _finished_at, rcpt_details, _data_response = smtp_utils.send_via_telnet(
+                smtp_host="",
+                smtp_port=25,
+                helo="test-helo",
+                mail_from="sender@test.com",
+                rcpt_to="primary@test.com",
+                header_text="From: sender@test.com\r\n\r\nbody",
+                bcc_emails=["anchor@test.com", "bcc@test.com"],
+                anchor_emails=["anchor@test.com"],
+            )
+        self.assertFalse(success)
+        self.assertEqual(len(rcpt_details), 3)
+        first, second, third = rcpt_details
+        self.assertEqual(first.get("sequence_index"), 0)
+        self.assertEqual(first.get("sequence_role"), "primary")
+        self.assertTrue(first.get("success"))
+        self.assertEqual(second.get("sequence_index"), 1)
+        self.assertEqual(second.get("sequence_role"), "anchor")
+        self.assertTrue(second.get("success"))
+        self.assertEqual(third.get("sequence_index"), 2)
+        self.assertEqual(third.get("sequence_role"), "bcc")
+        self.assertFalse(third.get("success"))
+
 
 if __name__ == "__main__":
     unittest.main()

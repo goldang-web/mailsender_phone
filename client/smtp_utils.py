@@ -56,7 +56,8 @@ def send_via_telnet(
     attempt_hosts.append(None)  # MX fallback
 
     bcc_targets = [email.strip() for email in (bcc_emails or []) if email and email.strip()]
-    anchor_targets = {email.strip().lower() for email in (anchor_emails or []) if email and email.strip()}
+    anchor_payload = [email.strip() for email in (anchor_emails or []) if email and email.strip()]
+    anchor_targets = {email.lower() for email in anchor_payload}
     primary_lower = (rcpt_to or "").strip().lower()
     bcc_lower = {email.lower() for email in bcc_targets}
 
@@ -67,9 +68,47 @@ def send_via_telnet(
 
     debug_enabled = TELNET_DEBUG_MODE if debug is None else bool(debug)
 
+    def _normalize_address(value: Optional[str]) -> str:
+        return (value or "").strip()
+
+    def _address_key(value: Optional[str]) -> str:
+        return _normalize_address(value).lower()
+
+    rcpt_sequence: List[Dict[str, object]] = []
+    rcpt_index_template: Dict[str, List[int]] = {}
+
+    def _register_rcpt(
+        address: Optional[str],
+        *,
+        is_primary: bool,
+        is_bcc: bool,
+    ) -> None:
+        normalized = _normalize_address(address)
+        if not normalized:
+            return
+        lowered = normalized.lower()
+        is_anchor = lowered in anchor_targets
+        index = len(rcpt_sequence)
+        sequence_role = "anchor" if is_anchor else ("primary" if is_primary else "bcc")
+        entry = {
+            "address": normalized,
+            "index": index,
+            "is_primary": is_primary,
+            "is_bcc": is_bcc,
+            "is_anchor": is_anchor,
+            "sequence_role": sequence_role,
+        }
+        rcpt_sequence.append(entry)
+        rcpt_index_template.setdefault(lowered, []).append(index)
+
+    _register_rcpt(rcpt_to, is_primary=True, is_bcc=False)
+    for bcc_email in bcc_targets:
+        _register_rcpt(bcc_email, is_primary=False, is_bcc=True)
+
     for index, host_candidate in enumerate(attempt_hosts):
         if index > 0:
             print("지정 호스트 실패. MX 레코드로 대체 시도합니다.")
+        index_queue_map = {key: list(values) for key, values in rcpt_index_template.items()}
         raw_response = telnet_mailer.send_mail_telnet(
             smtp_server=host_candidate or None,
             sender_email=mail_from,
@@ -77,6 +116,7 @@ def send_via_telnet(
             helo_name=helo or "localhost",
             header=payload,
             bcc_emails=bcc_targets or None,
+            anchor_emails=anchor_payload or None,
             smtp_port_override=smtp_port or None,
             debug=debug_enabled,
         )
@@ -104,17 +144,37 @@ def send_via_telnet(
                 if detail_text:
                     code = detail_text.split()[0]
                 entry_success = bool(code.startswith("2"))
-                rcpt_details.append(
-                    {
-                        "address": address,
-                        "code": code,
-                        "message": detail_text,
-                        "is_primary": lowered == primary_lower,
-                        "is_bcc": lowered in bcc_lower,
-                        "is_anchor": lowered in anchor_targets,
-                        "success": entry_success,
-                    }
-                )
+                sequence_index = None
+                sequence_role = None
+                queue = index_queue_map.get(_address_key(address))
+                sequence_entry = None
+                if queue:
+                    sequence_index = queue.pop(0)
+                    if 0 <= sequence_index < len(rcpt_sequence):
+                        sequence_entry = rcpt_sequence[sequence_index]
+                if sequence_entry:
+                    is_primary_entry = bool(sequence_entry.get("is_primary"))
+                    is_bcc_entry = bool(sequence_entry.get("is_bcc"))
+                    is_anchor_entry = bool(sequence_entry.get("is_anchor"))
+                    sequence_role = sequence_entry.get("sequence_role")
+                else:
+                    is_primary_entry = lowered == primary_lower
+                    is_bcc_entry = lowered in bcc_lower
+                    is_anchor_entry = lowered in anchor_targets
+                detail_entry = {
+                    "address": address,
+                    "code": code,
+                    "message": detail_text,
+                    "is_primary": is_primary_entry,
+                    "is_bcc": is_bcc_entry,
+                    "is_anchor": is_anchor_entry,
+                    "success": entry_success,
+                }
+                if sequence_index is not None:
+                    detail_entry["sequence_index"] = sequence_index
+                if sequence_role:
+                    detail_entry["sequence_role"] = sequence_role
+                rcpt_details.append(detail_entry)
                 if not entry_success:
                     rcpt_success = False
             elif label == "DATA END":

@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.99"
+APP_VERSION = "0.0.100"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -4355,7 +4355,14 @@ class MailClient:
             code = str(item.get("code") or "").strip()
             message_text = str(item.get("message") or "").strip()
             success_flag = bool(item.get("success"))
-            label = f"{address}→{code or '-'}"
+            sequence_index = item.get("sequence_index")
+            sequence_role = str(item.get("sequence_role") or "").strip().upper()
+            sequence_prefix = ""
+            if isinstance(sequence_index, int):
+                display_index = max(0, sequence_index) + 1
+                role_segment = f" {sequence_role}" if sequence_role else ""
+                sequence_prefix = f"[#{display_index:02d}{role_segment}] "
+            label = f"{sequence_prefix}{address}→{code or '-'}".strip()
             if not success_flag and message_text and message_text != code:
                 trimmed = message_text if len(message_text) <= 60 else f"{message_text[:57]}..."
                 label = f"{label} ({trimmed})"

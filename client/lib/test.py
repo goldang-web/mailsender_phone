@@ -69,6 +69,7 @@ def send_mail_telnet(
     helo_name,
     header,
     bcc_emails=None,
+    anchor_emails=None,
     smtp_port_override=None,
     *,
     debug: bool = False,
@@ -90,19 +91,56 @@ def send_mail_telnet(
                 debug_started = True
             print(f"[텔넷-{tag}] {message}")
 
+    bcc_list = [email.strip() for email in (bcc_emails or []) if email and email.strip()]
+    anchor_list = [email.strip() for email in (anchor_emails or []) if email and email.strip()]
+    anchor_targets = {email.lower() for email in anchor_list}
+
+    rcpt_index_counter = -1
+
+    def next_rcpt_index() -> int:
+        nonlocal rcpt_index_counter
+        rcpt_index_counter += 1
+        return rcpt_index_counter
+
+    def rcpt_role_label(address: str, *, is_primary: bool) -> str:
+        lowered = (address or "").strip().lower()
+        if lowered in anchor_targets:
+            return "ANCHOR"
+        return "PRIMARY" if is_primary else "BCC"
+
+    def format_rcpt_prefix(index: Optional[int], role: Optional[str]) -> str:
+        if index is None:
+            return ""
+        role_part = ""
+        if role:
+            role_name = str(role).strip().upper()
+            if role_name:
+                role_part = f" {role_name}"
+        return f"[#{index:02d}{role_part}]"
+
     try:
         port_value = smtp_port_override or smtp_port
         debug_log("CONNECT", f"연결 시도 → {smtp_server}:{port_value}")
         with telnetlib.Telnet(smtp_server, port_value) as tn:
             debug_log("CONNECT", "연결 성공")
 
-            def record(label: str, text: str) -> None:
+            def record(
+                label: str,
+                text: str,
+                *,
+                rcpt_index: Optional[int] = None,
+                rcpt_role: Optional[str] = None,
+            ) -> None:
                 trimmed = (text or "").strip()
                 response_entries.append((label, trimmed))
+                context_prefix = format_rcpt_prefix(rcpt_index, rcpt_role)
+                display_label = label
+                if context_prefix:
+                    display_label = f"{context_prefix} {label}".strip()
                 if label and trimmed:
-                    response_lines.append(f"{label}: {trimmed}")
+                    response_lines.append(f"{display_label}: {trimmed}")
                 elif label:
-                    response_lines.append(label)
+                    response_lines.append(display_label)
                 elif trimmed:
                     response_lines.append(trimmed)
                 if debug_enabled:
@@ -124,17 +162,31 @@ def send_mail_telnet(
                         tag = "QUIT"
                     elif upper_label == "CONNECT":
                         tag = "CONNECT"
+                    prefix = format_rcpt_prefix(rcpt_index, rcpt_role)
+                    if prefix:
+                        entry_label = f"{prefix} {entry_label}".strip()
                     message_text = f"<< {entry_label}: {trimmed}" if trimmed else f"<< {entry_label}"
                     debug_log(tag, message_text)
 
-            def read_line(label: str, address: Optional[str] = None) -> str:
+            def read_line(
+                label: str,
+                address: Optional[str] = None,
+                *,
+                rcpt_index: Optional[int] = None,
+                rcpt_role: Optional[str] = None,
+            ) -> str:
                 raw = tn.read_until(b"\r\n", timeout=READ_LINE_TIMEOUT)
                 text = raw.decode('utf-8', errors='ignore')
                 entry_label = label if address is None else f"{label}:{address}"
-                record(entry_label, text)
+                record(entry_label, text, rcpt_index=rcpt_index, rcpt_role=rcpt_role)
                 return text
 
-            def write_line(text: str) -> None:
+            def write_line(
+                text: str,
+                *,
+                rcpt_index: Optional[int] = None,
+                rcpt_role: Optional[str] = None,
+            ) -> None:
                 upper_text = text.strip().upper()
                 if upper_text.startswith("HELO") or upper_text.startswith("EHLO"):
                     tag = "HELO"
@@ -148,7 +200,11 @@ def send_mail_telnet(
                     tag = "QUIT"
                 else:
                     tag = "Command"
-                debug_log(tag, f">> {text}")
+                prefix = format_rcpt_prefix(rcpt_index, rcpt_role)
+                if prefix:
+                    debug_log(tag, f">> {prefix} {text}")
+                else:
+                    debug_log(tag, f">> {text}")
                 tn.write(f"{text}\r\n".encode('utf-8'))
 
             read_line("CONNECT")
@@ -158,13 +214,34 @@ def send_mail_telnet(
             write_line(f"MAIL FROM:<{sender_email}>")
             read_line("MAIL FROM")
 
-            write_line(f"RCPT TO:<{recipient_email}>")
-            read_line("RCPT", recipient_email)
+            primary_rcpt_index = next_rcpt_index()
+            primary_role = rcpt_role_label(recipient_email, is_primary=True)
+            write_line(
+                f"RCPT TO:<{recipient_email}>",
+                rcpt_index=primary_rcpt_index,
+                rcpt_role=primary_role,
+            )
+            read_line(
+                "RCPT",
+                recipient_email,
+                rcpt_index=primary_rcpt_index,
+                rcpt_role=primary_role,
+            )
 
-            if bcc_emails:
-                for bcc_email in bcc_emails:
-                    write_line(f"RCPT TO:<{bcc_email}>")
-                    read_line("RCPT", bcc_email)
+            for bcc_email in bcc_list:
+                rcpt_index = next_rcpt_index()
+                rcpt_role = rcpt_role_label(bcc_email, is_primary=False)
+                write_line(
+                    f"RCPT TO:<{bcc_email}>",
+                    rcpt_index=rcpt_index,
+                    rcpt_role=rcpt_role,
+                )
+                read_line(
+                    "RCPT",
+                    bcc_email,
+                    rcpt_index=rcpt_index,
+                    rcpt_role=rcpt_role,
+                )
 
             write_line("DATA")
             read_line("DATA")
