@@ -153,6 +153,56 @@ class ToPlaceholderTests(unittest.TestCase):
         self.assertIn("From: sender@example.com", normalized)
         self.assertNotIn("{$FROM}", normalized)
 
+    @patch.object(client_main, "send_via_telnet")
+    def test_single_send_expands_dollar_brace_from_placeholder(self, mock_send) -> None:
+        now = datetime.now(timezone.utc)
+        mock_send.return_value = (
+            True,
+            "250 2.0.0 OK",
+            now,
+            [
+                {
+                    "address": "pxy528@daum.net",
+                    "code": "250",
+                    "message": "250 2.1.5 OK",
+                    "is_primary": True,
+                    "is_bcc": False,
+                    "is_anchor": False,
+                    "success": True,
+                },
+            ],
+            {"code": "250", "message": "250 2.0.0 OK"},
+        )
+        header_template = (
+            "From: <first@example.com>,<${FROM}>\n"
+            "To: ${TO}\n"
+            "Subject: 테스트\n"
+            "\n"
+            "본문"
+        )
+        payload = {
+            "config": {
+                "smtp_host": "",
+                "smtp_port": 25,
+                "helo": "",
+                "mail_from": "sender@example.com",
+                "header": header_template,
+                "bcc_count": 0,
+            },
+            "rcpt_to": "pxy528@daum.net",
+            "bcc": [],
+            "bcc_enabled": False,
+        }
+
+        result = self.client.handle_single_send("daum", payload, "job-from-placeholder-dollar")
+        self.assertEqual(result.status, "success")
+
+        header_text = mock_send.call_args.kwargs["header_text"]
+        normalized = header_text.replace("\r\n", "\n")
+        self.assertIn("From: <first@example.com>,<sender@example.com>", normalized)
+        self.assertNotIn("${FROM}", normalized)
+        self.assertNotIn("${TO}", normalized)
+
 
 if __name__ == "__main__":
     unittest.main()

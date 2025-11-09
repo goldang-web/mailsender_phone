@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.100"
+APP_VERSION = "0.0.101"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -82,8 +82,8 @@ RECIPIENT_LIMIT_MARKERS = (
 
 IMAP_LOG_HEADER_SEPARATOR = "****************************"
 IMAP_LOG_FOOTER_SEPARATOR = "****************************"
-TO_PLACEHOLDER_PATTERN = re.compile(r"\{\$TO\}", re.IGNORECASE)
-FROM_PLACEHOLDER_PATTERN = re.compile(r"\{\$FROM\}", re.IGNORECASE)
+TO_PLACEHOLDER_PATTERN = re.compile(r"(?:\{\$TO\}|\$\{TO\})", re.IGNORECASE)
+FROM_PLACEHOLDER_PATTERN = re.compile(r"(?:\{\$FROM\}|\$\{FROM\})", re.IGNORECASE)
 
 
 def utc_now() -> datetime:
