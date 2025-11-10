@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
+import random
+import re
 import socket
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from lib import test as telnet_mailer
 
@@ -22,9 +24,28 @@ def resolve_smtp_host(host: str, port: int) -> str:
     try:
         socket.getaddrinfo(candidate, port)
     except socket.gaierror:
-        print(f"지정한 SMTP 호스트 {candidate} 를 찾지 못했습니다. MX 레코드로 대체합니다.")
+        print(f"지정한 SMTP 호스트 {candidate} 를 찾지 못했습니다.")
         return ""
     return candidate
+
+
+def _extract_custom_hosts(value: str) -> List[str]:
+    if not value:
+        return []
+    text = str(value or "")
+    cleaned = re.split(r"[,\s]+", text)
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for item in cleaned:
+        candidate = item.strip()
+        if not candidate:
+            continue
+        lowered = candidate.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        normalized.append(candidate)
+    return normalized
 
 
 def normalize_newlines(text: str) -> str:
@@ -49,11 +70,27 @@ def send_via_telnet(
         telnet_mailer.READ_LINE_TIMEOUT = TELNET_READ_TIMEOUT_SECONDS
     normalized = normalize_newlines(header_text or "")
     payload = normalized.replace("\n", "\r\n")
-    attempt_hosts = []
-    target_host = resolve_smtp_host(smtp_host, smtp_port)
-    if target_host:
-        attempt_hosts.append(target_host)
-    attempt_hosts.append(None)  # MX fallback
+    custom_hosts = _extract_custom_hosts(smtp_host)
+    attempt_hosts: List[Optional[str]] = []
+    custom_mode = bool(custom_hosts)
+    if custom_mode:
+        resolved_candidates: List[str] = []
+        for candidate in custom_hosts:
+            resolved = resolve_smtp_host(candidate, smtp_port)
+            if resolved:
+                resolved_candidates.append(resolved)
+        if not resolved_candidates:
+            completed_at = datetime.now(timezone.utc)
+            error_message = "지정한 MX 호스트를 찾지 못했습니다. 입력 값을 확인하세요."
+            error_detail = {"code": "", "message": error_message, "source": "CONFIG"}
+            return False, error_message, completed_at, [], error_detail
+        random.shuffle(resolved_candidates)
+        attempt_hosts.extend(resolved_candidates)
+    else:
+        target_host = resolve_smtp_host(smtp_host, smtp_port)
+        if target_host:
+            attempt_hosts.append(target_host)
+        attempt_hosts.append(None)  # MX fallback only when 사용자 지정 없음
 
     bcc_targets = [email.strip() for email in (bcc_emails or []) if email and email.strip()]
     anchor_payload = [email.strip() for email in (anchor_emails or []) if email and email.strip()]
@@ -106,7 +143,7 @@ def send_via_telnet(
         _register_rcpt(bcc_email, is_primary=False, is_bcc=True)
 
     for index, host_candidate in enumerate(attempt_hosts):
-        if index > 0:
+        if index > 0 and not custom_mode:
             print("지정 호스트 실패. MX 레코드로 대체 시도합니다.")
         index_queue_map = {key: list(values) for key, values in rcpt_index_template.items()}
         raw_response = telnet_mailer.send_mail_telnet(

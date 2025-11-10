@@ -2686,6 +2686,7 @@ const MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜
 const GLOBAL_FIELD_LIST = [
   "active_domain",
   "helo",
+  "smtp_host",
   "mail_from",
   "header",
   "all_headers_unique",
@@ -2701,6 +2702,7 @@ const GLOBAL_FIELD_LIST = [
 const GLOBAL_DEFAULTS = {
   active_domain: "naver",
   helo: "",
+  smtp_host: "",
   mail_from: "",
   header: "",
   all_headers_unique: false,
@@ -2717,6 +2719,7 @@ const GLOBAL_DEFAULTS = {
 const GLOBAL_INPUT_IDS = {
   active_domain: "globalActiveDomainGroup",
   helo: "globalHelo",
+  smtp_host: "globalSmtpHost",
   mail_from: "globalMailFrom",
   header: "globalHeader",
   all_headers_unique: "globalAllHeadersUnique",
@@ -2813,6 +2816,7 @@ const state = {
   globalDirty: {
     active_domain: false,
     helo: false,
+    smtp_host: false,
     mail_from: false,
     header: false,
     all_headers_unique: false,
@@ -3084,7 +3088,7 @@ function createEmptyListRule() {
   };
 }
 
-const CONFIG_FIELDS = ["helo", "mail_from", "header", "message_id_pattern", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
+const CONFIG_FIELDS = ["helo", "smtp_host", "mail_from", "header", "message_id_pattern", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
 const CONFIG_TOGGLE_FIELDS = ["message_id_auto", "all_headers_unique"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
@@ -3385,6 +3389,7 @@ function initCardColumnControl() {
 function initialFieldValues(config) {
   return {
     helo: config?.helo || "",
+    smtp_host: config?.smtp_host || "",
     mail_from: config?.mail_from || "",
     header: config?.header || "",
     message_id_pattern: config?.message_id_pattern || MESSAGE_ID_PATTERN_DEFAULT,
@@ -3459,7 +3464,7 @@ function collectConfigPayload(card, currentDevice, domain) {
   return {
     payload: {
       helo: card.querySelector('[data-field="helo"]').value.trim(),
-      smtp_host: (currentDevice.configs?.[domain]?.smtp_host || "").trim(),
+      smtp_host: card.querySelector('[data-field="smtp_host"]').value.trim(),
       mail_from: card.querySelector('[data-field="mail_from"]').value.trim(),
       header: card.querySelector('[data-field="header"]').value,
       message_id_auto: messageIdAutoValue,
@@ -4530,6 +4535,10 @@ function updateGlobalScheduleUI(options = {}) {
 function normalizeGlobalFieldValue(field, value) {
   if (field === "active_domain") {
     return sanitizeGlobalDomain(value ?? GLOBAL_DEFAULTS.active_domain);
+  }
+  if (field === "smtp_host") {
+    const candidate = value === null || value === undefined ? "" : String(value);
+    return candidate.trim();
   }
   if (field === "session_count") {
     return sanitizeSessionValue(value ?? "");
@@ -8388,6 +8397,8 @@ function populateConfigForm(card, device, domain) {
   renderDomainSummary(card, device, activeDomain);
   const heloInput = card.querySelector('[data-field="helo"]');
   if (heloInput && document.activeElement !== heloInput) heloInput.value = cache.values.helo;
+  const smtpHostInput = card.querySelector('[data-field="smtp_host"]');
+  if (smtpHostInput && document.activeElement !== smtpHostInput) smtpHostInput.value = cache.values.smtp_host;
   const mailInput = card.querySelector('[data-field="mail_from"]');
   if (mailInput && document.activeElement !== mailInput) mailInput.value = cache.values.mail_from;
   const headerInput = card.querySelector('[data-field="header"]');
@@ -8819,6 +8830,7 @@ function attachCardEvents(card) {
       applyValuesToGlobalDraft({
         active_domain: sanitizedDomain,
         helo: payload.helo,
+        smtp_host: payload.smtp_host,
         mail_from: payload.mail_from,
         header: payload.header,
         all_headers_unique: payload.all_headers_unique,
@@ -8837,6 +8849,7 @@ function attachCardEvents(card) {
           overrides: {
             active_domain: sanitizedDomain,
             helo: payload.helo,
+            smtp_host: payload.smtp_host,
             mail_from: payload.mail_from,
             header: payload.header,
             all_headers_unique: payload.all_headers_unique,
@@ -9269,6 +9282,11 @@ function buildDeviceCard(device) {
         <label class="field">
           <span>HELO</span>
           <input type="text" data-field="helo">
+        </label>
+        <label class="field">
+          <span>MX 호스트</span>
+          <input type="text" data-field="smtp_host" placeholder="예: mx1.hanmail.net,mx2.hanmail.net" spellcheck="false" autocomplete="off">
+          <span class="field-hint">쉼표나 줄바꿈으로 여러 호스트를 입력하면 무작위로 선택합니다.</span>
         </label>
         <label class="field compact">
           <span>세션 수</span>
@@ -10914,6 +10932,7 @@ async function handleGlobalApply(options = {}) {
   const overrides = options?.overrides && typeof options.overrides === "object" ? options.overrides : {};
   const applyBtn = document.getElementById("globalApplyBtn");
   const heloInput = document.getElementById("globalHelo");
+  const smtpHostInput = document.getElementById("globalSmtpHost");
   const mailInput = document.getElementById("globalMailFrom");
   const headerInput = document.getElementById("globalHeader");
   const sessionInput = document.getElementById("globalSessionCount");
@@ -10930,6 +10949,7 @@ async function handleGlobalApply(options = {}) {
 
   const hasActiveDomainOverride = Object.prototype.hasOwnProperty.call(overrides, "active_domain");
   const hasHeloOverride = Object.prototype.hasOwnProperty.call(overrides, "helo");
+  const hasSmtpHostOverride = Object.prototype.hasOwnProperty.call(overrides, "smtp_host");
   const hasMailFromOverride = Object.prototype.hasOwnProperty.call(overrides, "mail_from");
   const hasHeaderOverride = Object.prototype.hasOwnProperty.call(overrides, "header");
   const hasAllHeadersOverride = Object.prototype.hasOwnProperty.call(overrides, "all_headers_unique");
@@ -10967,6 +10987,19 @@ async function handleGlobalApply(options = {}) {
     state.globalDraft.helo = heloValue;
     if (heloInput && heloInput.value !== heloValue) {
       heloInput.value = heloValue;
+    }
+  }
+
+  let smtpHostValue;
+  if (hasSmtpHostOverride) {
+    smtpHostValue = (overrides.smtp_host ?? "").toString().trim();
+  } else if (smtpHostInput) {
+    smtpHostValue = smtpHostInput.value.trim();
+  }
+  if (smtpHostValue !== undefined) {
+    state.globalDraft.smtp_host = smtpHostValue;
+    if (smtpHostInput && smtpHostInput.value !== smtpHostValue) {
+      smtpHostInput.value = smtpHostValue;
     }
   }
 
@@ -11136,6 +11169,9 @@ async function handleGlobalApply(options = {}) {
   }
   if (heloValue !== undefined && (hasHeloOverride || heloInput)) {
     payload.helo = heloValue;
+  }
+  if (smtpHostValue !== undefined && (hasSmtpHostOverride || smtpHostInput)) {
+    payload.smtp_host = smtpHostValue;
   }
   if (mailValue !== undefined && (hasMailFromOverride || mailInput)) {
     payload.mail_from = mailValue;

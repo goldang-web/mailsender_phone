@@ -124,6 +124,7 @@ JOB_STALE_GRACE_SECONDS = DEVICE_HEARTBEAT_TIMEOUT_SECONDS * 2
 GLOBAL_CONFIG_KEY = "common_config"
 GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "helo": "",
+    "smtp_host": "",
     "mail_from": "",
     "header": "",
     "all_headers_unique": False,
@@ -141,6 +142,7 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
 }
 GLOBAL_CONFIG_DEVICE_FIELDS = (
     "helo",
+    "smtp_host",
     "mail_from",
     "header",
     "all_headers_unique",
@@ -1115,6 +1117,7 @@ def sanitize_substitution_rules(raw: Any) -> List[Dict[str, Any]]:
 def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized: Dict[str, Any] = {}
     sanitized["helo"] = str(raw.get("helo") or "").strip()
+    sanitized["smtp_host"] = str(raw.get("smtp_host") or "").strip()
     sanitized["mail_from"] = str(raw.get("mail_from") or "").strip()
     sanitized["header"] = str(raw.get("header") or "")
     raw_all_headers = raw.get("all_headers_unique")
@@ -3688,6 +3691,7 @@ class DeviceLockCopyRequest(BaseModel):
 
 class GlobalConfigPayload(BaseModel):
     helo: Optional[str] = None
+    smtp_host: Optional[str] = None
     mail_from: Optional[str] = None
     header: Optional[str] = None
     all_headers_unique: Optional[bool] = None
@@ -3706,6 +3710,7 @@ class GlobalConfigPayload(BaseModel):
 
 class GlobalConfigResponse(BaseModel):
     helo: str
+    smtp_host: str
     mail_from: str
     header: str
     all_headers_unique: bool
@@ -3865,6 +3870,7 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
     message_id_pattern = _normalize_message_id_pattern(config.get("message_id_pattern"))
     return GlobalConfigResponse(
         helo=config.get("helo", ""),
+        smtp_host=config.get("smtp_host", ""),
         mail_from=config.get("mail_from", ""),
         header=config.get("header", ""),
         all_headers_unique=all_headers_unique,
@@ -3927,6 +3933,12 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
             elif field in ("helo", "mail_from"):
                 value_to_apply = (raw_value or "").strip()
                 should_apply = bool(value_to_apply)
+            elif field == "smtp_host":
+                if raw_value is None:
+                    continue
+                candidate_value = str(raw_value or "").strip()
+                value_to_apply = candidate_value
+                should_apply = True
             elif field == "bcc_count":
                 value_to_apply = clamp_bcc_count(raw_value)
                 should_apply = raw_value is not None
