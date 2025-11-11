@@ -8081,7 +8081,8 @@ class MailClient:
         total_value = max(0, int(accumulated_total or 0))
         timestamp = time.strftime("%H:%M:%S", time.localtime())
         device_label = (self.device_name or self.device_id or "-").strip() or "-"
-        line = f"{safe_label}({batch_success}/{total_value}) | {timestamp} | {device_label}"
+        ip_label = (str(self.public_ip or "").strip()) or "(IP 미보고)"
+        line = f"{ip_label} - {safe_label}({batch_success}/{total_value}) | {timestamp} | {device_label}"
         if include_anchor:
             line += " | 알박기 포함"
         recipient_value = (recipient or "").strip()

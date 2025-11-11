@@ -21,13 +21,13 @@ spec.loader.exec_module(client_main)
 
 def _sent_log_pattern(label: str) -> re.Pattern[str]:
     return re.compile(
-        rf"^{label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| TestDevice"
+        rf"^[^|]+ - {label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| TestDevice"
         r"(?: \| 알박기 포함)?"
         r"(?: \| .+)?$"
     )
 
 def _extract_counts(entry: str) -> tuple[int, int]:
-    match = re.match(r"^(Sent|Fail)\((\d+)/(\d+)\)", entry)
+    match = re.search(r"(Sent|Fail)\((\d+)/(\d+)\)", entry)
     if not match:
         raise AssertionError(f"로그 포맷이 예상과 다릅니다: {entry}")
     return int(match.group(2)), int(match.group(3))
@@ -52,6 +52,7 @@ class DispatchLoggingTests(unittest.TestCase):
             "sent_sequences": {},
         }
         self.client = client_main.MailClient(config)
+        self.client.public_ip = "198.51.100.10"
 
     def tearDown(self) -> None:
         self.client._shutdown_imap_executor()
