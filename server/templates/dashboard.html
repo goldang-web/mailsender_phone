@@ -6708,6 +6708,15 @@ function parseSendLogPayload(payload, entry = null) {
     }
   }
 
+  let daumMax = null;
+  const daumMetaValue = meta.daummax ?? meta.daum_max;
+  if (typeof daumMetaValue === "string" && daumMetaValue) {
+    const parsedDaum = normalizeInt(daumMetaValue);
+    if (parsedDaum !== null && parsedDaum >= 0) {
+      daumMax = parsedDaum;
+    }
+  }
+
   if (!email) {
     if (typeof meta.email === "string" && meta.email.includes("@")) {
       email = meta.email;
@@ -6732,6 +6741,7 @@ function parseSendLogPayload(payload, entry = null) {
     isPrimary,
     bccCount,
     anchorCount,
+    daumMax,
     legacyFormat,
   };
 }
@@ -7902,6 +7912,7 @@ function ensureSuccessTracker(deviceId, domain) {
       current: 0,
       total: 0,
       anchor: 0,
+      daumMax: 0,
       forceZero: false,
     };
   }
@@ -8020,6 +8031,7 @@ function updateSuccessTrackerFromDevice(device, domain) {
     tracker.value = 0;
     tracker.current = 0;
     tracker.total = 0;
+    tracker.daumMax = 0;
     tracker.forceZero = false;
     const jobCreatedMs = parseTimestampMs(job?.created_at);
     tracker.resetCutoff = Number.isNaN(jobCreatedMs) ? Date.now() : jobCreatedMs;
@@ -8036,6 +8048,7 @@ function updateSuccessTrackerFromDevice(device, domain) {
   let summaryCurrent = 0;
   let summaryTotal = 0;
   let summaryAnchor = 0;
+  let summaryDaumMax = 0;
   if (summary) {
     const currentCandidates = [
       summary.sent_visible,
@@ -8067,6 +8080,7 @@ function updateSuccessTrackerFromDevice(device, domain) {
       0,
     );
     summaryAnchor = parseSummaryNumber(summary.anchor);
+    summaryDaumMax = parseSummaryNumber(summary.daum_max ?? summary.daumMax ?? null);
   }
 
   const cutoffMs = typeof tracker.resetCutoff === "number" && !Number.isNaN(tracker.resetCutoff)
@@ -8081,10 +8095,6 @@ function updateSuccessTrackerFromDevice(device, domain) {
     if (!recordMatchesDomain(entry?.domain, normalizedDomain, { fallbackDomain: device.active_domain })) {
       return;
     }
-    if (!entry?.success) {
-      return;
-    }
-    sawSuccessLog = true;
     if (cutoffMs !== null) {
       const entryMs = parseTimestampMs(entry.created_at);
       if (!Number.isNaN(entryMs) && entryMs < cutoffMs) {
@@ -8092,6 +8102,17 @@ function updateSuccessTrackerFromDevice(device, domain) {
       }
     }
     const parsed = parseSendLogPayload(entry.response, entry);
+    if (parsed?.meta) {
+      const daumMeta = parsed.meta.daummax ?? parsed.meta.daum_max ?? null;
+      const daumValue = parseSummaryNumber(daumMeta);
+      if (daumValue > (tracker.daumMax || 0)) {
+        tracker.daumMax = daumValue;
+      }
+    }
+    if (!entry?.success) {
+      return;
+    }
+    sawSuccessLog = true;
     if (!parsed) {
       return;
     }
@@ -8151,6 +8172,7 @@ function updateSuccessTrackerFromDevice(device, domain) {
       sentCurrent = 0;
       sentTotal = 0;
       anchorTotal = 0;
+      tracker.daumMax = 0;
     }
   }
 
@@ -8158,6 +8180,9 @@ function updateSuccessTrackerFromDevice(device, domain) {
   tracker.total = sentTotal;
   tracker.value = sentTotal;
   tracker.anchor = anchorTotal;
+  if (summaryDaumMax > (tracker.daumMax || 0)) {
+    tracker.daumMax = summaryDaumMax;
+  }
   return { tracker, job };
 }
 
@@ -8178,7 +8203,11 @@ function updateSuccessCounter(card, device) {
   const elapsedEl = card.querySelector('[data-role="elapsedCounter"]');
   if (elapsedEl) {
     const elapsed = describeElapsedStatus(job);
-    elapsedEl.textContent = `경과: ${elapsed.text} · 알박기: ${formatCount(tracker.anchor)}건`;
+    let elapsedText = `경과: ${elapsed.text} · 알박기: ${formatCount(tracker.anchor)}건`;
+    if (activeDomain === "daum" && Number(tracker.daumMax || 0) > 0) {
+      elapsedText += ` · 다음MAX:${formatCount(tracker.daumMax)}`;
+    }
+    elapsedEl.textContent = elapsedText;
     if (elapsed.state) {
       elapsedEl.dataset.state = elapsed.state;
     } else {
@@ -9414,6 +9443,7 @@ function attachCardEvents(card) {
           tracker.current = 0;
           tracker.total = 0;
           tracker.anchor = 0;
+          tracker.daumMax = 0;
           tracker.forceZero = true;
           tracker.resetCutoff = null;
         }

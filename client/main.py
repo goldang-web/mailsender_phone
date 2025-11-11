@@ -69,6 +69,11 @@ THROTTLE_MARKER_MESSAGES = {
     "421 4.7.1 this email has been temporarily blocked": "네이버 '421 4.7.1 This email has been temporarily blocked' 응답 감지",
 }
 
+DAUM_THROTTLE_MARKERS = {
+    "rmcmd": "다음 'RMCMD' 응답 감지",
+    "xucmd": "다음 'XUCMD' 응답 감지",
+}
+
 FATAL_STOP_MARKER_MESSAGES = {}
 
 RECIPIENT_LIMIT_MARKERS = (
@@ -1089,6 +1094,7 @@ class MailClient:
                 self.sent_sequences[key] = 0
         for domain in DOMAINS:
             self.sent_sequences.setdefault(domain, 0)
+        self.daum_throttle_counts: Dict[str, int] = {domain: 0 for domain in DOMAINS}
         self._sent_log_bases: Dict[str, int] = {}
         for domain in DOMAINS:
             try:
@@ -2658,6 +2664,30 @@ class MailClient:
             base_value = sequence_total
             self._sent_log_bases[normalized] = base_value
         return max(0, sequence_total - base_value)
+
+    def _current_daum_throttle_counter(self, domain: Optional[str]) -> int:
+        normalized = (domain or "").lower()
+        try:
+            return max(0, int(self.daum_throttle_counts.get(normalized, 0)))
+        except (TypeError, ValueError):
+            return 0
+
+    def _reset_daum_throttle_counter(self, domain: Optional[str]) -> None:
+        normalized = (domain or "").lower()
+        if normalized != "daum":
+            return
+        self.daum_throttle_counts[normalized] = 0
+
+    def _increment_daum_throttle_counter(self, domain: Optional[str]) -> int:
+        normalized = (domain or "").lower()
+        if normalized != "daum":
+            return 0
+        try:
+            current_value = max(0, int(self.daum_throttle_counts.get(normalized, 0))) + 1
+        except (TypeError, ValueError):
+            current_value = 1
+        self.daum_throttle_counts[normalized] = current_value
+        return current_value
 
     def _get_last_threshold_multiple(self, domain: str) -> int:
         normalized = (domain or "").lower()
@@ -5818,6 +5848,7 @@ class MailClient:
             return JobResult(job_id=job_id, status="failed", message="로컬 DB가 없습니다.")
 
         self._initialize_sent_log_base(normalized)
+        self._reset_daum_throttle_counter(normalized)
 
         config = dict(payload.get("config") or {})
         substitution_payload = payload.get("substitution") if isinstance(payload.get("substitution"), dict) else None
@@ -5914,6 +5945,7 @@ class MailClient:
                 "cycles_completed": cycle_snapshot.get("cycle_count"),
                 "last_cycle_at": cycle_snapshot.get("last_cycle_completed_at"),
                 "returned": pending_queue_returned,
+                "daum_max": self._current_daum_throttle_counter(normalized),
             }
 
         def format_summary(prefix: str, snapshot: Optional[Dict[str, object]] = None) -> str:
@@ -5933,6 +5965,7 @@ class MailClient:
             nouser_total = int(summary_snapshot.get("nouser") or 0)
             remaining_total = int(summary_snapshot.get("remaining") or 0)
             cycles_completed = int(summary_snapshot.get("cycles_completed") or 0)
+            daum_max_total = int(summary_snapshot.get("daum_max") or 0)
             message = (
                 f"{prefix} 처리={processed_count} 성공={sent_total} "
                 f"실패={failed_total} 차단={block_total} BCC={bcc_total} "
@@ -5942,6 +5975,8 @@ class MailClient:
                 message = f"{message} · 누적={absolute_sent}"
             if cycles_completed > 0:
                 message = f"{message} · 누적 {cycles_completed}번째 순환 완료"
+            if normalized == "daum" and daum_max_total > 0:
+                message = f"{message} · 다음MAX={daum_max_total}"
             return message
 
         def emit_progress(force: bool = False) -> None:
@@ -6978,6 +7013,11 @@ class MailClient:
                     text_sources = (lower_response, status_lower, detail_lower)
                     matched_marker: Optional[str] = None
                     matched_message: Optional[str] = None
+                    daum_throttle_total = (
+                        self._current_daum_throttle_counter(normalized)
+                        if normalized == "daum"
+                        else 0
+                    )
                     for text in text_sources:
                         if not text:
                             continue
@@ -6999,7 +7039,23 @@ class MailClient:
                                     break
                             if matched_marker:
                                 break
-                    throttle_detected = matched_marker in THROTTLE_MARKER_MESSAGES if matched_marker else False
+                    if matched_marker is None and normalized == "daum":
+                        for text in text_sources:
+                            if not text:
+                                continue
+                            for marker, message in DAUM_THROTTLE_MARKERS.items():
+                                if marker in text:
+                                    matched_marker = marker
+                                    matched_message = message
+                                    break
+                            if matched_marker:
+                                break
+                    throttle_detected = False
+                    if matched_marker:
+                        if matched_marker in THROTTLE_MARKER_MESSAGES:
+                            throttle_detected = True
+                        elif normalized == "daum" and matched_marker in DAUM_THROTTLE_MARKERS:
+                            throttle_detected = True
                     recipient_limit_detected = False
                     recipient_limit_message: Optional[str] = None
                     for text in text_sources:
@@ -7021,6 +7077,19 @@ class MailClient:
                         outcome.delivery_status = "failed"
                         throttle_detected = False
                         matched_message = recipient_limit_message
+                    elif (
+                        throttle_detected
+                        and normalized == "daum"
+                        and matched_marker
+                        and matched_marker in DAUM_THROTTLE_MARKERS
+                    ):
+                        daum_throttle_total = self._increment_daum_throttle_counter(normalized)
+                    else:
+                        daum_throttle_total = (
+                            self._current_daum_throttle_counter(normalized)
+                            if normalized == "daum"
+                            else 0
+                        )
                     error_text = None if outcome.delivery_status == "sent" else (detail_for_log or outcome.status_line or "")[-500:]
                     group_size_actual = len(recipients)
                     recipient_emails = [record.email for record in recipients]
@@ -7156,6 +7225,8 @@ class MailClient:
                         recipient=primary_recipient,
                         extra_recipient_count=extra_recipient_count,
                     )
+                    if normalized == "daum" and daum_throttle_total > 0:
+                        log_line = f"{log_line} | daummax={daum_throttle_total}"
                     log_record = log_line
                     log_display = log_line
                     if not session_success:

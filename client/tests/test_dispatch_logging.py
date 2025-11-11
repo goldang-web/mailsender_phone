@@ -204,6 +204,17 @@ class DispatchLoggingTests(unittest.TestCase):
         )
         self.assertIn("| ip=198.51.100.10", line)
 
+    def test_daum_throttle_counter_helpers(self) -> None:
+        self.client._reset_daum_throttle_counter("daum")
+        self.assertEqual(self.client._current_daum_throttle_counter("daum"), 0)
+        self.assertEqual(self.client._increment_daum_throttle_counter("naver"), 0)
+        self.assertEqual(self.client._current_daum_throttle_counter("daum"), 0)
+        self.assertEqual(self.client._increment_daum_throttle_counter("daum"), 1)
+        self.assertEqual(self.client._increment_daum_throttle_counter("daum"), 2)
+        self.assertEqual(self.client._current_daum_throttle_counter("daum"), 2)
+        self.client._reset_daum_throttle_counter("daum")
+        self.assertEqual(self.client._current_daum_throttle_counter("daum"), 0)
+
     def test_single_send_passes_effective_mail_from_to_imap(self) -> None:
         captured_mail_from: list[str] = []
 
