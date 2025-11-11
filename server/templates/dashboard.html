@@ -59,6 +59,9 @@
   --shadow-success: rgba(4, 120, 87, 0.12);
   --shadow-hover: rgba(37, 99, 235, 0.2);
   --shadow-modal: rgba(15, 23, 42, 0.25);
+  --log-panel-min-height: 160px;
+  --log-panel-max-height: 560px;
+  --log-panel-default-height: 220px;
 }
 
 :root[data-theme="light"] {
@@ -1902,13 +1905,38 @@ button:not(:disabled):hover {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 180px;
+  min-height: var(--log-panel-min-height);
+  max-height: var(--log-panel-max-height);
+  height: var(--log-panel-default-height);
+  resize: vertical;
+  overflow: hidden;
+  position: relative;
 }
 .log-box-header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
+  flex-wrap: wrap;
+}
+.log-box[data-collapsed="true"] {
+  height: auto !important;
+  min-height: 0;
+  max-height: none;
+  resize: none;
+}
+.log-box[data-collapsed="true"] .log-list {
+  display: none;
+}
+.log-box-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.log-toggle-btn {
+  padding: 4px 10px;
+  font-size: 11px;
 }
 .log-box-heading {
   display: flex;
@@ -1951,6 +1979,7 @@ button:not(:disabled):hover {
 }
 .log-list {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
@@ -2732,6 +2761,40 @@ const GLOBAL_INPUT_IDS = {
   message_id_auto: "globalMessageIdAuto",
   message_id_pattern: "globalMessageIdPattern",
 };
+const LOG_PANEL_STORAGE_KEY = "dashboardLogPanels";
+const LOG_PANEL_MIN_HEIGHT = 160;
+const LOG_PANEL_MAX_HEIGHT = 560;
+const LOG_PANEL_DEFAULT_HEIGHT = 220;
+
+function loadLogPanelPreferences() {
+  if (typeof localStorage === "undefined") {
+    return {};
+  }
+  try {
+    const stored = localStorage.getItem(LOG_PANEL_STORAGE_KEY);
+    if (!stored) return {};
+    const parsed = JSON.parse(stored);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed;
+    }
+  } catch (err) {
+    console.warn("로그 패널 설정을 불러오지 못했습니다.", err);
+  }
+  return {};
+}
+
+function persistLogPanelPreferences(preferences) {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(LOG_PANEL_STORAGE_KEY, JSON.stringify(preferences));
+  } catch (err) {
+    console.warn("로그 패널 설정 저장에 실패했습니다.", err);
+  }
+}
+
+const initialLogPanelPreferences = loadLogPanelPreferences();
 
 const IMAP_DEFAULT_ALLOWED_LATENCY = 20;
 const IMAP_ALLOWED_MIN = 5;
@@ -2879,6 +2942,10 @@ const state = {
     card: null,
     lastResult: null,
     fallback: null,
+  },
+  logPanels: {
+    preferences: { ...initialLogPanelPreferences },
+    observers: new WeakMap(),
   },
   telegramLastSavedToken: "",
   telegramLastSavedChat: "",
@@ -3205,6 +3272,161 @@ function persistOnlineOnlyPreference(enabled) {
     localStorage.setItem(ONLINE_ONLY_KEY, enabled ? "true" : "false");
   } catch (err) {
     console.warn("온라인 필터 설정 저장에 실패했습니다.", err);
+  }
+}
+
+function getLogPanelPreference(deviceId) {
+  if (!deviceId) return null;
+  return state.logPanels.preferences[deviceId] || null;
+}
+
+function setLogPanelPreference(deviceId, updates = {}) {
+  if (!deviceId || !updates || typeof updates !== "object") {
+    return;
+  }
+  const prev = state.logPanels.preferences[deviceId] || {};
+  const next = { ...prev };
+  if (Object.prototype.hasOwnProperty.call(updates, "height")) {
+    const clampedHeight = clampNumber(updates.height, LOG_PANEL_MIN_HEIGHT, LOG_PANEL_MAX_HEIGHT, 0);
+    if (clampedHeight) {
+      next.height = clampedHeight;
+    } else {
+      delete next.height;
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(updates, "collapsed")) {
+    if (updates.collapsed) {
+      next.collapsed = true;
+    } else {
+      delete next.collapsed;
+    }
+  }
+  if (!Object.keys(next).length) {
+    if (state.logPanels.preferences[deviceId]) {
+      delete state.logPanels.preferences[deviceId];
+      persistLogPanelPreferences(state.logPanels.preferences);
+    }
+    return;
+  }
+  const changed = Object.keys(next).some((key) => next[key] !== prev[key]) || Object.keys(prev).some((key) => prev[key] !== next[key]);
+  if (!changed) {
+    return;
+  }
+  state.logPanels.preferences[deviceId] = next;
+  persistLogPanelPreferences(state.logPanels.preferences);
+}
+
+function updateLogPanelToggleButton(card, collapsed) {
+  const toggleBtn = card.querySelector('button[data-action="toggle-log-panel"]');
+  if (!toggleBtn) return;
+  const isCollapsed = Boolean(collapsed);
+  toggleBtn.textContent = isCollapsed ? "펼치기" : "접기";
+  toggleBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+}
+
+function applyLogPanelHeight(logBox, height) {
+  if (!logBox) return;
+  const clamped = clampNumber(height, LOG_PANEL_MIN_HEIGHT, LOG_PANEL_MAX_HEIGHT, 0);
+  if (!clamped) {
+    logBox.style.height = "";
+    return;
+  }
+  logBox.__logPanelApplyingHeight = true;
+  logBox.style.height = `${clamped}px`;
+  const clearFlag = () => {
+    logBox.__logPanelApplyingHeight = false;
+  };
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(clearFlag);
+  } else {
+    setTimeout(clearFlag, 0);
+  }
+}
+
+function restoreLogPanelHeight(logBox, deviceId) {
+  if (!logBox) return;
+  const pref = getLogPanelPreference(deviceId);
+  const target = pref?.height ? clampNumber(pref.height, LOG_PANEL_MIN_HEIGHT, LOG_PANEL_MAX_HEIGHT, 0) : 0;
+  if (target) {
+    applyLogPanelHeight(logBox, target);
+  } else {
+    logBox.style.height = "";
+  }
+}
+
+function bindLogPanelResizeObserver(logBox, deviceId) {
+  if (!logBox || typeof ResizeObserver === "undefined") {
+    return;
+  }
+  if (!state.logPanels.observers) {
+    state.logPanels.observers = new WeakMap();
+  }
+  if (state.logPanels.observers.has(logBox)) {
+    return;
+  }
+  const resolvedId = deviceId || logBox.closest(".card")?.dataset.deviceId;
+  if (!resolvedId) {
+    return;
+  }
+  const observer = new ResizeObserver((entries) => {
+    if (!entries?.length) return;
+    if (logBox.dataset.collapsed === "true") return;
+    if (logBox.__logPanelApplyingHeight) return;
+    const entry = entries[entries.length - 1];
+    const height = entry?.contentRect?.height;
+    if (!height) return;
+    const nextHeight = clampNumber(Math.round(height), LOG_PANEL_MIN_HEIGHT, LOG_PANEL_MAX_HEIGHT, 0);
+    if (!nextHeight) return;
+    const pref = getLogPanelPreference(resolvedId) || {};
+    if (pref.height === nextHeight) return;
+    setLogPanelPreference(resolvedId, { height: nextHeight });
+  });
+  observer.observe(logBox);
+  state.logPanels.observers.set(logBox, observer);
+}
+
+function applyLogPanelState(card, device) {
+  const logBox = card.querySelector('[data-role="logPanel"]');
+  if (!logBox) return;
+  const deviceId = device?.id || card.dataset.deviceId;
+  const pref = getLogPanelPreference(deviceId) || {};
+  const collapsed = Boolean(pref.collapsed);
+  const prevState = logBox.dataset.collapsed === "true";
+  if (collapsed !== prevState) {
+    logBox.dataset.collapsed = collapsed ? "true" : "false";
+  }
+  if (collapsed) {
+    logBox.style.height = "";
+  } else if (pref.height) {
+    const desired = clampNumber(pref.height, LOG_PANEL_MIN_HEIGHT, LOG_PANEL_MAX_HEIGHT, 0);
+    const current = parseInt(logBox.style.height, 10);
+    if (!logBox.style.height || Number.isNaN(current) || Math.abs(current - desired) > 1) {
+      applyLogPanelHeight(logBox, desired);
+    }
+  }
+  updateLogPanelToggleButton(card, collapsed);
+  if (deviceId) {
+    bindLogPanelResizeObserver(logBox, deviceId);
+  }
+}
+
+function setLogPanelCollapsed(card, deviceId, collapsed) {
+  const logBox = card.querySelector('[data-role="logPanel"]');
+  if (!logBox) return;
+  const targetState = Boolean(collapsed);
+  const prevState = logBox.dataset.collapsed === "true";
+  if (targetState === prevState) {
+    return;
+  }
+  logBox.dataset.collapsed = targetState ? "true" : "false";
+  if (targetState) {
+    logBox.style.height = "";
+  } else {
+    restoreLogPanelHeight(logBox, deviceId);
+  }
+  updateLogPanelToggleButton(card, targetState);
+  if (deviceId) {
+    setLogPanelPreference(deviceId, { collapsed: targetState });
   }
 }
 
@@ -9208,6 +9430,18 @@ function attachCardEvents(card) {
     });
   }
 
+  const logToggleBtn = card.querySelector('button[data-action="toggle-log-panel"]');
+  if (logToggleBtn) {
+    logToggleBtn.addEventListener("click", () => {
+      const currentDevice = getDevice();
+      const deviceId = currentDevice?.id || card.dataset.deviceId;
+      if (!deviceId) return;
+      const logBox = card.querySelector('[data-role="logPanel"]');
+      const collapsed = logBox?.dataset.collapsed === "true";
+      setLogPanelCollapsed(card, deviceId, !collapsed);
+    });
+  }
+
   const cancelBtn = card.querySelector('button[data-action="cancel-batch"]');
   if (cancelBtn) {
     cancelBtn.addEventListener("click", async () => {
@@ -9357,14 +9591,17 @@ function buildDeviceCard(device) {
         </div>
       </div>
     </div>
-    <div class="log-box">
+    <div class="log-box" data-role="logPanel" data-collapsed="false">
       <div class="log-box-header">
         <div class="log-box-heading">
           <h4>로그</h4>
           <div class="log-stats" data-role="successCounter">현재 성공: 0건 · 누적 성공: 0건</div>
           <div class="log-stats secondary" data-role="elapsedCounter">경과: -</div>
         </div>
-        <button class="ghost log-clear-btn" data-action="clear-logs">로그 초기화</button>
+        <div class="log-box-actions">
+          <button class="ghost small log-toggle-btn" data-action="toggle-log-panel" aria-expanded="true">접기</button>
+          <button class="ghost small log-clear-btn" data-action="clear-logs">로그 초기화</button>
+        </div>
       </div>
       <div class="log-list" data-role="logList"></div>
     </div>
@@ -9442,6 +9679,7 @@ function updateDeviceCard(card, device) {
 
   const logListEl = card.querySelector('[data-role="logList"]');
   if (logListEl) renderLogList(device, logListEl, activeDomain);
+  applyLogPanelState(card, device);
   updateSuccessCounter(card, device);
   updateBatchControls(card, device);
 }

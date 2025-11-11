@@ -4453,7 +4453,16 @@ class MailClient:
     def _merge_detail_texts(preferred: Optional[str], existing: Optional[str]) -> Optional[str]:
         preferred_value = (preferred or "").strip()
         existing_value = (existing or "").strip()
+        def is_terminal_detail(text: str) -> bool:
+            if not text:
+                return False
+            head = text.split(":", 1)[0].strip().lower()
+            return head in {"data end", "quit"}
         if preferred_value and existing_value:
+            if is_terminal_detail(preferred_value):
+                return preferred_value
+            if is_terminal_detail(existing_value):
+                return existing_value
             if preferred_value.lower() in existing_value.lower():
                 return existing
             return f"{preferred_value} / {existing_value}"
@@ -7062,13 +7071,14 @@ class MailClient:
                         recipient=primary_recipient,
                         extra_recipient_count=extra_recipient_count,
                     )
+                    log_record = log_line
                     log_display = log_line
                     if not session_success:
                         failure_summary_line = (failure_detail or "-").strip() or "-"
                         log_display = f"{log_line}\n  SMTP 응답: {failure_summary_line}"
                     dispatch_logs: List[Dict[str, object]] = [
                         {
-                            "log": log_display,
+                            "log": log_record,
                             "display": log_display,
                             "log_compact": log_line,
                             "email": recipient_emails[0] if recipient_emails else None,
