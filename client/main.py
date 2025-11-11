@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.104"
+APP_VERSION = "0.0.105"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -6183,6 +6183,23 @@ class MailClient:
                         )
                     return released
 
+                def handle_user_cancel_request() -> bool:
+                    nonlocal stop_requested, cancel_requested, stop_reason
+                    if stop_requested:
+                        return False
+                    if not self._is_cancel_requested(job_id):
+                        return False
+                    stop_requested = True
+                    cancel_requested = True
+                    stop_reason = "사용자 중지 요청"
+                    emit_batch_halt_marker(
+                        "USER_CANCEL",
+                        stop_reason,
+                        severity="warning",
+                    )
+                    release_pending_queue("사용자 중지 요청")
+                    return True
+
                 def recycle_consumed_rows() -> bool:
                     summary_row = conn.execute(
                         """
@@ -7344,8 +7361,11 @@ class MailClient:
                     with ThreadPoolExecutor(max_workers=session_count) as executor:
                         while True:
                             check_schedule_trigger()
+                            handle_user_cancel_request()
                             if not stop_requested:
                                 while len(inflight) < session_count:
+                                    if handle_user_cancel_request() or stop_requested:
+                                        break
                                     ensure_threshold_check()
                                     guard_paused = self._is_sent_guard_paused(normalized)
                                     if threshold_check_request is not None or guard_paused:
@@ -7368,21 +7388,13 @@ class MailClient:
                                     group = prepare_group_for_dispatch(group)
                                     future = executor.submit(deliver_group, group)
                                     inflight[future] = group
-                                    if stop_requested:
+                                    if handle_user_cancel_request() or stop_requested:
                                         break
                             if inflight:
+                                handle_user_cancel_request()
                                 done, _ = wait(inflight.keys(), timeout=0.5, return_when=FIRST_COMPLETED)
                                 if not done:
-                                    if not stop_requested and self._is_cancel_requested(job_id):
-                                        stop_requested = True
-                                        cancel_requested = True
-                                        stop_reason = "사용자 중지 요청"
-                                        emit_batch_halt_marker(
-                                            "USER_CANCEL",
-                                            stop_reason,
-                                            severity="warning",
-                                        )
-                                        release_pending_queue("사용자 중지 요청")
+                                    handle_user_cancel_request()
                                     check_schedule_trigger()
                                     maybe_poll_updates()
                                     continue
