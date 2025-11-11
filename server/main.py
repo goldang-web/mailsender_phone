@@ -3169,6 +3169,7 @@ def cancel_active_sends(
         params.append(device_id)
     job_rows = conn.execute(query, tuple(params)).fetchall()
     cancelled = 0
+    pending_cancelled = 0
     cancel_requested = 0
     for job_row in job_rows:
         status = job_row["status"]
@@ -3195,6 +3196,8 @@ def cancel_active_sends(
                 )
                 handle_job_completion(conn, updated_row, pseudo_report)
             cancelled += 1
+            if status == "pending":
+                pending_cancelled += 1
             continue
         if job_row["cancel_requested"]:
             continue
@@ -3211,6 +3214,7 @@ def cancel_active_sends(
     return {
         "total_jobs": len(job_rows),
         "cancelled": cancelled,
+        "pending_cancelled": pending_cancelled,
         "cancel_requested": cancel_requested,
     }
 

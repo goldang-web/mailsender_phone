@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.103"
+APP_VERSION = "0.0.104"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -4840,6 +4840,7 @@ class MailClient:
                 continue
             snapshot[job_id] = control
         self.job_controls = snapshot
+        self._handle_cancelled_pending_jobs()
         removed_ids = previous_ids - set(snapshot.keys())
         for job_id in removed_ids:
             self._cancel_ack_sent.discard(job_id)
@@ -4877,6 +4878,63 @@ class MailClient:
             except Exception as exc:  # pylint: disable=broad-except
                 print(f"[경고] 작업 취소 보고 실패: {exc}")
                 self._cancel_ack_sent.discard(job_id)
+
+    def _drop_pending_job(self, job_id: str) -> Optional[Dict[str, object]]:
+        if not job_id or job_id not in self._pending_job_ids:
+            return None
+        retained: Deque[Dict[str, object]] = deque()
+        removed_job: Optional[Dict[str, object]] = None
+        while self._pending_jobs:
+            job = self._pending_jobs.popleft()
+            candidate_id = str(job.get("job_id") or "").strip()
+            if candidate_id == job_id and removed_job is None:
+                removed_job = job
+                continue
+            retained.append(job)
+        self._pending_jobs = retained
+        if removed_job:
+            self._pending_job_ids.discard(job_id)
+        return removed_job
+
+    def _report_cancelled_pending_job(self, job_id: str, job: Optional[Dict[str, object]], message: Optional[str] = None) -> None:
+        if not job_id:
+            return
+        job_type = (job or {}).get("job_type") or "batch_send"
+        job_label = str(job_type).replace("_", " ")
+        final_message = message or f"사용자 요청으로 대기 중이던 {job_label} 작업을 취소했습니다."
+        if job_id not in self._cancel_ack_sent:
+            self._cancel_ack_sent.add(job_id)
+        print(f"[작업 정리] {final_message} (job_id={job_id})")
+        try:
+            self.send_job_report(
+                JobResult(
+                    job_id=job_id,
+                    status="cancelled",
+                    message=final_message,
+                    result=None,
+                    error="사용자 요청으로 발송을 중단했습니다.",
+                )
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[경고] 작업 취소 보고 실패: {exc}")
+            self._cancel_ack_sent.discard(job_id)
+
+    def _handle_cancelled_pending_jobs(self) -> None:
+        if not self.job_controls:
+            return
+        pending_to_ack: List[Tuple[str, Dict[str, object]]] = []
+        for job_id, control in self.job_controls.items():
+            if not isinstance(control, dict):
+                continue
+            if not control.get("cancel_requested"):
+                continue
+            if job_id in self._active_job_ids:
+                continue
+            removed_job = self._drop_pending_job(job_id)
+            if removed_job:
+                pending_to_ack.append((job_id, removed_job))
+        for job_id, job in pending_to_ack:
+            self._report_cancelled_pending_job(job_id, job)
 
     def _queue_jobs(self, jobs: Iterable[Dict[str, object]]) -> None:
         if not jobs:
@@ -4942,6 +5000,10 @@ class MailClient:
             self.send_job_report(guard_result, domain_states)
             self.job_controls.pop(job_id, None)
             self._cancel_ack_sent.discard(job_id)
+            return
+        if job_id and self._is_cancel_requested(job_id):
+            self.job_controls.pop(job_id, None)
+            self._report_cancelled_pending_job(job_id, job)
             return
         self._active_job_ids.add(job_id)
         self._active_jobs[job_id] = job_type
@@ -5851,6 +5913,7 @@ class MailClient:
                 "reserved": domain_totals.get("reserved", 0),
                 "cycles_completed": cycle_snapshot.get("cycle_count"),
                 "last_cycle_at": cycle_snapshot.get("last_cycle_completed_at"),
+                "returned": pending_queue_returned,
             }
 
         def format_summary(prefix: str, snapshot: Optional[Dict[str, object]] = None) -> str:
@@ -6047,6 +6110,7 @@ class MailClient:
                 cancel_requested = True
                 stop_reason = "예약된 자동 정지 실행"
                 emit_batch_halt_marker("SCHEDULE_STOP", stop_reason, severity="warning")
+                release_pending_queue("예약된 자동 정지")
 
         check_schedule_trigger()
 
@@ -6064,6 +6128,25 @@ class MailClient:
                 pending_queue: Deque[DispatchEmail] = deque()
                 inflight: Dict[Future[DispatchOutcome], DispatchGroup] = {}
                 fetch_batch_size = max(group_size * session_count, group_size)
+                pending_queue_returned = 0
+
+                def release_pending_queue(reason: str) -> int:
+                    nonlocal pending_queue_returned
+                    if not pending_queue:
+                        return 0
+                    items = list(pending_queue)
+                    pending_queue.clear()
+                    release_reserved_rows(items)
+                    released = len(items)
+                    if released > 0:
+                        pending_queue_returned += released
+                        emit_batch_halt_marker(
+                            "QUEUE_RELEASED",
+                            f"{reason} · 대기 {released}건을 pending으로 복원",
+                            severity="info",
+                            allow_repeat=True,
+                        )
+                    return released
 
                 def recycle_consumed_rows() -> bool:
                     summary_row = conn.execute(
@@ -6816,6 +6899,7 @@ class MailClient:
                             fatal_error,
                             severity="error",
                         )
+                        release_pending_queue("IMAP 네트워크 오류")
                         return
                     else:
                         failure_lines: List[str] = []
@@ -6857,6 +6941,7 @@ class MailClient:
                             failure_summary,
                             severity="error",
                         )
+                        release_pending_queue("IMAP 실패")
                         return
                     next_multiple = self._get_last_threshold_multiple(normalized) + 1
                     next_target = threshold_value * next_multiple if threshold_value > 0 else 0
@@ -7156,6 +7241,7 @@ class MailClient:
                                 fatal_error,
                                 severity="error",
                             )
+                            release_pending_queue("SMTP 제한 응답 감지")
                         else:
                             emit_progress(force=True)
                     elif matched_message:
@@ -7167,6 +7253,7 @@ class MailClient:
                             fatal_error,
                             severity="error",
                         )
+                        release_pending_queue("SMTP 치명 응답 감지")
                     emit_progress()
                     if dispatch_logs:
                         summary_snapshot = build_summary()
@@ -7224,6 +7311,7 @@ class MailClient:
                                             stop_reason,
                                             severity="warning",
                                         )
+                                        release_pending_queue("사용자 중지 요청")
                                     check_schedule_trigger()
                                     maybe_poll_updates()
                                     continue
@@ -7240,6 +7328,7 @@ class MailClient:
                             ensure_threshold_check()
                             maybe_poll_updates()
                             if stop_requested:
+                                release_pending_queue("중지 요청으로 대기 세션 반환")
                                 break
                             group = next_group()
                             if not group:
@@ -7257,8 +7346,7 @@ class MailClient:
                             maybe_poll_updates()
                 finally:
                     if pending_queue:
-                        release_reserved_rows(list(pending_queue))
-                        pending_queue.clear()
+                        release_pending_queue("잔여 세션 정리")
         except sqlite3.Error as exc:
             return JobResult(job_id=job_id, status="failed", message=f"DB 오류: {exc}")
 
@@ -7269,6 +7357,9 @@ class MailClient:
         if cancel_requested:
             headline = stop_reason or "사용자 요청으로 배치 발송 중단"
             final_message = format_summary(headline, summary)
+            returned_count = int(summary.get("returned") or 0)
+            if returned_count > 0:
+                final_message = f"{final_message} · 대기 {returned_count}건 복원"
             error_text = stop_reason or "사용자 요청으로 발송을 중단했습니다."
             print(f"[배치 발송] {domain_label} · {final_message}")
             if stop_reason and "자동 정지" in stop_reason:

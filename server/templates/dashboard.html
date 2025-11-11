@@ -9454,11 +9454,25 @@ function attachCardEvents(card) {
       const originalText = cancelBtn.textContent;
       cancelBtn.textContent = "중지 요청 중...";
       try {
-        await fetchJSON(`/api/jobs/${jobId}/cancel`, {
+        const response = await fetchJSON(`/api/jobs/${jobId}/cancel`, {
           method: "POST",
           body: JSON.stringify({ device_id: currentDevice.id }),
         });
-        setNotice(card, "중지 요청을 전송했습니다.");
+        const batchBtn = card.querySelector('button[data-action="batch"]');
+        if (batchBtn) {
+          batchBtn.disabled = false;
+          batchBtn.textContent = "전체 발송";
+        }
+        cancelBtn.style.display = "none";
+        cancelBtn.disabled = false;
+        cancelBtn.textContent = cancelBtn.dataset.defaultLabel || "중지";
+        card.dataset.currentBatchJobId = "";
+        card.dataset.currentBatchJobDomain = "";
+        const immediate = !response?.cancel_requested;
+        const noticeMessage = immediate
+          ? "대기 중인 세션을 즉시 정리했습니다."
+          : "실행 중인 세션에 중지 신호를 전달했습니다.";
+        setNotice(card, noticeMessage);
         await loadDevices({ silent: true });
       } catch (err) {
         cancelBtn.disabled = false;
@@ -11672,11 +11686,13 @@ async function handleGlobalStopAll() {
     });
     const cancelled = result.cancelled ?? 0;
     const cancelRequested = result.cancel_requested ?? 0;
+    const pendingCleared = result.pending_cancelled ?? 0;
     const affected = cancelled + cancelRequested;
     if (affected === 0) {
       setGlobalStatus("중지할 발송 작업이 없습니다.", "info");
     } else {
-      setGlobalStatus(`즉시 중지 ${cancelled}건, 중지 요청 ${cancelRequested}건을 처리했습니다.`, "success");
+      const pendingLabel = pendingCleared > 0 ? ` (대기 ${pendingCleared}건 즉시 정리)` : "";
+      setGlobalStatus(`즉시 중지 ${cancelled}건${pendingLabel}, 중지 요청 ${cancelRequested}건을 처리했습니다.`, "success");
     }
     await loadDevices({ silent: true });
   } catch (err) {
