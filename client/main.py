@@ -8081,8 +8081,7 @@ class MailClient:
         total_value = max(0, int(accumulated_total or 0))
         timestamp = time.strftime("%H:%M:%S", time.localtime())
         device_label = (self.device_name or self.device_id or "-").strip() or "-"
-        ip_label = (str(self.public_ip or "").strip()) or "(IP 미보고)"
-        line = f"{ip_label} - {safe_label}({batch_success}/{total_value}) | {timestamp} | {device_label}"
+        line = f"{safe_label}({batch_success}/{total_value}) | {timestamp} | {device_label}"
         if include_anchor:
             line += " | 알박기 포함"
         recipient_value = (recipient or "").strip()
@@ -8097,6 +8096,8 @@ class MailClient:
             bcc_list = [item for item in bcc_list if item]
             if bcc_list:
                 line += " | BCC: " + ", ".join(bcc_list)
+        ip_value = (str(self.public_ip or "").strip()) or "(IP 미보고)"
+        line += f" | ip={ip_value}"
         return line
 
     @staticmethod

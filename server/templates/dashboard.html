@@ -6549,6 +6549,10 @@ function buildLogDisplayText(entry) {
   if (emailTarget) {
     baseText = `${labelText} - ${emailTarget}${suffix}`;
   }
+  const ipValue = typeof parsed.meta?.ip === "string" ? parsed.meta.ip.trim() : "";
+  if (ipValue) {
+    baseText = `${ipValue} - ${baseText}`;
+  }
   const isSuccess = Boolean(entry?.success);
   if (!isSuccess) {
     const detailSource = parsed.meta?.detail || parsed.meta?.error || entry?.detail || entry?.error;

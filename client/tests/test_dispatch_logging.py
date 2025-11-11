@@ -21,13 +21,13 @@ spec.loader.exec_module(client_main)
 
 def _sent_log_pattern(label: str) -> re.Pattern[str]:
     return re.compile(
-        rf"^[^|]+ - {label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| TestDevice"
+        rf"^{label}\(\d+/\d+\) \| \d{{2}}:\d{{2}}:\d{{2}} \| TestDevice"
         r"(?: \| 알박기 포함)?"
         r"(?: \| .+)?$"
     )
 
 def _extract_counts(entry: str) -> tuple[int, int]:
-    match = re.search(r"(Sent|Fail)\((\d+)/(\d+)\)", entry)
+    match = re.match(r"^(Sent|Fail)\((\d+)/(\d+)\)", entry)
     if not match:
         raise AssertionError(f"로그 포맷이 예상과 다릅니다: {entry}")
     return int(match.group(2)), int(match.group(3))
@@ -193,7 +193,16 @@ class DispatchLoggingTests(unittest.TestCase):
             accumulated_total=5,
             recipient="solo@example.com",
         )
-        self.assertTrue(single.endswith(" | solo@example.com"))
+        self.assertIn(" | solo@example.com | ip=", single)
+
+    def test_log_line_includes_ip_metadata(self) -> None:
+        line = self.client._format_dispatch_log_line(
+            "Sent",
+            current_batch_success=1,
+            accumulated_total=2,
+            recipient="user@example.com",
+        )
+        self.assertIn("| ip=198.51.100.10", line)
 
     def test_single_send_passes_effective_mail_from_to_imap(self) -> None:
         captured_mail_from: list[str] = []
