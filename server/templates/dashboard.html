@@ -8475,7 +8475,7 @@ function updateSuccessTrackerFromDevice(device, domain) {
   if (summaryDaumIdle) {
     tracker.daumIdle = summaryDaumIdle;
   }
-  return { tracker, job };
+  return { tracker, job, summaryDaumIdle };
 }
 
 function updateSuccessCounter(card, device) {
@@ -8487,7 +8487,7 @@ function updateSuccessCounter(card, device) {
   if (!result) {
     return;
   }
-  const { tracker, job } = result;
+  const { tracker, job, summaryDaumIdle } = result;
   const counterEl = card.querySelector('[data-role="successCounter"]');
   if (counterEl) {
     counterEl.textContent = `현재 성공: ${formatCount(tracker.current)}건 · 누적 성공: ${formatCount(tracker.total)}건`;
