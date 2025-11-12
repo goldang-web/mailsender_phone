@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.107"
+APP_VERSION = "0.0.108"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -1652,6 +1652,51 @@ class MailClient:
         if marker in base:
             base = base.split(marker, 1)[0].strip()
         return base or "사유 정보 없음"
+
+    def _record_batch_session_log(
+        self,
+        *,
+        domain: str,
+        job_id: Optional[str],
+        session_id: Optional[str],
+        started_at: str,
+        stopped_at: str,
+        elapsed_seconds: int,
+        sent_total: int,
+        start_ip: Optional[str],
+        stop_ip: Optional[str],
+        status: str,
+        stop_reason: Optional[str],
+    ) -> None:
+        device_id = (self.device_id or "").strip()
+        if not device_id or not self.server_url:
+            return
+        normalized = (domain or "").strip().lower()
+        if normalized not in DOMAINS:
+            return
+        payload = {
+            "job_id": job_id,
+            "session_id": session_id,
+            "status": status or "unknown",
+            "stop_reason": stop_reason,
+            "started_at": started_at,
+            "stopped_at": stopped_at,
+            "elapsed_seconds": max(0, int(elapsed_seconds)),
+            "sent_total": max(0, int(sent_total)),
+            "start_ip": start_ip,
+            "stop_ip": stop_ip,
+        }
+        try:
+            self._request(
+                "POST",
+                f"/api/devices/{device_id}/domains/{normalized}/batch-logs",
+                json=payload,
+                timeout=self.timeout,
+                suppress_log=True,
+                log_context="배치 중지 기록 전송",
+            )
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"[경고] 배치 중지 기록 전송 실패: {exc}")
 
     def _stop_notification_signature(
         self,
@@ -5976,6 +6021,10 @@ class MailClient:
 
         self._initialize_sent_log_base(normalized)
         self._reset_daum_throttle_counter(normalized)
+        batch_started_monotonic = time.monotonic()
+        batch_started_at = utc_now_iso()
+        batch_start_ip = self.refresh_public_ip() or self.public_ip
+        session_token = uuid.uuid4().hex
 
         config = dict(payload.get("config") or {})
         substitution_payload = payload.get("substitution") if isinstance(payload.get("substitution"), dict) else None
@@ -6374,7 +6423,6 @@ class MailClient:
                     count_value = row["cnt"] or 0
                     domain_totals[status_key] = count_value
 
-                session_token = uuid.uuid4().hex
                 pending_queue: Deque[DispatchEmail] = deque()
                 inflight: Dict[Future[DispatchOutcome], DispatchGroup] = {}
                 fetch_batch_size = max(group_size * session_count, group_size)
@@ -7665,6 +7713,30 @@ class MailClient:
 
         emit_progress(force=True)
         summary = build_summary()
+
+        def maybe_record_batch_stop(status_label: str, summary_snapshot: Dict[str, object]) -> None:
+            if normalized != "daum":
+                return
+            reason_label = stop_reason or fatal_error
+            if not reason_label and status_label == "cancelled":
+                reason_label = "사용자 중지 요청"
+            elif not reason_label and status_label != "success":
+                reason_label = "배치 발송 중단"
+            elapsed_seconds_value = int(max(0.0, time.monotonic() - batch_started_monotonic))
+            stop_ip_value = self.public_ip or batch_start_ip
+            self._record_batch_session_log(
+                domain=normalized,
+                job_id=job_id,
+                session_id=session_token,
+                started_at=batch_started_at,
+                stopped_at=utc_now_iso(),
+                elapsed_seconds=elapsed_seconds_value,
+                sent_total=int(summary_snapshot.get("sent") or 0),
+                start_ip=batch_start_ip,
+                stop_ip=stop_ip_value,
+                status=status_label,
+                stop_reason=reason_label,
+            )
         if self._imap_settings_dirty:
             self.persist()
         if cancel_requested:
@@ -7685,6 +7757,7 @@ class MailClient:
                     failure_action="schedule",
                 )
             self._maybe_flush_sent_sequences(force=True)
+            maybe_record_batch_stop("cancelled", summary)
             return JobResult(
                 job_id=job_id,
                 status="cancelled",
@@ -7703,6 +7776,8 @@ class MailClient:
             error_message = last_error
             final_message = f"{final_message} · 마지막 오류: {last_error}"
         print(f"[배치 발송] {domain_label} · {final_message}")
+        if not success:
+            maybe_record_batch_stop("failed", summary)
         self._maybe_flush_sent_sequences(force=True)
         return JobResult(
             job_id=job_id,

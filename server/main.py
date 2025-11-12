@@ -159,6 +159,8 @@ GLOBAL_CONFIG_DEVICE_FIELDS = (
     "message_id_pattern",
 )
 MAX_DEVICE_LOG_HISTORY = 10
+BATCH_STOP_LOG_FETCH_LIMIT = 200
+BATCH_STOP_LOG_STORE_LIMIT = 200
 SUBSTITUTION_PATTERN = re.compile(r"\$\{([^{}]+)\}")
 FIELD_TOKEN_PATTERN = re.compile(r"^필드:([A-Za-z0-9_]+)$")
 SUBSTITUTION_TARGET_FIELDS = ("helo", "mail_from", "header", "rcpt_to", "anchor_email", "message_id_pattern")
@@ -1274,6 +1276,75 @@ def prune_device_logs(conn: sqlite3.Connection, device_id: str, limit: int = MAX
     )
 
 
+def sanitize_iso_timestamp(value: Optional[str]) -> str:
+    candidate = (value or "").strip()
+    if not candidate:
+        return now_ts()
+    normalized = candidate.replace("Z", "+00:00") if "Z" in candidate else candidate
+    try:
+        dt = datetime.fromisoformat(normalized)
+    except ValueError:
+        return now_ts()
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.isoformat()
+
+
+def sanitize_optional_text(value: Optional[str], *, length: int = 255) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    return text[:length]
+
+
+def prune_batch_stop_logs(
+    conn: sqlite3.Connection,
+    device_id: str,
+    domain: str,
+    limit: int = BATCH_STOP_LOG_STORE_LIMIT,
+) -> None:
+    if limit <= 0:
+        return
+    conn.execute(
+        """
+        DELETE FROM batch_stop_logs
+        WHERE device_id=? AND domain=?
+          AND id NOT IN (
+              SELECT id
+              FROM batch_stop_logs
+              WHERE device_id=? AND domain=?
+              ORDER BY id DESC
+              LIMIT ?
+          )
+        """,
+        (device_id, domain, device_id, domain, limit),
+    )
+
+
+def serialize_batch_stop_log(row: sqlite3.Row) -> Dict[str, Any]:
+    row_map = {key: row[key] for key in row.keys()}
+    return {
+        "id": row_map.get("id"),
+        "device_id": row_map.get("device_id"),
+        "domain": row_map.get("domain"),
+        "job_id": row_map.get("job_id"),
+        "session_id": row_map.get("session_id"),
+        "status": row_map.get("status") or "unknown",
+        "stop_reason": row_map.get("stop_reason"),
+        "started_at": row_map.get("started_at") or now_ts(),
+        "stopped_at": row_map.get("stopped_at") or now_ts(),
+        "elapsed_seconds": int(row_map.get("elapsed_seconds") or 0),
+        "sent_total": int(row_map.get("sent_total") or 0),
+        "start_ip": row_map.get("start_ip"),
+        "stop_ip": row_map.get("stop_ip"),
+        "created_at": row_map.get("created_at") or now_ts(),
+    }
+
+
 def load_global_config(*, conn: Optional[sqlite3.Connection] = None) -> Dict[str, Any]:
     owns_conn = conn is None
     if owns_conn:
@@ -1638,6 +1709,24 @@ def _init_db() -> None:
                 FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS batch_stop_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                job_id TEXT,
+                session_id TEXT,
+                status TEXT NOT NULL,
+                stop_reason TEXT,
+                started_at TEXT NOT NULL,
+                stopped_at TEXT NOT NULL,
+                elapsed_seconds INTEGER NOT NULL,
+                sent_total INTEGER NOT NULL,
+                start_ip TEXT,
+                stop_ip TEXT,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
+            );
+
             CREATE TABLE IF NOT EXISTS global_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT,
@@ -1646,6 +1735,8 @@ def _init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_job_progress_job
                 ON job_progress_logs(job_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_batch_stop_logs_device
+                ON batch_stop_logs(device_id, domain, created_at DESC);
             """
         )
         config_columns = {
@@ -3812,6 +3903,44 @@ class ClearLogsRequest(BaseModel):
     domain: Optional[str] = None
 
 
+class BatchStopLogCreateRequest(BaseModel):
+    job_id: Optional[str] = None
+    session_id: Optional[str] = None
+    status: Optional[str] = None
+    stop_reason: Optional[str] = None
+    started_at: Optional[str] = None
+    stopped_at: Optional[str] = None
+    elapsed_seconds: Optional[int] = Field(default=0, ge=0)
+    sent_total: Optional[int] = Field(default=0, ge=0)
+    start_ip: Optional[str] = None
+    stop_ip: Optional[str] = None
+
+
+class BatchStopLogRecord(BaseModel):
+    id: int
+    device_id: str
+    domain: str
+    job_id: Optional[str]
+    session_id: Optional[str]
+    status: str
+    stop_reason: Optional[str]
+    started_at: str
+    stopped_at: str
+    elapsed_seconds: int
+    sent_total: int
+    start_ip: Optional[str]
+    stop_ip: Optional[str]
+    created_at: str
+
+
+class BatchStopLogListResponse(BaseModel):
+    items: List[BatchStopLogRecord]
+
+
+class BatchStopLogClearRequest(BaseModel):
+    confirm: bool = Field(default=True)
+
+
 class JobCancelRequest(BaseModel):
     device_id: str
     reason: Optional[str] = None
@@ -5821,6 +5950,103 @@ def clear_device_logs(device_id: str, payload: ClearLogsRequest) -> Dict[str, An
         "cleared": deleted,
         "reset_job_id": reset_job["id"],
     }
+
+
+@app.get(
+    "/api/devices/{device_id}/domains/{domain}/batch-logs",
+    response_model=BatchStopLogListResponse,
+)
+def get_batch_stop_logs(device_id: str, domain: str, limit: int = 50) -> BatchStopLogListResponse:
+    normalized = normalize_domain(domain)
+    limit_value = max(1, min(BATCH_STOP_LOG_FETCH_LIMIT, int(limit or 1)))
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM batch_stop_logs
+            WHERE device_id=? AND domain=?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (device_id, normalized, limit_value),
+        ).fetchall()
+    items = [BatchStopLogRecord(**serialize_batch_stop_log(row)) for row in rows]
+    return BatchStopLogListResponse(items=items)
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/batch-logs")
+def record_batch_stop_log(device_id: str, domain: str, payload: BatchStopLogCreateRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        started_at = sanitize_iso_timestamp(payload.started_at)
+        stopped_at = sanitize_iso_timestamp(payload.stopped_at or now_ts())
+        elapsed_seconds = int(payload.elapsed_seconds or 0)
+        if elapsed_seconds < 0:
+            elapsed_seconds = 0
+        sent_total = int(payload.sent_total or 0)
+        if sent_total < 0:
+            sent_total = 0
+        status_value = sanitize_optional_text(payload.status, length=64) or "unknown"
+        stop_reason_value = sanitize_optional_text(payload.stop_reason, length=500)
+        session_id_value = sanitize_optional_text(payload.session_id, length=64)
+        job_id_value = sanitize_optional_text(payload.job_id, length=64)
+        start_ip_value = sanitize_optional_text(payload.start_ip, length=64)
+        stop_ip_value = sanitize_optional_text(payload.stop_ip, length=64)
+        conn.execute(
+            """
+            INSERT INTO batch_stop_logs (
+                device_id, domain, job_id, session_id, status, stop_reason,
+                started_at, stopped_at, elapsed_seconds, sent_total,
+                start_ip, stop_ip, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                device_id,
+                normalized,
+                job_id_value,
+                session_id_value,
+                status_value,
+                stop_reason_value,
+                started_at,
+                stopped_at,
+                elapsed_seconds,
+                sent_total,
+                start_ip_value,
+                stop_ip_value,
+                now_ts(),
+            ),
+        )
+        prune_batch_stop_logs(conn, device_id, normalized)
+        conn.commit()
+    return {"result": "ok"}
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/batch-logs/clear")
+def clear_batch_stop_logs(
+    device_id: str,
+    domain: str,
+    payload: BatchStopLogClearRequest,
+) -> Dict[str, Any]:
+    if not payload.confirm:
+        raise HTTPException(status_code=400, detail="초기화를 확인해주세요.")
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        cursor = conn.execute(
+            "DELETE FROM batch_stop_logs WHERE device_id=? AND domain=?",
+            (device_id, normalized),
+        )
+        deleted = cursor.rowcount or 0
+        conn.commit()
+    return {"deleted": deleted}
 
 
 @app.post("/api/devices/{device_id}/domains/{domain}/files")
