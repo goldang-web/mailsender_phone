@@ -2481,6 +2481,7 @@ button:not(:disabled):hover {
         </label>
         <button id="fileUploadBtn">업로드</button>
         <button class="secondary" id="shuffleDbBtn">DB 섞기</button>
+        <button class="secondary" id="resetDbBtn">DB 전체 초기화</button>
         <button class="danger" id="purgeDbBtn">DB 전체 삭제</button>
       </div>
       <div id="fileListContainer"></div>
@@ -11318,6 +11319,34 @@ async function handleDomainPurge(button) {
   }
 }
 
+async function handleDomainReset(button) {
+  const { deviceId, domain } = state.modal;
+  if (!deviceId || !domain) {
+    return;
+  }
+  if (!confirm("해당 도메인의 모든 이메일 상태를 pending으로 되돌릴까요? (데이터는 삭제되지 않습니다.)")) {
+    return;
+  }
+  const targetButton = button;
+  const originalText = targetButton?.textContent;
+  if (targetButton) {
+    targetButton.disabled = true;
+    targetButton.textContent = "초기화 중...";
+  }
+  try {
+    await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/actions/reset-status`, { method: "POST" });
+    showModalMessage("도메인 DB 상태를 초기화했습니다.", "success");
+    await loadDevices({ silent: true });
+  } catch (err) {
+    showModalMessage(err.message || "DB 전체 초기화에 실패했습니다.");
+  } finally {
+    if (targetButton) {
+      targetButton.disabled = false;
+      targetButton.textContent = originalText || "DB 전체 초기화";
+    }
+  }
+}
+
 async function handleDomainShuffle(button) {
   const { deviceId, domain } = state.modal;
   if (!deviceId || !domain) {
@@ -11353,6 +11382,14 @@ if (purgeBtn) {
   purgeBtn.addEventListener("click", async (event) => {
     event.preventDefault();
     await handleDomainPurge(purgeBtn);
+  });
+}
+
+const resetBtn = document.getElementById("resetDbBtn");
+if (resetBtn) {
+  resetBtn.addEventListener("click", async (event) => {
+    event.preventDefault();
+    await handleDomainReset(resetBtn);
   });
 }
 

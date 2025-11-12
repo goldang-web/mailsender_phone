@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.106"
+APP_VERSION = "0.0.107"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -5179,6 +5179,8 @@ class MailClient:
             return self.handle_inject(domain, payload, job_id)
         if job_type == "purge_domain":
             return self.handle_purge_domain(domain, payload, job_id)
+        if job_type == "reset_domain_status":
+            return self.handle_reset_domain_status(domain, payload, job_id)
         if job_type == "shuffle_domain":
             return self.handle_shuffle_domain(domain, payload, job_id)
         if job_type == "single_send":
@@ -5502,6 +5504,80 @@ class MailClient:
                 job_id=job_id,
                 status="failed",
                 message=f"{domain_label} DB 삭제 실패: {exc}",
+            error=str(exc),
+        )
+
+    def handle_reset_domain_status(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
+        if not domain:
+            return JobResult(job_id=job_id, status="failed", message="도메인 정보가 없습니다.")
+        normalized = domain.lower()
+        domain_label = DOMAIN_LABELS.get(normalized, normalized)
+        db_path = self.domain_paths.get(normalized)
+        if not db_path or not db_path.exists():
+            message = f"{domain_label} DB가 존재하지 않아 초기화할 상태가 없습니다."
+            return JobResult(
+                job_id=job_id,
+                status="success",
+                message=message,
+                result={
+                    "domain": normalized,
+                    "updated_rows": 0,
+                    "total_rows": 0,
+                    "status_breakdown": {status: 0 for status in EMAIL_STATUSES},
+                },
+            )
+        try:
+            totals: Dict[str, int] = {status: 0 for status in EMAIL_STATUSES}
+            with sqlite3.connect(db_path) as conn:
+                conn.row_factory = sqlite3.Row
+                for row in conn.execute("SELECT status, COUNT(*) AS cnt FROM emails GROUP BY status"):
+                    key = str(row["status"] or "").strip().lower() or "pending"
+                    try:
+                        count_value = int(row["cnt"] or 0)
+                    except (TypeError, ValueError):
+                        count_value = 0
+                    totals[key] = count_value
+                total_rows = sum(totals.values())
+                now_stamp = now_iso()
+                cursor = conn.execute(
+                    """
+                    UPDATE emails
+                    SET status='pending',
+                        reserved_by=NULL,
+                        reserved_at=NULL,
+                        next_retry_at=NULL,
+                        updated_at=?
+                    WHERE status!='pending'
+                       OR reserved_by IS NOT NULL
+                       OR reserved_at IS NOT NULL
+                       OR next_retry_at IS NOT NULL
+                    """,
+                    (now_stamp,),
+                )
+                updated_rows = cursor.rowcount or 0
+                conn.commit()
+            pending_after = total_rows
+            message = (
+                f"{domain_label} DB 상태 초기화 완료 (총 {total_rows}건 중 {updated_rows}건 갱신, 현재 pending {pending_after}건)"
+            )
+            print(f"[DB] {message}")
+            return JobResult(
+                job_id=job_id,
+                status="success",
+                message=message,
+                result={
+                    "domain": normalized,
+                    "updated_rows": updated_rows,
+                    "total_rows": total_rows,
+                    "pending_after": pending_after,
+                    "status_breakdown": totals,
+                },
+            )
+        except sqlite3.Error as exc:
+            return JobResult(
+                job_id=job_id,
+                status="failed",
+                message=f"{domain_label} DB 상태 초기화 실패: {exc}",
                 error=str(exc),
             )
 

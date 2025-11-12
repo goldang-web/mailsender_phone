@@ -6004,6 +6004,24 @@ def enqueue_domain_shuffle(device_id: str, domain: str) -> Dict[str, Any]:
     return {"job": job}
 
 
+@app.post("/api/devices/{device_id}/domains/{domain}/actions/reset-status")
+def enqueue_domain_reset_status(device_id: str, domain: str) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        job = create_job(
+            conn,
+            device_id,
+            normalized,
+            "reset_domain_status",
+            {"domain": normalized},
+        )
+        conn.commit()
+    return {"job": job}
+
+
 @app.post("/api/devices/{device_id}/heartbeat", response_model=HeartbeatResponse)
 def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
     normalized_active = normalize_domain(payload.active_domain or "naver")
