@@ -44,6 +44,10 @@ OLD_MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소숫자:22}@auto.local>"
 IMAP_RECHECK_ATTEMPTS_DEFAULT = 2
 IMAP_RECHECK_ATTEMPTS_MIN = 1
 IMAP_RECHECK_ATTEMPTS_MAX = 3
+DAUM_IDLE_IP_MIN_SECONDS = 5
+DAUM_IDLE_IP_MAX_SECONDS = 600
+DAUM_IDLE_STOP_MIN_SECONDS = 10
+DAUM_IDLE_STOP_MAX_SECONDS = 3600
 
 DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "helo": "",
@@ -100,6 +104,9 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "substitution_snapshot": {"fields": {}, "missing_tokens": []},
     "message_id_auto": True,
     "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
+    "daum_idle_watch_enabled": False,
+    "daum_idle_ip_change_seconds": 20,
+    "daum_idle_stop_seconds": 120,
 }
 
 IMAP_DELAY_MIN_SECONDS = 5
@@ -518,6 +525,24 @@ def sanitize_session_count(value: Any) -> int:
     except (TypeError, ValueError):
         return 1
     return max(1, count)
+
+
+def sanitize_daum_idle_seconds(
+    value: Any,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        seconds = int(value)
+    except (TypeError, ValueError):
+        seconds = default
+    if seconds < minimum:
+        return minimum
+    if seconds > maximum:
+        return maximum
+    return seconds
 
 
 def sanitize_stop_schedule_enabled(value: Any) -> bool:
@@ -1379,6 +1404,9 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 anchor_interval INTEGER DEFAULT 0,
                 anchor_email TEXT DEFAULT '',
                 rcpt_to TEXT DEFAULT '',
+                daum_idle_watch_enabled INTEGER NOT NULL DEFAULT 0,
+                daum_idle_ip_change_seconds INTEGER NOT NULL DEFAULT 20,
+                daum_idle_stop_seconds INTEGER NOT NULL DEFAULT 120,
                 client_db_version INTEGER DEFAULT 0,
                 client_total INTEGER DEFAULT 0,
                 client_pending INTEGER DEFAULT 0,
@@ -1523,6 +1551,9 @@ def _init_db() -> None:
                 session_count INTEGER DEFAULT 1,
                 bcc_count INTEGER DEFAULT 0,
                 rcpt_to TEXT DEFAULT '',
+                daum_idle_watch_enabled INTEGER NOT NULL DEFAULT 0,
+                daum_idle_ip_change_seconds INTEGER NOT NULL DEFAULT 20,
+                daum_idle_stop_seconds INTEGER NOT NULL DEFAULT 120,
                 client_db_version INTEGER DEFAULT 0,
                 client_total INTEGER DEFAULT 0,
                 client_pending INTEGER DEFAULT 0,
@@ -1644,6 +1675,18 @@ def _init_db() -> None:
         if "anchor_email" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN anchor_email TEXT DEFAULT ''"
+            )
+        if "daum_idle_watch_enabled" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN daum_idle_watch_enabled INTEGER NOT NULL DEFAULT 0"
+            )
+        if "daum_idle_ip_change_seconds" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN daum_idle_ip_change_seconds INTEGER NOT NULL DEFAULT 20"
+            )
+        if "daum_idle_stop_seconds" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN daum_idle_stop_seconds INTEGER NOT NULL DEFAULT 120"
             )
         if "all_headers_unique" not in config_columns:
             conn.execute(
@@ -2208,6 +2251,21 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
             all_headers_unique = bool(int(all_headers_unique_raw))
         except (TypeError, ValueError):
             all_headers_unique = bool(all_headers_unique_raw)
+    daum_watch_enabled = sanitize_stop_schedule_enabled(row.get("daum_idle_watch_enabled"))
+    daum_ip_change_seconds = sanitize_daum_idle_seconds(
+        row.get("daum_idle_ip_change_seconds"),
+        default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_ip_change_seconds", 20),
+        minimum=DAUM_IDLE_IP_MIN_SECONDS,
+        maximum=DAUM_IDLE_IP_MAX_SECONDS,
+    )
+    daum_stop_seconds = sanitize_daum_idle_seconds(
+        row.get("daum_idle_stop_seconds"),
+        default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_stop_seconds", 120),
+        minimum=DAUM_IDLE_STOP_MIN_SECONDS,
+        maximum=DAUM_IDLE_STOP_MAX_SECONDS,
+    )
+    if daum_stop_seconds < daum_ip_change_seconds:
+        daum_stop_seconds = daum_ip_change_seconds
     if include_secret:
         imap_password = password_raw
     else:
@@ -2227,6 +2285,9 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "anchor_interval": clamp_anchor_interval(row.get("anchor_interval", 0)),
         "anchor_email": normalize_anchor_email(row.get("anchor_email", "")),
         "rcpt_to": row.get("rcpt_to", ""),
+        "daum_idle_watch_enabled": daum_watch_enabled,
+        "daum_idle_ip_change_seconds": daum_ip_change_seconds,
+        "daum_idle_stop_seconds": daum_stop_seconds,
         "stop_schedule_enabled": schedule_enabled,
         "stop_schedule_time": schedule_time,
         "stop_schedule_last_run": schedule_last_run,
@@ -3368,6 +3429,9 @@ class DeviceConfigPayload(BaseModel):
     anchor_interval: Optional[int] = 0
     anchor_email: Optional[str] = ""
     rcpt_to: Optional[str] = ""
+    daum_idle_watch_enabled: Optional[bool] = False
+    daum_idle_ip_change_seconds: Optional[int] = 20
+    daum_idle_stop_seconds: Optional[int] = 120
 
 
 class UpdateConfigRequest(DeviceConfigPayload):
@@ -4476,6 +4540,38 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
         sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
         sanitized_interval = clamp_anchor_interval(payload.anchor_interval or 0)
         sanitized_anchor = normalize_anchor_email(payload.anchor_email or "")
+        if payload.daum_idle_watch_enabled is None:
+            daum_watch_enabled = sanitize_stop_schedule_enabled(
+                config_data.get("daum_idle_watch_enabled")
+            )
+        else:
+            daum_watch_enabled = sanitize_stop_schedule_enabled(
+                payload.daum_idle_watch_enabled
+            )
+        raw_daum_ip_change = (
+            payload.daum_idle_ip_change_seconds
+            if payload.daum_idle_ip_change_seconds is not None
+            else config_data.get("daum_idle_ip_change_seconds")
+        )
+        sanitized_daum_ip_change = sanitize_daum_idle_seconds(
+            raw_daum_ip_change,
+            default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_ip_change_seconds", 20),
+            minimum=DAUM_IDLE_IP_MIN_SECONDS,
+            maximum=DAUM_IDLE_IP_MAX_SECONDS,
+        )
+        raw_daum_stop = (
+            payload.daum_idle_stop_seconds
+            if payload.daum_idle_stop_seconds is not None
+            else config_data.get("daum_idle_stop_seconds")
+        )
+        sanitized_daum_stop = sanitize_daum_idle_seconds(
+            raw_daum_stop,
+            default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_stop_seconds", 120),
+            minimum=DAUM_IDLE_STOP_MIN_SECONDS,
+            maximum=DAUM_IDLE_STOP_MAX_SECONDS,
+        )
+        if sanitized_daum_stop < sanitized_daum_ip_change:
+            sanitized_daum_stop = sanitized_daum_ip_change
         lock_mode = sanitize_substitution_lock_mode(config_data.get("substitution_lock_mode"))
         if payload.all_headers_unique is None:
             existing_flag = config_data.get("all_headers_unique", DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
@@ -4498,6 +4594,7 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
             """
             UPDATE device_configs
             SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, all_headers_unique=?, message_id_auto=?, message_id_pattern=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
+                daum_idle_watch_enabled=?, daum_idle_ip_change_seconds=?, daum_idle_stop_seconds=?,
                 updated_at=?
             WHERE device_id=? AND domain=?
             """,
@@ -4515,6 +4612,9 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
                 sanitized_interval,
                 sanitized_anchor,
                 payload.rcpt_to or "",
+                1 if daum_watch_enabled else 0,
+                sanitized_daum_ip_change,
+                sanitized_daum_stop,
                 now,
                 device_id,
                 normalized,
@@ -5076,6 +5176,25 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
             all_headers_unique = bool(int(all_headers_unique_raw))
         except (TypeError, ValueError):
             all_headers_unique = bool(all_headers_unique_raw)
+    daum_watch_raw = base.get(
+        "daum_idle_watch_enabled",
+        DEFAULT_DOMAIN_CONFIG.get("daum_idle_watch_enabled", False),
+    )
+    daum_watch_enabled = sanitize_stop_schedule_enabled(daum_watch_raw)
+    daum_ip_change_seconds = sanitize_daum_idle_seconds(
+        base.get("daum_idle_ip_change_seconds"),
+        default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_ip_change_seconds", 20),
+        minimum=DAUM_IDLE_IP_MIN_SECONDS,
+        maximum=DAUM_IDLE_IP_MAX_SECONDS,
+    )
+    daum_stop_seconds = sanitize_daum_idle_seconds(
+        base.get("daum_idle_stop_seconds"),
+        default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_stop_seconds", 120),
+        minimum=DAUM_IDLE_STOP_MIN_SECONDS,
+        maximum=DAUM_IDLE_STOP_MAX_SECONDS,
+    )
+    if daum_stop_seconds < daum_ip_change_seconds:
+        daum_stop_seconds = daum_ip_change_seconds
     return {
         "helo": base.get("helo", ""),
         "smtp_host": base.get("smtp_host", ""),
@@ -5090,6 +5209,9 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
         "anchor_interval": anchor_interval,
         "anchor_email": anchor_email,
         "rcpt_to": base.get("rcpt_to", ""),
+        "daum_idle_watch_enabled": daum_watch_enabled,
+        "daum_idle_ip_change_seconds": daum_ip_change_seconds,
+        "daum_idle_stop_seconds": daum_stop_seconds,
     }
 
 

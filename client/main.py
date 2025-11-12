@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.105"
+APP_VERSION = "0.0.106"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -60,6 +60,12 @@ SMTP_RECIPIENT_LIMIT = 0  # 0이면 SMTP 수신자 수 상한을 적용하지 �
 TELEGRAM_API_BASE = "https://api.telegram.org"
 TELEGRAM_TIMEOUT_SECONDS = 5.0
 TELEGRAM_SUPPRESSION_WINDOW_SECONDS = 90.0
+DAUM_IDLE_IP_DEFAULT_SECONDS = 20
+DAUM_IDLE_IP_MIN_SECONDS = 5
+DAUM_IDLE_IP_MAX_SECONDS = 600
+DAUM_IDLE_STOP_DEFAULT_SECONDS = 120
+DAUM_IDLE_STOP_MIN_SECONDS = 10
+DAUM_IDLE_STOP_MAX_SECONDS = 3600
 
 THROTTLE_MARKER_MESSAGES = {
     "550 5.7.2": "네이버 '550 5.7.2' 응답 감지",
@@ -778,6 +784,24 @@ def sanitize_imap_sent_threshold(
     return max(IMAP_SENT_THRESHOLD_MIN, min(IMAP_SENT_THRESHOLD_MAX, threshold))
 
 
+def sanitize_daum_idle_seconds(
+    value: Optional[object],
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        seconds = int(value) if value is not None else default
+    except (TypeError, ValueError):
+        seconds = default
+    if seconds < minimum:
+        return minimum
+    if seconds > maximum:
+        return maximum
+    return seconds
+
+
 def sanitize_imap_recheck_attempts(
     value: Optional[object],
     *,
@@ -896,6 +920,37 @@ class ImapGuardOutcome:
     scheduled: bool
     failure_report_enqueued: bool = False
 
+
+@dataclass
+class DaumIdleGuardState:
+    enabled: bool
+    ip_change_seconds: int
+    stop_seconds: int
+    last_success_monotonic: float
+    last_success_wall: float
+    ip_change_count: int = 0
+    last_trigger_level: int = 0
+    stop_triggered: bool = False
+    last_ip_change_message: Optional[str] = None
+
+    def elapsed_seconds(self) -> int:
+        return int(max(0.0, time.monotonic() - self.last_success_monotonic))
+
+    def record_success(self) -> None:
+        self.last_success_monotonic = time.monotonic()
+        self.last_success_wall = time.time()
+        self.last_trigger_level = 0
+        self.stop_triggered = False
+        self.last_ip_change_message = None
+
+    def next_trigger_level(self) -> int:
+        if not self.enabled or self.ip_change_seconds <= 0:
+            return 0
+        return int(self.elapsed_seconds() // self.ip_change_seconds)
+
+    def mark_ip_change(self) -> None:
+        self.ip_change_count += 1
+        self.last_trigger_level = self.next_trigger_level()
 
 class MailClient:
     def __init__(self, config: Dict[str, object]) -> None:
@@ -5918,6 +5973,11 @@ class MailClient:
         poll_interval = max(1.0, float(self.interval or 3))
         last_poll_at = time.monotonic()
         domain_totals: Dict[str, int] = {status: 0 for status in EMAIL_STATUSES}
+        daum_idle_guard: Optional[DaumIdleGuardState] = (
+            self._create_daum_idle_guard_state(config)
+            if normalized == "daum"
+            else None
+        )
 
         def build_summary() -> Dict[str, object]:
             remaining_count = (
@@ -5929,7 +5989,7 @@ class MailClient:
             cycle_snapshot = self._cycle_snapshot(normalized)
             absolute_sent = max(0, int(self.sent_sequences.get(normalized, 0)))
             visible_sent = max(0, sent_count - sent_reset_offset)
-            return {
+            summary_payload = {
                 "processed": processed,
                 "sent": visible_sent,
                 "sent_sequence": absolute_sent,
@@ -5947,6 +6007,8 @@ class MailClient:
                 "returned": pending_queue_returned,
                 "daum_max": self._current_daum_throttle_counter(normalized),
             }
+            summary_payload.update(self._daum_idle_summary_payload(daum_idle_guard))
+            return summary_payload
 
         def format_summary(prefix: str, snapshot: Optional[Dict[str, object]] = None) -> str:
             summary_snapshot = snapshot or build_summary()
@@ -5977,6 +6039,14 @@ class MailClient:
                 message = f"{message} · 누적 {cycles_completed}번째 순환 완료"
             if normalized == "daum" and daum_max_total > 0:
                 message = f"{message} · 다음MAX={daum_max_total}"
+            if normalized == "daum" and daum_idle_guard and daum_idle_guard.enabled:
+                message = (
+                    f"{message} · Sent감시 {daum_idle_guard.ip_change_seconds}→{daum_idle_guard.stop_seconds}초"
+                )
+                if daum_idle_guard.ip_change_count > 0:
+                    message = (
+                        f"{message} · IP변경 {daum_idle_guard.ip_change_count}회"
+                    )
             return message
 
         def emit_progress(force: bool = False) -> None:
@@ -6093,6 +6163,7 @@ class MailClient:
             if isinstance(controls, list):
                 self._update_job_controls(controls)
                 self._acknowledge_cancelled_jobs()
+            evaluate_daum_idle_guard()
 
         stop_requested = False
         cancel_requested = False
@@ -6135,6 +6206,78 @@ class MailClient:
                 )
             except Exception:
                 pass
+
+        def evaluate_daum_idle_guard() -> None:
+            nonlocal stop_requested, fatal_error, stop_reason
+            if not daum_idle_guard or not daum_idle_guard.enabled or stop_requested:
+                return
+            elapsed_seconds = daum_idle_guard.elapsed_seconds()
+            if daum_idle_guard.ip_change_seconds > 0:
+                next_level = daum_idle_guard.next_trigger_level()
+                if next_level > daum_idle_guard.last_trigger_level and not stop_requested:
+                    wait_detail = f"Sent 로그 {elapsed_seconds}초 동안 미기록"
+                    emit_batch_halt_marker(
+                        "DAUM_IDLE_WAIT",
+                        f"다음 Sent 감시 · {wait_detail}",
+                        severity="warning",
+                        allow_repeat=True,
+                    )
+                    print(f"[다음 Sent 감시] {wait_detail} · IP 변경 시도")
+                    ip_success, ip_message, new_ip = self._perform_ip_change()
+                    combined_message = f"{wait_detail} · {ip_message}"
+                    report_payload: Dict[str, object] = {
+                        "logs": [
+                            {
+                                "log": f"[다음 Sent 감시] {combined_message}",
+                                "delivery_status": "warning" if ip_success else "error",
+                            }
+                        ]
+                    }
+                    if ip_success and new_ip:
+                        report_payload["public_ip"] = new_ip
+                    try:
+                        self.send_job_report(
+                            JobResult(
+                                job_id=job_id,
+                                status="running" if ip_success else "failed",
+                                message=combined_message,
+                                result=report_payload,
+                                error=None if ip_success else combined_message,
+                            ),
+                            critical=False,
+                        )
+                    except Exception:
+                        pass
+                    daum_idle_guard.last_trigger_level = next_level
+                    if ip_success:
+                        daum_idle_guard.mark_ip_change()
+                        emit_progress(force=True)
+                    else:
+                        fatal_error = f"다음 Sent 감시 · {combined_message}"
+                        stop_reason = fatal_error
+                        stop_requested = True
+                        emit_batch_halt_marker(
+                            "DAUM_IDLE_IP_FAIL",
+                            fatal_error,
+                            severity="error",
+                            allow_repeat=True,
+                        )
+                        release_pending_queue("Sent 지연 감시 IP 변경 실패")
+                        return
+            if (
+                not daum_idle_guard.stop_triggered
+                and elapsed_seconds >= daum_idle_guard.stop_seconds
+            ):
+                daum_idle_guard.stop_triggered = True
+                fatal_error = f"다음 Sent 감시 · 누적 {elapsed_seconds}초 대기로 발송 중단"
+                stop_reason = fatal_error
+                stop_requested = True
+                emit_batch_halt_marker(
+                    "DAUM_IDLE_STOP",
+                    fatal_error,
+                    severity="warning",
+                )
+                release_pending_queue("Sent 지연 감시 중지")
 
         def check_schedule_trigger() -> None:
             nonlocal stop_requested, cancel_requested, stop_reason
@@ -7199,6 +7342,8 @@ class MailClient:
                         else:
                             failed_count += effective_failed
                         last_error = failure_detail
+                    if daum_idle_guard and daum_idle_guard.enabled and session_success:
+                        daum_idle_guard.record_success()
 
                     mail_from_current = outcome.mail_from or mail_from_value
                     header_from_current = header_from_value
@@ -7244,6 +7389,15 @@ class MailClient:
                     )
                     if normalized == "daum" and daum_throttle_total > 0:
                         log_line = f"{log_line} | daummax={daum_throttle_total}"
+                    if normalized == "daum" and daum_idle_guard and daum_idle_guard.enabled:
+                        log_line = (
+                            f"{log_line} | daumidle={daum_idle_guard.elapsed_seconds()}"
+                        )
+                        log_line = (
+                            f"{log_line} | daumidle_ip={daum_idle_guard.ip_change_count}"
+                        )
+                        if daum_idle_guard.stop_triggered:
+                            log_line = f"{log_line} | daumidle_stop=1"
                     log_record = log_line
                     log_display = log_line
                     if not session_success:
@@ -7320,6 +7474,8 @@ class MailClient:
                         except Exception:
                             pass
                         print(f"[배치 발송] {domain_label} · {ip_message}")
+                        if ip_success and daum_idle_guard and daum_idle_guard.enabled:
+                            daum_idle_guard.mark_ip_change()
                         if not ip_success:
                             fatal_error = f"{throttle_notice} · {ip_message}"
                             stop_reason = fatal_error
@@ -7343,6 +7499,7 @@ class MailClient:
                         )
                         release_pending_queue("SMTP 치명 응답 감지")
                     emit_progress()
+                    evaluate_daum_idle_guard()
                     if dispatch_logs:
                         summary_snapshot = build_summary()
                         try:
@@ -7360,6 +7517,7 @@ class MailClient:
                 try:
                     with ThreadPoolExecutor(max_workers=session_count) as executor:
                         while True:
+                            evaluate_daum_idle_guard()
                             check_schedule_trigger()
                             handle_user_cancel_request()
                             if not stop_requested:
@@ -8283,6 +8441,58 @@ class MailClient:
         ip_value = (str(self.public_ip or "").strip()) or "(IP 미보고)"
         line += f" | ip={ip_value}"
         return line
+
+    def _create_daum_idle_guard_state(self, config: Dict[str, Any]) -> Optional[DaumIdleGuardState]:
+        enabled = _normalize_bool_flag(config.get("daum_idle_watch_enabled"), default=False)
+        ip_seconds = sanitize_daum_idle_seconds(
+            config.get("daum_idle_ip_change_seconds"),
+            default=DAUM_IDLE_IP_DEFAULT_SECONDS,
+            minimum=DAUM_IDLE_IP_MIN_SECONDS,
+            maximum=DAUM_IDLE_IP_MAX_SECONDS,
+        )
+        stop_seconds = sanitize_daum_idle_seconds(
+            config.get("daum_idle_stop_seconds"),
+            default=DAUM_IDLE_STOP_DEFAULT_SECONDS,
+            minimum=DAUM_IDLE_STOP_MIN_SECONDS,
+            maximum=DAUM_IDLE_STOP_MAX_SECONDS,
+        )
+        if stop_seconds < ip_seconds:
+            stop_seconds = ip_seconds
+        if not enabled or ip_seconds <= 0 or stop_seconds <= 0:
+            return None
+        now_monotonic = time.monotonic()
+        return DaumIdleGuardState(
+            enabled=True,
+            ip_change_seconds=ip_seconds,
+            stop_seconds=stop_seconds,
+            last_success_monotonic=now_monotonic,
+            last_success_wall=time.time(),
+        )
+
+    def _daum_idle_summary_payload(self, guard: Optional[DaumIdleGuardState]) -> Dict[str, object]:
+        if not guard or not guard.enabled:
+            return {
+                "daum_idle_enabled": False,
+                "daum_idle_ip_change_seconds": 0,
+                "daum_idle_stop_seconds": 0,
+                "daum_idle_elapsed_seconds": 0,
+                "daum_idle_ip_change_count": 0,
+                "daum_idle_stop_triggered": False,
+                "daum_idle_last_sent_at": None,
+            }
+        last_sent_iso = datetime.fromtimestamp(
+            guard.last_success_wall,
+            tz=timezone.utc,
+        ).isoformat()
+        return {
+            "daum_idle_enabled": True,
+            "daum_idle_ip_change_seconds": guard.ip_change_seconds,
+            "daum_idle_stop_seconds": guard.stop_seconds,
+            "daum_idle_elapsed_seconds": guard.elapsed_seconds(),
+            "daum_idle_ip_change_count": guard.ip_change_count,
+            "daum_idle_stop_triggered": guard.stop_triggered,
+            "daum_idle_last_sent_at": last_sent_iso,
+        }
 
     @staticmethod
     def _build_sqlite_from_emails(db_path: Path, emails: List[str], source_name: str) -> None:

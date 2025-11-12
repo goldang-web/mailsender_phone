@@ -1220,6 +1220,9 @@ header {
 .hidden {
   display: none !important;
 }
+.domain-hidden {
+  display: none !important;
+}
 .global-status {
   font-size: 12px;
   min-height: 16px;
@@ -2809,6 +2812,12 @@ const IMAP_DEFAULT_RECHECK_ATTEMPTS = 2;
 const IMAP_RECHECK_MIN = 1;
 const IMAP_RECHECK_MAX = 3;
 const IMAP_DEFAULT_REROLL_ON_RETRY = false;
+const DAUM_IDLE_IP_DEFAULT = 20;
+const DAUM_IDLE_IP_MIN = 5;
+const DAUM_IDLE_IP_MAX = 600;
+const DAUM_IDLE_STOP_DEFAULT = 120;
+const DAUM_IDLE_STOP_MIN = 10;
+const DAUM_IDLE_STOP_MAX = 3600;
 
 function createDefaultSubstitutionSnapshot() {
   return {
@@ -3155,8 +3164,21 @@ function createEmptyListRule() {
   };
 }
 
-const CONFIG_FIELDS = ["helo", "smtp_host", "mail_from", "header", "message_id_pattern", "session_count", "bcc_count", "anchor_interval", "anchor_email", "rcpt_to"];
-const CONFIG_TOGGLE_FIELDS = ["message_id_auto", "all_headers_unique"];
+const CONFIG_FIELDS = [
+  "helo",
+  "smtp_host",
+  "mail_from",
+  "header",
+  "message_id_pattern",
+  "session_count",
+  "bcc_count",
+  "anchor_interval",
+  "anchor_email",
+  "rcpt_to",
+  "daum_idle_ip_change_seconds",
+  "daum_idle_stop_seconds",
+];
+const CONFIG_TOGGLE_FIELDS = ["message_id_auto", "all_headers_unique", "daum_idle_watch_enabled"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 6;
@@ -3590,6 +3612,33 @@ function sanitizeAnchorValue(value) {
   return String(clampNumber(parsed, ANCHOR_MIN, ANCHOR_MAX, ANCHOR_MIN));
 }
 
+function sanitizeDaumIdleIpSeconds(value) {
+  const clamped = clampNumber(
+    value ?? DAUM_IDLE_IP_DEFAULT,
+    DAUM_IDLE_IP_MIN,
+    DAUM_IDLE_IP_MAX,
+    DAUM_IDLE_IP_DEFAULT,
+  );
+  return String(clamped);
+}
+
+function sanitizeDaumIdleStopSeconds(value, ipSecondsValue = DAUM_IDLE_IP_DEFAULT) {
+  const ipSeconds = clampNumber(
+    ipSecondsValue ?? DAUM_IDLE_IP_DEFAULT,
+    DAUM_IDLE_IP_MIN,
+    DAUM_IDLE_IP_MAX,
+    DAUM_IDLE_IP_DEFAULT,
+  );
+  const fallback = Math.max(ipSeconds, DAUM_IDLE_STOP_DEFAULT);
+  const clamped = clampNumber(
+    value ?? fallback,
+    DAUM_IDLE_STOP_MIN,
+    DAUM_IDLE_STOP_MAX,
+    fallback,
+  );
+  return String(Math.max(clamped, ipSeconds));
+}
+
 function applyCardColumns(value) {
   document.documentElement.style.setProperty("--card-columns", value);
 }
@@ -3609,6 +3658,13 @@ function initCardColumnControl() {
 }
 
 function initialFieldValues(config) {
+  const daumIpValue = sanitizeDaumIdleIpSeconds(
+    config?.daum_idle_ip_change_seconds ?? DAUM_IDLE_IP_DEFAULT,
+  );
+  const daumStopValue = sanitizeDaumIdleStopSeconds(
+    config?.daum_idle_stop_seconds ?? DAUM_IDLE_STOP_DEFAULT,
+    Number(daumIpValue),
+  );
   return {
     helo: config?.helo || "",
     smtp_host: config?.smtp_host || "",
@@ -3622,6 +3678,9 @@ function initialFieldValues(config) {
     anchor_interval: formatAnchorValue(config?.anchor_interval ?? 0),
     anchor_email: config?.anchor_email || "",
     rcpt_to: config?.rcpt_to || "",
+    daum_idle_watch_enabled: Boolean(config?.daum_idle_watch_enabled),
+    daum_idle_ip_change_seconds: daumIpValue,
+    daum_idle_stop_seconds: daumStopValue,
   };
 }
 
@@ -3675,6 +3734,26 @@ function collectConfigPayload(card, currentDevice, domain) {
   const anchorEmailInput = card.querySelector('[data-field="anchor_email"]');
   const anchorEmailValue = anchorEmailInput?.value?.trim() ?? "";
 
+  const daumIdleIpInput = card.querySelector('[data-field="daum_idle_ip_change_seconds"]');
+  let daumIdleIpValue = sanitizeDaumIdleIpSeconds(
+    daumIdleIpInput?.value ?? String(DAUM_IDLE_IP_DEFAULT),
+  );
+  if (daumIdleIpInput && daumIdleIpInput.value !== daumIdleIpValue) {
+    daumIdleIpInput.value = daumIdleIpValue;
+  }
+
+  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_seconds"]');
+  let daumIdleStopValue = sanitizeDaumIdleStopSeconds(
+    daumIdleStopInput?.value ?? String(DAUM_IDLE_STOP_DEFAULT),
+    Number(daumIdleIpValue),
+  );
+  if (daumIdleStopInput && daumIdleStopInput.value !== daumIdleStopValue) {
+    daumIdleStopInput.value = daumIdleStopValue;
+  }
+
+  const daumIdleToggle = card.querySelector('[data-field="daum_idle_watch_enabled"]');
+  const daumIdleEnabled = Boolean(daumIdleToggle?.checked);
+
   const messageIdAutoInput = card.querySelector('[data-field="message_id_auto"]');
   const messageIdAutoValue = Boolean(messageIdAutoInput?.checked);
   const messageIdPatternInput = card.querySelector('[data-field="message_id_pattern"]');
@@ -3697,6 +3776,9 @@ function collectConfigPayload(card, currentDevice, domain) {
       anchor_interval: parseAnchorInput(anchorIntervalValue),
       anchor_email: anchorEmailValue,
       rcpt_to: card.querySelector('[data-field="rcpt_to"]').value.trim(),
+      daum_idle_watch_enabled: daumIdleEnabled,
+      daum_idle_ip_change_seconds: Number(daumIdleIpValue),
+      daum_idle_stop_seconds: Number(daumIdleStopValue),
     },
   };
 }
@@ -7736,7 +7818,12 @@ function bestConfig(device, domain) {
     message_id_pattern: MESSAGE_ID_PATTERN_DEFAULT,
     session_count: 1,
     bcc_count: 0,
+    anchor_interval: 0,
+    anchor_email: "",
     rcpt_to: "",
+    daum_idle_watch_enabled: false,
+    daum_idle_ip_change_seconds: DAUM_IDLE_IP_DEFAULT,
+    daum_idle_stop_seconds: DAUM_IDLE_STOP_DEFAULT,
     client_total: 0,
     client_pending: 0,
     client_sent: 0,
@@ -7913,6 +8000,7 @@ function ensureSuccessTracker(deviceId, domain) {
       total: 0,
       anchor: 0,
       daumMax: 0,
+      daumIdle: null,
       forceZero: false,
     };
   }
@@ -8032,6 +8120,8 @@ function updateSuccessTrackerFromDevice(device, domain) {
     tracker.current = 0;
     tracker.total = 0;
     tracker.daumMax = 0;
+    tracker.daumIdle = null;
+    tracker.daumIdle = null;
     tracker.forceZero = false;
     const jobCreatedMs = parseTimestampMs(job?.created_at);
     tracker.resetCutoff = Number.isNaN(jobCreatedMs) ? Date.now() : jobCreatedMs;
@@ -8049,6 +8139,7 @@ function updateSuccessTrackerFromDevice(device, domain) {
   let summaryTotal = 0;
   let summaryAnchor = 0;
   let summaryDaumMax = 0;
+  let summaryDaumIdle = null;
   if (summary) {
     const currentCandidates = [
       summary.sent_visible,
@@ -8081,6 +8172,44 @@ function updateSuccessTrackerFromDevice(device, domain) {
     );
     summaryAnchor = parseSummaryNumber(summary.anchor);
     summaryDaumMax = parseSummaryNumber(summary.daum_max ?? summary.daumMax ?? null);
+    const idleEnabledRaw =
+      summary.daum_idle_watch_enabled ??
+      summary.daum_idle_enabled ??
+      summary.daumIdleEnabled ??
+      summary.daumIdleWatchEnabled;
+    const idleElapsed = parseSummaryNumber(
+      summary.daum_idle_elapsed_seconds ??
+        summary.daum_idle_elapsed ??
+        summary.daumIdleElapsedSeconds ??
+        summary.daumIdleElapsed ??
+        null,
+    );
+    const idleIpChanges = parseSummaryNumber(
+      summary.daum_idle_ip_change_count ??
+        summary.daum_idle_ip_changes ??
+        summary.daumIdleIpChangeCount ??
+        summary.daumIdleIpChanges ??
+        null,
+    );
+    const idleIpThreshold = parseSummaryNumber(
+      summary.daum_idle_ip_change_seconds ?? summary.daumIdleIpChangeSeconds ?? null,
+    );
+    const idleStopSeconds = parseSummaryNumber(
+      summary.daum_idle_stop_seconds ?? summary.daumIdleStopSeconds ?? null,
+    );
+    const idleStopTriggered = Boolean(
+      summary.daum_idle_stop_triggered ?? summary.daumIdleStopTriggered,
+    );
+    if (idleEnabledRaw || idleElapsed || idleIpChanges || idleStopTriggered) {
+      summaryDaumIdle = {
+        enabled: Boolean(idleEnabledRaw),
+        elapsed: idleElapsed,
+        ipChanges: idleIpChanges,
+        ipThreshold: idleIpThreshold,
+        stopSeconds: idleStopSeconds,
+        stopTriggered: idleStopTriggered,
+      };
+    }
   }
 
   const cutoffMs = typeof tracker.resetCutoff === "number" && !Number.isNaN(tracker.resetCutoff)
@@ -8173,6 +8302,7 @@ function updateSuccessTrackerFromDevice(device, domain) {
       sentTotal = 0;
       anchorTotal = 0;
       tracker.daumMax = 0;
+      tracker.daumIdle = null;
     }
   }
 
@@ -8182,6 +8312,9 @@ function updateSuccessTrackerFromDevice(device, domain) {
   tracker.anchor = anchorTotal;
   if (summaryDaumMax > (tracker.daumMax || 0)) {
     tracker.daumMax = summaryDaumMax;
+  }
+  if (summaryDaumIdle) {
+    tracker.daumIdle = summaryDaumIdle;
   }
   return { tracker, job };
 }
@@ -8206,6 +8339,32 @@ function updateSuccessCounter(card, device) {
     let elapsedText = `경과: ${elapsed.text} · 알박기: ${formatCount(tracker.anchor)}건`;
     if (activeDomain === "daum" && Number(tracker.daumMax || 0) > 0) {
       elapsedText += ` · 다음MAX:${formatCount(tracker.daumMax)}`;
+    }
+    if (activeDomain === "daum") {
+      const daumIdleInfo = summaryDaumIdle || tracker.daumIdle || null;
+      if (daumIdleInfo?.enabled) {
+        const idleSegments = [];
+        if (daumIdleInfo.elapsed > 0) {
+          idleSegments.push(`Sent대기 ${formatCount(daumIdleInfo.elapsed)}초`);
+        }
+        if (daumIdleInfo.ipChanges > 0) {
+          idleSegments.push(`IP변경 ${formatCount(daumIdleInfo.ipChanges)}회`);
+        }
+        if (daumIdleInfo.ipThreshold > 0 && daumIdleInfo.stopSeconds > 0) {
+          idleSegments.push(
+            `${formatCount(daumIdleInfo.ipThreshold)}→${formatCount(daumIdleInfo.stopSeconds)}초`,
+          );
+        }
+        if (!idleSegments.length) {
+          const baseWindow = daumIdleInfo.ipThreshold || DAUM_IDLE_IP_DEFAULT;
+          const baseStop = daumIdleInfo.stopSeconds || DAUM_IDLE_STOP_DEFAULT;
+          idleSegments.push(`Sent감시 ${formatCount(baseWindow)}→${formatCount(baseStop)}초`);
+        }
+        if (daumIdleInfo.stopTriggered) {
+          idleSegments.push("중지 임박");
+        }
+        elapsedText += ` · ${idleSegments.join(" / ")}`;
+      }
     }
     elapsedEl.textContent = elapsedText;
     if (elapsed.state) {
@@ -8674,10 +8833,45 @@ function populateConfigForm(card, device, domain) {
   if (anchorEmailInput && document.activeElement !== anchorEmailInput) anchorEmailInput.value = cache.values.anchor_email;
   const rcptInput = card.querySelector('[data-field="rcpt_to"]');
   if (rcptInput && document.activeElement !== rcptInput) rcptInput.value = cache.values.rcpt_to;
+  const daumIdleToggle = card.querySelector('[data-field="daum_idle_watch_enabled"]');
+  if (daumIdleToggle) daumIdleToggle.checked = Boolean(cache.values.daum_idle_watch_enabled);
+  const daumIdleIpInput = card.querySelector('[data-field="daum_idle_ip_change_seconds"]');
+  if (daumIdleIpInput && document.activeElement !== daumIdleIpInput) daumIdleIpInput.value = cache.values.daum_idle_ip_change_seconds;
+  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_seconds"]');
+  if (daumIdleStopInput && document.activeElement !== daumIdleStopInput) daumIdleStopInput.value = cache.values.daum_idle_stop_seconds;
+  toggleDomainSpecificFields(card, activeDomain);
   updateCardLockUI(card, config, activeDomain);
   updateDeviceSchedule(card, device, activeDomain, config);
   renderImapSection(card, device, activeDomain);
   updateSingleSendControls(card, device);
+}
+
+function toggleDomainSpecificFields(card, domain) {
+  if (!card) {
+    return;
+  }
+  const normalized = normalizeDeviceDomain(domain || "naver");
+  const nodes = card.querySelectorAll('[data-domain-only]');
+  nodes.forEach((node) => {
+    const targetAttr = (node.dataset.domainOnly || "").trim();
+    if (!targetAttr) {
+      node.classList.remove("domain-hidden");
+      node.hidden = false;
+      return;
+    }
+    const allowed = targetAttr
+      .split(",")
+      .map((entry) => normalizeDeviceDomain(entry.trim()))
+      .filter(Boolean);
+    const shouldShow = allowed.includes(normalized);
+    if (shouldShow) {
+      node.classList.remove("domain-hidden");
+      node.hidden = false;
+    } else {
+      node.classList.add("domain-hidden");
+      node.hidden = true;
+    }
+  });
 }
 
 function attachCardEvents(card) {
@@ -8936,6 +9130,42 @@ function attachCardEvents(card) {
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       markFieldDirty(currentDevice.id, domain, "anchor_interval", sanitized);
+    });
+  }
+
+  const daumIdleIpInput = card.querySelector('[data-field="daum_idle_ip_change_seconds"]');
+  if (daumIdleIpInput) {
+    daumIdleIpInput.addEventListener("blur", () => {
+      const sanitized = sanitizeDaumIdleIpSeconds(daumIdleIpInput.value);
+      if (daumIdleIpInput.value !== sanitized) {
+        daumIdleIpInput.value = sanitized;
+      }
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, "daum_idle_ip_change_seconds", sanitized);
+      const stopInput = card.querySelector('[data-field="daum_idle_stop_seconds"]');
+      if (stopInput) {
+        const adjusted = sanitizeDaumIdleStopSeconds(stopInput.value, Number(sanitized));
+        if (stopInput.value !== adjusted) {
+          stopInput.value = adjusted;
+          markFieldDirty(currentDevice.id, domain, "daum_idle_stop_seconds", adjusted);
+        }
+      }
+    });
+  }
+
+  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_seconds"]');
+  if (daumIdleStopInput) {
+    daumIdleStopInput.addEventListener("blur", () => {
+      const ipValueRaw = card.querySelector('[data-field="daum_idle_ip_change_seconds"]')?.value;
+      const ipValue = Number(ipValueRaw || DAUM_IDLE_IP_DEFAULT);
+      const sanitized = sanitizeDaumIdleStopSeconds(daumIdleStopInput.value, ipValue);
+      if (daumIdleStopInput.value !== sanitized) {
+        daumIdleStopInput.value = sanitized;
+      }
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      markFieldDirty(currentDevice.id, domain, "daum_idle_stop_seconds", sanitized);
     });
   }
 
@@ -9444,6 +9674,7 @@ function attachCardEvents(card) {
           tracker.total = 0;
           tracker.anchor = 0;
           tracker.daumMax = 0;
+          tracker.daumIdle = null;
           tracker.forceZero = true;
           tracker.resetCutoff = null;
         }
@@ -9615,6 +9846,23 @@ function buildDeviceCard(device) {
           <input type="text" data-field="message_id_pattern" placeholder="<\${랜덤:영소:6}.\${랜덤:숫자:4}.\${랜덤:영소숫자:12}@\${HELO}>" spellcheck="false" autocomplete="off">
         </label>
       </div>
+      <div class="field-row" data-domain-only="daum">
+        <label class="inline-checkbox">
+          <input type="checkbox" data-field="daum_idle_watch_enabled">
+          <span>Sent 지연 감시 활성화</span>
+        </label>
+        <label class="field compact">
+          <span>IP 변경 대기(초)</span>
+          <input type="number" class="input-compact" data-field="daum_idle_ip_change_seconds" min="5" max="600" step="5" placeholder="20">
+        </label>
+        <label class="field compact">
+          <span>누적 정지 한계(초)</span>
+          <input type="number" class="input-compact" data-field="daum_idle_stop_seconds" min="10" max="3600" step="10" placeholder="120">
+        </label>
+      </div>
+      <p class="field-hint" data-domain-only="daum">
+        Sent가 지정 시간 동안 기록되지 않으면 자동으로 IP를 변경하고, 누적 대기가 한계에 도달하면 발송을 중단합니다.
+      </p>
       <div class="action-bar">
         <label class="field rcpt-field">
           <span>단일 발송 RCPT TO</span>
