@@ -2768,6 +2768,7 @@ const LOG_PANEL_STORAGE_KEY = "dashboardLogPanels";
 const LOG_PANEL_MIN_HEIGHT = 160;
 const LOG_PANEL_MAX_HEIGHT = 560;
 const LOG_PANEL_DEFAULT_HEIGHT = 220;
+const LOG_PANEL_MANUAL_INTERVAL_MS = 1200;
 
 function loadLogPanelPreferences() {
   if (typeof localStorage === "undefined") {
@@ -3377,7 +3378,7 @@ function restoreLogPanelHeight(logBox, deviceId) {
 }
 
 function bindLogPanelResizeObserver(logBox, deviceId) {
-  if (!logBox || typeof ResizeObserver === "undefined") {
+  if (!logBox) {
     return;
   }
   if (!state.logPanels.observers) {
@@ -3388,6 +3389,13 @@ function bindLogPanelResizeObserver(logBox, deviceId) {
   }
   const resolvedId = deviceId || logBox.closest(".card")?.dataset.deviceId;
   if (!resolvedId) {
+    return;
+  }
+  if (typeof ResizeObserver === "undefined") {
+    const manualWatcher = startLogPanelManualWatcher(logBox, resolvedId);
+    if (manualWatcher) {
+      state.logPanels.observers.set(logBox, { type: "interval", handle: manualWatcher });
+    }
     return;
   }
   const observer = new ResizeObserver((entries) => {
@@ -3404,7 +3412,40 @@ function bindLogPanelResizeObserver(logBox, deviceId) {
     setLogPanelPreference(resolvedId, { height: nextHeight });
   });
   observer.observe(logBox);
-  state.logPanels.observers.set(logBox, observer);
+  state.logPanels.observers.set(logBox, { type: "observer", handle: observer });
+}
+
+function startLogPanelManualWatcher(logBox, deviceId) {
+  if (!logBox || !deviceId || typeof document === "undefined") {
+    return null;
+  }
+  if (typeof setInterval !== "function" || !LOG_PANEL_MANUAL_INTERVAL_MS) {
+    return null;
+  }
+  let lastHeight = clampNumber(Math.round(logBox.clientHeight), LOG_PANEL_MIN_HEIGHT, LOG_PANEL_MAX_HEIGHT, 0);
+  let intervalId = null;
+  const poll = () => {
+    if (!document.body || !document.body.contains(logBox)) {
+      if (intervalId) {
+        clearInterval(intervalId);
+        intervalId = null;
+      }
+      if (state.logPanels?.observers) {
+        state.logPanels.observers.delete(logBox);
+      }
+      return;
+    }
+    if (logBox.dataset.collapsed === "true") return;
+    if (logBox.__logPanelApplyingHeight) return;
+    const measured = clampNumber(Math.round(logBox.clientHeight), LOG_PANEL_MIN_HEIGHT, LOG_PANEL_MAX_HEIGHT, 0);
+    if (!measured || measured === lastHeight) {
+      return;
+    }
+    lastHeight = measured;
+    setLogPanelPreference(deviceId, { height: measured });
+  };
+  intervalId = setInterval(poll, LOG_PANEL_MANUAL_INTERVAL_MS);
+  return intervalId;
 }
 
 function applyLogPanelState(card, device) {
