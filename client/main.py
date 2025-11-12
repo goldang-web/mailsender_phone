@@ -6290,6 +6290,8 @@ class MailClient:
         cancel_requested = False
         stop_reason: Optional[str] = None
         fatal_error: Optional[str] = None
+        restart_required = False
+        restart_reason: Optional[str] = None
         batch_halt_markers: Set[str] = set()
 
         def emit_batch_halt_marker(
@@ -6329,7 +6331,7 @@ class MailClient:
                 pass
 
         def evaluate_daum_idle_guard() -> None:
-            nonlocal stop_requested, fatal_error, stop_reason
+            nonlocal stop_requested, fatal_error, stop_reason, restart_required, restart_reason
             if not daum_idle_guard or not daum_idle_guard.enabled or stop_requested:
                 return
             elapsed_seconds = daum_idle_guard.elapsed_seconds()
@@ -6393,6 +6395,8 @@ class MailClient:
                 fatal_error = f"다음 Sent 감시 · 누적 {elapsed_seconds}초 대기로 발송 중단"
                 stop_reason = fatal_error
                 stop_requested = True
+                restart_required = True
+                restart_reason = fatal_error
                 emit_batch_halt_marker(
                     "DAUM_IDLE_STOP",
                     fatal_error,
@@ -7606,11 +7610,12 @@ class MailClient:
                                 severity="error",
                             )
                             release_pending_queue("SMTP 제한 응답 감지")
-                            return
                         else:
                             throttle_resume_message = f"{throttle_notice} · IP 변경 완료, 재시작 필요"
                             fatal_error = throttle_resume_message
                             stop_reason = throttle_resume_message
+                            restart_required = True
+                            restart_reason = throttle_resume_message
                             stop_requested = True
                             emit_batch_halt_marker(
                                 "SMTP_THROTTLE",
@@ -7619,7 +7624,6 @@ class MailClient:
                                 allow_repeat=True,
                             )
                             release_pending_queue("SMTP 제한 응답 감지")
-                            return
                     elif matched_message:
                         fatal_error = matched_message
                         stop_reason = fatal_error
@@ -7749,6 +7753,14 @@ class MailClient:
                 status=status_label,
                 stop_reason=reason_label,
             )
+
+        if restart_required:
+            maybe_record_batch_stop("failed", summary)
+            info_message = restart_reason or "제한 감지로 재시작"
+            print(f"[배치 발송] {domain_label} · {info_message} · 자동 재시작")
+            self._maybe_flush_sent_sequences(force=True)
+            return self.handle_batch_send(domain, payload, job_id)
+
         if self._imap_settings_dirty:
             self.persist()
         if cancel_requested:
