@@ -10910,7 +10910,6 @@ function renderBatchLogRows(items = state.batchLogs.items || []) {
       const sentLabel = `${formatCount(entry.sent_total || 0)}건`;
       const startIp = (entry.start_ip || "-").trim() || "-";
       const stopIp = (entry.stop_ip || "").trim();
-      const ipLabel = stopIp && stopIp !== startIp ? `${startIp} → ${stopIp}` : startIp;
       const reason = (entry.stop_reason || "-").trim() || "-";
       const statusAttr = escapeHtml(statusRaw);
       return `
@@ -10919,7 +10918,8 @@ function renderBatchLogRows(items = state.batchLogs.items || []) {
           <td>${escapeHtml(startedLabel)}</td>
           <td>${escapeHtml(elapsedLabel)}</td>
           <td>${escapeHtml(sentLabel)}</td>
-          <td class="ip-cell">${escapeHtml(ipLabel)}</td>
+          <td class="ip-cell">${escapeHtml(startIp)}</td>
+          <td class="ip-cell">${escapeHtml(stopIp || startIp)}</td>
           <td title="${escapeHtml(reason)}">${escapeHtml(reason)}</td>
         </tr>
       `;
@@ -10933,7 +10933,8 @@ function renderBatchLogRows(items = state.batchLogs.items || []) {
           <th>시작 시각</th>
           <th>경과 시간</th>
           <th>Sent 건수</th>
-          <th>IP</th>
+          <th>시작 IP</th>
+          <th>종료 IP</th>
           <th>중지 사유</th>
         </tr>
       </thead>
