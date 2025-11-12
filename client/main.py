@@ -7606,8 +7606,20 @@ class MailClient:
                                 severity="error",
                             )
                             release_pending_queue("SMTP 제한 응답 감지")
+                            return
                         else:
-                            emit_progress(force=True)
+                            throttle_resume_message = f"{throttle_notice} · IP 변경 완료, 재시작 필요"
+                            fatal_error = throttle_resume_message
+                            stop_reason = throttle_resume_message
+                            stop_requested = True
+                            emit_batch_halt_marker(
+                                "SMTP_THROTTLE",
+                                throttle_resume_message,
+                                severity="warning",
+                                allow_repeat=True,
+                            )
+                            release_pending_queue("SMTP 제한 응답 감지")
+                            return
                     elif matched_message:
                         fatal_error = matched_message
                         stop_reason = fatal_error
