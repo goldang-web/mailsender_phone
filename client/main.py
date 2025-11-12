@@ -6374,7 +6374,20 @@ class MailClient:
                     daum_idle_guard.last_trigger_level = next_level
                     if ip_success:
                         daum_idle_guard.mark_ip_change()
-                        emit_progress(force=True)
+                        resume_message = f"다음 Sent 감시 · {combined_message}"
+                        fatal_error = resume_message
+                        stop_reason = resume_message
+                        restart_required = True
+                        restart_reason = f"{combined_message}"
+                        stop_requested = True
+                        emit_batch_halt_marker(
+                            "DAUM_IDLE_RESUME",
+                            resume_message,
+                            severity="warning",
+                            allow_repeat=True,
+                        )
+                        release_pending_queue("Sent 지연 감시 IP 변경")
+                        return
                     else:
                         fatal_error = f"다음 Sent 감시 · {combined_message}"
                         stop_reason = fatal_error
@@ -6395,8 +6408,6 @@ class MailClient:
                 fatal_error = f"다음 Sent 감시 · 누적 {elapsed_seconds}초 대기로 발송 중단"
                 stop_reason = fatal_error
                 stop_requested = True
-                restart_required = True
-                restart_reason = fatal_error
                 emit_batch_halt_marker(
                     "DAUM_IDLE_STOP",
                     fatal_error,
