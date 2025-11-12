@@ -2994,6 +2994,7 @@ const MONITORING_STATUS_PRIORITY = {
   offline: 2,
 };
 const ACTIVE_JOB_STATES = new Set(["pending", "dispatched", "running"]);
+const BATCH_JOB_TYPES = new Set(["batch_send"]);
 const SINGLE_JOB_TYPES = new Set(["single_send"]);
 const IMAP_CHECK_JOB_TYPES = new Set(["imap_manual_check"]);
 const TRACKED_SUPPORT_JOB_TYPES = new Set([...SINGLE_JOB_TYPES, ...IMAP_CHECK_JOB_TYPES]);
@@ -6993,7 +6994,16 @@ function latestBatchJob(device, domain) {
   if (!candidates.length) {
     return null;
   }
-  return [...candidates].sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))[0];
+  const sortByRecent = (job) => new Date(job?.created_at || job?.queued_at || 0).getTime();
+  const prioritized = candidates.filter((job) => {
+    const status = (job?.status || "").toLowerCase();
+    if (ACTIVE_JOB_STATES.has(status)) {
+      return true;
+    }
+    return Boolean(job?.cancel_requested);
+  });
+  const pool = prioritized.length ? prioritized : candidates;
+  return [...pool].sort((a, b) => sortByRecent(b) - sortByRecent(a))[0];
 }
 
 function parseSummaryNumber(value) {
@@ -7132,6 +7142,44 @@ function applyScheduledSingleSendJob(card, currentDevice, scheduledJob) {
   return updatedDevice;
 }
 
+function applyScheduledBatchJob(card, currentDevice, scheduledJob, domain) {
+  const baseDevice = card.__deviceData || currentDevice || {};
+  if (!scheduledJob) {
+    updateBatchControls(card, baseDevice);
+    return baseDevice;
+  }
+  const jobType = (scheduledJob?.job_type || "").toLowerCase();
+  if (!BATCH_JOB_TYPES.has(jobType)) {
+    updateBatchControls(card, baseDevice);
+    return baseDevice;
+  }
+  const normalizedDomain = normalizeDeviceDomain(
+    scheduledJob?.domain || domain || baseDevice.active_domain || "naver",
+  );
+  const jobs = Array.isArray(baseDevice.jobs) ? [...baseDevice.jobs] : [];
+  const normalizedJob = {
+    ...scheduledJob,
+    job_type: "batch_send",
+    domain: normalizedDomain,
+    status: scheduledJob.status || "pending",
+    progress: Array.isArray(scheduledJob.progress) ? scheduledJob.progress : [],
+    cancel_requested: Boolean(scheduledJob.cancel_requested),
+  };
+  Object.assign(scheduledJob, normalizedJob);
+  const existingIdx = jobs.findIndex((job) => job?.id === normalizedJob.id);
+  if (existingIdx >= 0) {
+    jobs[existingIdx] = { ...jobs[existingIdx], ...normalizedJob };
+  } else {
+    jobs.unshift(normalizedJob);
+  }
+  const updatedDevice = { ...baseDevice, jobs };
+  const resolvedDomain = applyActiveDomain(card, updatedDevice, normalizedDomain);
+  updatedDevice.active_domain = resolvedDomain;
+  card.__deviceData = updatedDevice;
+  updateBatchControls(card, updatedDevice);
+  return updatedDevice;
+}
+
 function syncDeviceJobInState(deviceId, job) {
   if (!deviceId || !job || !Array.isArray(state.devices)) {
     return;
@@ -7152,7 +7200,11 @@ function syncDeviceJobInState(deviceId, job) {
   } else {
     jobs.unshift(normalizedJob);
   }
-  state.devices[index] = { ...device, jobs };
+  const nextDevice = { ...device, jobs };
+  if (normalizedJob.domain) {
+    nextDevice.active_domain = normalizeDeviceDomain(normalizedJob.domain);
+  }
+  state.devices[index] = nextDevice;
 }
 
 function refreshCardRuntimeState(card, device, options = {}) {
@@ -7805,6 +7857,71 @@ async function fetchJSON(url, options = {}) {
     throw new Error(detail || "요청에 실패했습니다.");
   }
   return isJSON ? response.json() : response.text();
+}
+
+async function waitForJobCompletion(jobId, options = {}) {
+  const timeoutMs = Number(options.timeoutMs ?? 15000);
+  const intervalMs = Number(options.intervalMs ?? 800);
+  if (!jobId) return null;
+  const deadline = Date.now() + Math.max(1000, timeoutMs);
+  while (Date.now() < deadline) {
+    try {
+      const jobDetail = await fetchJSON(`/api/jobs/${jobId}`);
+      const status = (jobDetail?.status || "").toLowerCase();
+      if (["success", "failed", "cancelled"].includes(status)) {
+        return jobDetail;
+      }
+    } catch (err) {
+      console.warn("작업 상태 조회 실패", err);
+      break;
+    }
+    await delay(Math.max(300, intervalMs));
+  }
+  return null;
+}
+
+function extractJobMessage(detail) {
+  if (!detail || typeof detail !== "object") {
+    return "";
+  }
+  if (detail.error) {
+    return String(detail.error);
+  }
+  if (Array.isArray(detail.progress) && detail.progress.length > 0) {
+    const last = detail.progress[detail.progress.length - 1];
+    if (last?.message) {
+      return String(last.message);
+    }
+  }
+  if (detail.result?.message) {
+    return String(detail.result.message);
+  }
+  return "";
+}
+
+function formatResetSuccessMessage(detail) {
+  const base = "도메인 DB 상태를 초기화했습니다.";
+  const stats = detail?.result;
+  if (!stats || typeof stats !== "object") {
+    return base;
+  }
+  const summary = [];
+  const totalRows = Number(stats.total_rows);
+  if (Number.isFinite(totalRows) && totalRows >= 0) {
+    summary.push(`총 ${formatCount(totalRows)}건`);
+  }
+  const updatedRows = Number(stats.updated_rows);
+  if (Number.isFinite(updatedRows) && updatedRows >= 0) {
+    summary.push(`갱신 ${formatCount(updatedRows)}건`);
+  }
+  const pendingAfter = Number(stats.pending_after);
+  if (Number.isFinite(pendingAfter) && pendingAfter >= 0) {
+    summary.push(`현재 pending ${formatCount(pendingAfter)}건`);
+  }
+  if (!summary.length) {
+    return base;
+  }
+  return `${base} (${summary.join(", ")})`;
 }
 
 async function pollJobUntilDone(jobId, options = {}) {
@@ -9670,10 +9787,17 @@ function attachCardEvents(card) {
       return;
     }
     try {
-      await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-batch`, {
+      const result = await fetchJSON(`/api/devices/${currentDevice.id}/actions/send-batch`, {
         method: "POST",
         body: JSON.stringify({ domain }),
       });
+      const scheduledJob = result?.job || null;
+      const updatedDevice = applyScheduledBatchJob(card, currentDevice, scheduledJob, domain);
+      if (scheduledJob) {
+        syncDeviceJobInState(currentDevice.id, scheduledJob);
+      }
+      refreshCardRuntimeState(card, updatedDevice);
+      renderMonitoring();
       setNotice(card, "전체 발송 작업을 추가했습니다.");
       await loadDevices();
     } catch (err) {
@@ -11334,8 +11458,32 @@ async function handleDomainReset(button) {
     targetButton.textContent = "초기화 중...";
   }
   try {
-    await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/actions/reset-status`, { method: "POST" });
-    showModalMessage("도메인 DB 상태를 초기화했습니다.", "success");
+    const response = await fetchJSON(`/api/devices/${deviceId}/domains/${domain}/actions/reset-status`, { method: "POST" });
+    const jobId = response?.job?.id;
+    if (jobId && targetButton) {
+      targetButton.textContent = "결과 확인 중...";
+    }
+    let jobDetail = null;
+    if (jobId) {
+      jobDetail = await waitForJobCompletion(jobId, { timeoutMs: 20000, intervalMs: 1000 });
+    }
+    if (jobDetail) {
+      const status = (jobDetail.status || "").toLowerCase();
+      if (status === "success") {
+        const successMessage = formatResetSuccessMessage(jobDetail);
+        showModalMessage(successMessage, "success");
+      } else if (status === "failed") {
+        const failureMessage = extractJobMessage(jobDetail) || "DB 전체 초기화에 실패했습니다.";
+        showModalMessage(failureMessage, "error");
+      } else if (status === "cancelled") {
+        const cancelMessage = extractJobMessage(jobDetail) || "DB 전체 초기화 작업이 취소되었습니다.";
+        showModalMessage(cancelMessage, "error");
+      } else {
+        showModalMessage("초기화 작업이 아직 진행 중입니다. 작업 기록에서 확인하세요.", "info");
+      }
+    } else {
+      showModalMessage("초기화 요청을 전송했습니다. 작업 기록에서 진행 상황을 확인하세요.", "info");
+    }
     await loadDevices({ silent: true });
   } catch (err) {
     showModalMessage(err.message || "DB 전체 초기화에 실패했습니다.");
