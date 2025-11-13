@@ -7284,6 +7284,7 @@ class MailClient:
                 def process_future(future: Future, group: DispatchGroup) -> None:
                     nonlocal processed, sent_count, block_count, failed_count, last_error
                     nonlocal stop_requested, fatal_error, stop_reason, bcc_processed, anchor_processed
+                    nonlocal restart_required, restart_reason
                     nonlocal anchor_retry_pending, current_sent_counter, nouser_count
                     nonlocal mail_from_value, header_from_value
                     try:
