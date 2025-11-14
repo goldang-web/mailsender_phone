@@ -110,6 +110,18 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "daum_idle_stop_limit": DAUM_IDLE_STOP_LIMIT_DEFAULT,
 }
 
+DEFAULT_DAUM_IDLE_IP_SECONDS = DEFAULT_DOMAIN_CONFIG.get(
+    "daum_idle_ip_change_seconds",
+    DAUM_IDLE_IP_MIN_SECONDS,
+)
+DEFAULT_DAUM_IDLE_STOP_LIMIT = DEFAULT_DOMAIN_CONFIG.get(
+    "daum_idle_stop_limit",
+    DAUM_IDLE_STOP_LIMIT_DEFAULT,
+)
+DEFAULT_DAUM_IDLE_STOP_SECONDS = (
+    DEFAULT_DAUM_IDLE_IP_SECONDS * DEFAULT_DAUM_IDLE_STOP_LIMIT
+)
+
 IMAP_DELAY_MIN_SECONDS = 5
 IMAP_DELAY_MAX_SECONDS = 600
 IMAP_CHECK_DELAY_MIN_SECONDS = 0
@@ -147,6 +159,10 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "message_id_auto": True,
     "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
     "imap_reroll_on_retry": False,
+    "daum_idle_watch_enabled": DEFAULT_DOMAIN_CONFIG.get("daum_idle_watch_enabled", False),
+    "daum_idle_ip_change_seconds": DEFAULT_DAUM_IDLE_IP_SECONDS,
+    "daum_idle_stop_limit": DEFAULT_DAUM_IDLE_STOP_LIMIT,
+    "daum_idle_stop_seconds": DEFAULT_DAUM_IDLE_STOP_SECONDS,
 }
 GLOBAL_CONFIG_DEVICE_FIELDS = (
     "helo",
@@ -158,6 +174,9 @@ GLOBAL_CONFIG_DEVICE_FIELDS = (
     "session_count",
     "message_id_auto",
     "message_id_pattern",
+    "daum_idle_watch_enabled",
+    "daum_idle_ip_change_seconds",
+    "daum_idle_stop_limit",
 )
 MAX_DEVICE_LOG_HISTORY = 10
 BATCH_STOP_LOG_FETCH_LIMIT = 200
@@ -1254,6 +1273,27 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     else:
         sanitized["message_id_auto"] = bool(raw_message_auto)
     sanitized["message_id_pattern"] = _normalize_message_id_pattern(raw.get("message_id_pattern"))
+    sanitized["daum_idle_watch_enabled"] = sanitize_stop_schedule_enabled(
+        raw.get("daum_idle_watch_enabled")
+    )
+    daum_ip_seconds = sanitize_daum_idle_seconds(
+        raw.get("daum_idle_ip_change_seconds"),
+        default=DEFAULT_DAUM_IDLE_IP_SECONDS,
+        minimum=DAUM_IDLE_IP_MIN_SECONDS,
+        maximum=DAUM_IDLE_IP_MAX_SECONDS,
+    )
+    sanitized["daum_idle_ip_change_seconds"] = daum_ip_seconds
+    daum_stop_limit = resolve_daum_idle_stop_limit(
+        raw.get("daum_idle_stop_limit"),
+        ip_change_seconds=daum_ip_seconds,
+        legacy_seconds=raw.get("daum_idle_stop_seconds"),
+        default=DEFAULT_DAUM_IDLE_STOP_LIMIT,
+    )
+    sanitized["daum_idle_stop_limit"] = daum_stop_limit
+    sanitized["daum_idle_stop_seconds"] = convert_stop_limit_to_seconds(
+        daum_stop_limit,
+        daum_ip_seconds,
+    )
     return sanitized
 
 
@@ -2553,6 +2593,7 @@ def load_device_summary() -> Dict[str, Any]:
         job_overrides: Dict[str, sqlite3.Row] = {}
         job_ids = [row["id"] for row in job_rows]
         progress_rows: List[sqlite3.Row] = []
+        session_rows: List[sqlite3.Row] = []
         if job_ids:
             placeholders = ",".join(["?"] * len(job_ids))
             progress_rows = conn.execute(
@@ -2562,6 +2603,16 @@ def load_device_summary() -> Dict[str, Any]:
                 WHERE job_id IN ({placeholders})
                 ORDER BY created_at DESC
                 LIMIT 500
+                """,
+                job_ids,
+            ).fetchall()
+            session_rows = conn.execute(
+                f"""
+                SELECT job_id, data, created_at
+                FROM job_progress_logs
+                WHERE job_id IN ({placeholders})
+                  AND data LIKE '%"public_ip"%'
+                ORDER BY created_at DESC
                 """,
                 job_ids,
             ).fetchall()
@@ -2650,6 +2701,7 @@ def load_device_summary() -> Dict[str, Any]:
             "last_injected_status": row["last_injected_status"],
         }
     progress_map: Dict[str, List[Dict[str, Any]]] = {}
+    session_map: Dict[str, Dict[str, Any]] = {}
     for row in progress_rows:
         data_payload: Optional[Dict[str, Any]] = None
         if row["data"]:
@@ -2665,6 +2717,28 @@ def load_device_summary() -> Dict[str, Any]:
                 "created_at": row["created_at"],
             }
         )
+    for row in session_rows:
+        job_id = row["job_id"]
+        if job_id in session_map:
+            continue
+        ip_payload: Optional[Dict[str, Any]] = None
+        if row["data"]:
+            try:
+                ip_payload = json.loads(row["data"])
+            except json.JSONDecodeError:
+                ip_payload = None
+        if not ip_payload or not isinstance(ip_payload, dict):
+            continue
+        ip_value = ip_payload.get("public_ip")
+        if not ip_value:
+            continue
+        ip_text = str(ip_value).strip()
+        if not ip_text:
+            continue
+        session_map[job_id] = {
+            "public_ip": ip_text,
+            "started_at": row["created_at"],
+        }
     for job_id, entries in list(progress_map.items()):
         trimmed = entries[:20]
         progress_map[job_id] = list(reversed(trimmed))
@@ -2684,6 +2758,7 @@ def load_device_summary() -> Dict[str, Any]:
         payload_public = sanitize_job_payload_for_output(row["job_type"], payload)
         row_keys = row.keys()
         cancel_requested_flag = bool(row["cancel_requested"]) if "cancel_requested" in row_keys else False
+        job_session = session_map.get(row["id"], {})
         job_map.setdefault(row["device_id"], []).append(
             {
                 "id": row["id"],
@@ -2699,6 +2774,8 @@ def load_device_summary() -> Dict[str, Any]:
                 "cancel_requested": cancel_requested_flag,
                 "error": row["error"],
                 "progress": progress_map.get(row["id"], []),
+                "session_public_ip": job_session.get("public_ip"),
+                "session_started_at": job_session.get("started_at"),
             }
         )
     log_map: Dict[str, List[Dict[str, Any]]] = {}
@@ -3965,6 +4042,9 @@ class GlobalConfigPayload(BaseModel):
     telegram_chat_id: Optional[str] = None
     message_id_auto: Optional[bool] = None
     message_id_pattern: Optional[str] = None
+    daum_idle_watch_enabled: Optional[bool] = None
+    daum_idle_ip_change_seconds: Optional[int] = None
+    daum_idle_stop_limit: Optional[int] = None
 
 
 class GlobalConfigResponse(BaseModel):
@@ -3986,6 +4066,9 @@ class GlobalConfigResponse(BaseModel):
     telegram_chat_id: str
     message_id_auto: bool
     message_id_pattern: str
+    daum_idle_watch_enabled: bool
+    daum_idle_ip_change_seconds: int
+    daum_idle_stop_limit: int
 
 
 class GlobalBatchRequest(BaseModel):
@@ -4165,6 +4248,19 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
     else:
         message_id_auto = bool(raw_message_auto)
     message_id_pattern = _normalize_message_id_pattern(config.get("message_id_pattern"))
+    daum_watch_enabled = sanitize_stop_schedule_enabled(config.get("daum_idle_watch_enabled"))
+    daum_ip_seconds = sanitize_daum_idle_seconds(
+        config.get("daum_idle_ip_change_seconds"),
+        default=DEFAULT_DAUM_IDLE_IP_SECONDS,
+        minimum=DAUM_IDLE_IP_MIN_SECONDS,
+        maximum=DAUM_IDLE_IP_MAX_SECONDS,
+    )
+    daum_stop_limit = resolve_daum_idle_stop_limit(
+        config.get("daum_idle_stop_limit"),
+        ip_change_seconds=daum_ip_seconds,
+        legacy_seconds=config.get("daum_idle_stop_seconds"),
+        default=DEFAULT_DAUM_IDLE_STOP_LIMIT,
+    )
     return GlobalConfigResponse(
         helo=config.get("helo", ""),
         smtp_host=config.get("smtp_host", ""),
@@ -4187,6 +4283,9 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
         telegram_chat_id=sanitize_telegram_chat_id(config.get("telegram_chat_id")),
         message_id_auto=message_id_auto,
         message_id_pattern=message_id_pattern,
+        daum_idle_watch_enabled=daum_watch_enabled,
+        daum_idle_ip_change_seconds=daum_ip_seconds,
+        daum_idle_stop_limit=daum_stop_limit,
     )
 
 
@@ -4220,6 +4319,10 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
         )
         apply_values: Dict[str, Any] = {}
         applied_fields: List[str] = []
+        new_daum_ip_seconds = stored_config.get("daum_idle_ip_change_seconds", DEFAULT_DAUM_IDLE_IP_SECONDS)
+        new_daum_stop_limit = stored_config.get("daum_idle_stop_limit", DEFAULT_DAUM_IDLE_STOP_LIMIT)
+        daum_ip_updated = False
+        daum_limit_updated = False
         for field in GLOBAL_CONFIG_DEVICE_FIELDS:
             if field not in fields_set:
                 continue
@@ -4258,15 +4361,64 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 candidate_pattern = str(raw_value or "").strip() or MESSAGE_ID_PATTERN_DEFAULT
                 value_to_apply = candidate_pattern
                 should_apply = True
+            elif field == "daum_idle_watch_enabled":
+                if raw_value is None:
+                    continue
+                value_to_apply = 1 if raw_value else 0
+                should_apply = True
+            elif field == "daum_idle_ip_change_seconds":
+                if raw_value is None:
+                    continue
+                sanitized_ip = sanitize_daum_idle_seconds(
+                    raw_value,
+                    default=new_daum_ip_seconds,
+                    minimum=DAUM_IDLE_IP_MIN_SECONDS,
+                    maximum=DAUM_IDLE_IP_MAX_SECONDS,
+                )
+                value_to_apply = sanitized_ip
+                should_apply = True
+                new_daum_ip_seconds = sanitized_ip
+                daum_ip_updated = True
+            elif field == "daum_idle_stop_limit":
+                if raw_value is None:
+                    continue
+                sanitized_limit = sanitize_daum_idle_limit(
+                    raw_value,
+                    default=new_daum_stop_limit,
+                    minimum=DAUM_IDLE_STOP_MIN_LIMIT,
+                    maximum=DAUM_IDLE_STOP_MAX_LIMIT,
+                )
+                value_to_apply = sanitized_limit
+                should_apply = True
+                new_daum_stop_limit = sanitized_limit
+                daum_limit_updated = True
             else:
                 continue
             if should_apply:
                 apply_values[field] = value_to_apply
                 if field in ("message_id_auto", "all_headers_unique"):
                     stored_config[field] = bool(value_to_apply)
+                elif field == "daum_idle_watch_enabled":
+                    stored_config[field] = bool(raw_value)
                 else:
                     stored_config[field] = value_to_apply
                 applied_fields.append(field)
+        if daum_ip_updated or daum_limit_updated:
+            stop_seconds_value = convert_stop_limit_to_seconds(
+                new_daum_stop_limit,
+                new_daum_ip_seconds,
+            )
+            apply_values["daum_idle_stop_seconds"] = stop_seconds_value
+            stored_config["daum_idle_stop_seconds"] = stop_seconds_value
+            stored_config["daum_idle_ip_change_seconds"] = new_daum_ip_seconds
+            stored_config["daum_idle_stop_limit"] = new_daum_stop_limit
+            if "daum_idle_stop_seconds" not in applied_fields:
+                applied_fields.append("daum_idle_stop_seconds")
+        else:
+            stored_config["daum_idle_stop_seconds"] = convert_stop_limit_to_seconds(
+                stored_config.get("daum_idle_stop_limit", DEFAULT_DAUM_IDLE_STOP_LIMIT),
+                stored_config.get("daum_idle_ip_change_seconds", DEFAULT_DAUM_IDLE_IP_SECONDS),
+            )
         current_schedule_enabled = sanitize_stop_schedule_enabled(stored_config.get("stop_schedule_enabled"))
         current_schedule_time = sanitize_stop_schedule_time(stored_config.get("stop_schedule_time"))
         previous_last_run = sanitize_stop_schedule_last_run(current_config.get("stop_schedule_last_run"))

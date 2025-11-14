@@ -2806,6 +2806,9 @@ const GLOBAL_FIELD_LIST = [
   "telegram_chat_id",
   "message_id_auto",
   "message_id_pattern",
+  "daum_idle_watch_enabled",
+  "daum_idle_ip_change_seconds",
+  "daum_idle_stop_limit",
 ];
 const GLOBAL_DEFAULTS = {
   active_domain: "naver",
@@ -2823,6 +2826,9 @@ const GLOBAL_DEFAULTS = {
   telegram_chat_id: "",
   message_id_auto: true,
   message_id_pattern: MESSAGE_ID_PATTERN_DEFAULT,
+  daum_idle_watch_enabled: false,
+  daum_idle_ip_change_seconds: DAUM_IDLE_IP_DEFAULT,
+  daum_idle_stop_limit: DAUM_IDLE_STOP_LIMIT_DEFAULT,
 };
 const GLOBAL_INPUT_IDS = {
   active_domain: "globalActiveDomainGroup",
@@ -2983,6 +2989,9 @@ const state = {
     telegram_chat_id: false,
     message_id_auto: false,
     message_id_pattern: false,
+    daum_idle_watch_enabled: false,
+    daum_idle_ip_change_seconds: false,
+    daum_idle_stop_limit: false,
   },
   globalStatusTimer: null,
   telegramStatusTimer: null,
@@ -5013,6 +5022,18 @@ function normalizeGlobalFieldValue(field, value) {
     const pattern = typeof value === "string" ? value : String(value ?? "");
     return pattern.trim() || MESSAGE_ID_PATTERN_DEFAULT;
   }
+  if (field === "daum_idle_watch_enabled") {
+    return Boolean(value);
+  }
+  if (field === "daum_idle_ip_change_seconds") {
+    const sanitized = sanitizeDaumIdleIpSeconds(value ?? DAUM_IDLE_IP_DEFAULT);
+    return Number(sanitized);
+  }
+  if (field === "daum_idle_stop_limit") {
+    const currentIp = Number(state?.globalDraft?.daum_idle_ip_change_seconds ?? DAUM_IDLE_IP_DEFAULT) || DAUM_IDLE_IP_DEFAULT;
+    const sanitized = sanitizeDaumIdleStopLimit(value ?? DAUM_IDLE_STOP_LIMIT_DEFAULT, null, currentIp);
+    return Number(sanitized);
+  }
   if (value === undefined || value === null) {
     return GLOBAL_DEFAULTS[field];
   }
@@ -5050,7 +5071,11 @@ function syncGlobalInputsFromDraft(options = {}) {
        });
        return;
      }
-    const input = document.getElementById(GLOBAL_INPUT_IDS[field]);
+    const inputId = GLOBAL_INPUT_IDS[field];
+    if (!inputId) {
+      return;
+    }
+    const input = document.getElementById(inputId);
     if (!input) {
       return;
     }
@@ -6671,7 +6696,9 @@ function initGlobalForm() {
       });
       return;
     }
-    const input = document.getElementById(GLOBAL_INPUT_IDS[field]);
+    const inputId = GLOBAL_INPUT_IDS[field];
+    if (!inputId) return;
+    const input = document.getElementById(inputId);
     if (!input) return;
     if (field === "stop_schedule_enabled") {
       input.addEventListener("change", () => {
@@ -8266,6 +8293,8 @@ function ensureSuccessTracker(deviceId, domain) {
       daumMax: 0,
       daumIdle: null,
       forceZero: false,
+      sessionStartedMs: null,
+      sessionIp: null,
     };
   }
   return state.successCounters[deviceId][normalizedDomain];
@@ -8279,6 +8308,14 @@ function parseTimestampMs(value) {
   return Number.isNaN(ms) ? NaN : ms;
 }
 
+function normalizePublicIp(value) {
+  if (value === undefined || value === null) {
+    return null;
+  }
+  const text = String(value).trim();
+  return text || null;
+}
+
 function jobIsActive(job) {
   if (!job) {
     return false;
@@ -8287,6 +8324,21 @@ function jobIsActive(job) {
     return true;
   }
   return ACTIVE_JOB_STATES.has(job.status);
+}
+
+function getJobStartTimestamp(job) {
+  if (!job) {
+    return NaN;
+  }
+  const startedMs = parseTimestampMs(job.started_at);
+  if (!Number.isNaN(startedMs)) {
+    return startedMs;
+  }
+  const queuedMs = parseTimestampMs(job.queued_at);
+  if (!Number.isNaN(queuedMs)) {
+    return queuedMs;
+  }
+  return parseTimestampMs(job.created_at);
 }
 
 function formatElapsedDuration(ms) {
@@ -8330,27 +8382,22 @@ function formatBatchLogStatus(status) {
 
 function describeElapsedStatus(job) {
   if (!job) {
-    return { text: "대기 중", state: "idle", label: "대기 중", duration: "-" };
+    return { text: "대기 중", state: "idle", label: "대기 중", duration: "-", startedMs: null, startedAt: null };
   }
   const active = jobIsActive(job);
   const cancelRequested = Boolean(job.cancel_requested);
-  const startedMs = parseTimestampMs(job.started_at);
-  const queuedMs = parseTimestampMs(job.queued_at);
-  const createdMs = parseTimestampMs(job.created_at);
-  const hasStarted = !Number.isNaN(startedMs);
+  const startedMsRaw = parseTimestampMs(job.started_at);
+  const hasStarted = !Number.isNaN(startedMsRaw);
   if (!hasStarted && (!active || job.status === "pending" || job.status === "dispatched")) {
     const statusLabel = JOB_STATUS_LABELS[job.status] || job.status || "대기 중";
     const stateLabel = job.status || "idle";
-    return { text: statusLabel, state: stateLabel, label: statusLabel, duration: "-" };
+    return { text: statusLabel, state: stateLabel, label: statusLabel, duration: "-", startedMs: null, startedAt: null };
   }
-  let startMs = startedMs;
-  if (Number.isNaN(startMs)) {
-    startMs = Number.isNaN(queuedMs) ? createdMs : queuedMs;
-  }
+  const startMs = getJobStartTimestamp(job);
   if (Number.isNaN(startMs)) {
     const statusLabel = JOB_STATUS_LABELS[job.status] || job.status || "대기 중";
     const stateLabel = active ? (cancelRequested ? "cancelling" : "running") : (job.status || "idle");
-    return { text: statusLabel, state: stateLabel, label: statusLabel, duration: "-" };
+    return { text: statusLabel, state: stateLabel, label: statusLabel, duration: "-", startedMs: null, startedAt: null };
   }
   let endMs = Date.now();
   if (!active) {
@@ -8378,11 +8425,101 @@ function describeElapsedStatus(job) {
       stateLabel = job.status || "idle";
     }
   }
+  const startedAtIso = Number.isFinite(startMs) ? new Date(startMs).toISOString() : null;
   return {
     text: `${statusLabel} ${durationText}`,
     state: stateLabel,
     label: statusLabel,
     duration: durationText,
+    startedMs: Number.isFinite(startMs) ? startMs : null,
+    startedAt: startedAtIso,
+  };
+}
+
+function extractSessionEntryFromProgress(job) {
+  if (!job) {
+    return null;
+  }
+  const progress = Array.isArray(job.progress) ? job.progress : [];
+  for (let i = progress.length - 1; i >= 0; i -= 1) {
+    const entry = progress[i];
+    if (!entry || typeof entry !== "object") {
+      continue;
+    }
+    const data = entry.data;
+    if (!data || typeof data !== "object") {
+      continue;
+    }
+    const ipValue = normalizePublicIp(data.public_ip);
+    if (!ipValue) {
+      continue;
+    }
+    const entryMs = parseTimestampMs(entry.created_at);
+    if (Number.isNaN(entryMs)) {
+      continue;
+    }
+    return { startedMs: entryMs, ip: ipValue };
+  }
+  return null;
+}
+
+function describeSessionElapsed(job, tracker) {
+  const fallback = { text: "-", duration: "-", ip: null, startedMs: null };
+  if (!job) {
+    if (tracker) {
+      tracker.sessionStartedMs = null;
+      tracker.sessionIp = null;
+    }
+    return fallback;
+  }
+  const active = jobIsActive(job);
+  const finishMs = active ? NaN : parseTimestampMs(job.finished_at);
+  const nowMs = active || Number.isNaN(finishMs) ? Date.now() : finishMs;
+  let sessionStartMs = tracker?.sessionStartedMs ?? null;
+  let sessionIp = tracker?.sessionIp ?? null;
+
+  const jobSessionMs = parseTimestampMs(job.session_started_at);
+  const jobSessionIp = normalizePublicIp(job.session_public_ip);
+  if (!Number.isNaN(jobSessionMs)) {
+    if (!sessionStartMs || jobSessionMs >= sessionStartMs) {
+      sessionStartMs = jobSessionMs;
+      sessionIp = jobSessionIp || sessionIp;
+    }
+  }
+
+  if (!sessionStartMs) {
+    const progressSession = extractSessionEntryFromProgress(job);
+    if (progressSession) {
+      sessionStartMs = progressSession.startedMs;
+      sessionIp = progressSession.ip || sessionIp;
+    }
+  }
+
+  if (!sessionStartMs || Number.isNaN(sessionStartMs)) {
+    sessionStartMs = getJobStartTimestamp(job);
+  }
+
+  if (!Number.isFinite(sessionStartMs)) {
+    if (tracker) {
+      tracker.sessionStartedMs = null;
+      tracker.sessionIp = sessionIp || null;
+    }
+    return { ...fallback, ip: sessionIp || null };
+  }
+
+  if (tracker) {
+    tracker.sessionStartedMs = sessionStartMs;
+    tracker.sessionIp = sessionIp || null;
+  }
+
+  const diffMs = Math.max(0, nowMs - sessionStartMs);
+  const durationText = diffMs < 1000 ? "<1초" : formatElapsedDuration(diffMs);
+  const text = sessionIp ? `${durationText} (IP ${sessionIp})` : durationText;
+  return {
+    text,
+    duration: durationText,
+    ip: sessionIp || null,
+    startedMs: sessionStartMs,
   };
 }
 
@@ -8406,9 +8543,15 @@ function updateSuccessTrackerFromDevice(device, domain) {
     tracker.daumIdle = null;
     tracker.daumIdle = null;
     tracker.forceZero = false;
+    tracker.sessionStartedMs = null;
+    tracker.sessionIp = null;
     const jobCreatedMs = parseTimestampMs(job?.created_at);
     tracker.resetCutoff = Number.isNaN(jobCreatedMs) ? Date.now() : jobCreatedMs;
-  } else if (!jobId && tracker.lastBatchId === null && tracker.resetCutoff === undefined) {
+  } else if (!jobId) {
+    tracker.sessionStartedMs = null;
+    tracker.sessionIp = null;
+  }
+  if (!jobId && tracker.lastBatchId === null && tracker.resetCutoff === undefined) {
     tracker.resetCutoff = null;
   }
 
@@ -8632,7 +8775,8 @@ function updateSuccessCounter(card, device) {
   const elapsedEl = card.querySelector('[data-role="elapsedCounter"]');
   if (elapsedEl) {
     const elapsed = describeElapsedStatus(job);
-    let elapsedText = `경과: ${elapsed.text} · 알박기: ${formatCount(tracker.anchor)}건`;
+    const sessionElapsed = describeSessionElapsed(job, tracker);
+    let elapsedText = `세션: ${sessionElapsed.text} · 경과: ${elapsed.text} · 알박기: ${formatCount(tracker.anchor)}건`;
     if (activeDomain === "daum" && Number(tracker.daumMax || 0) > 0) {
       elapsedText += ` · 다음MAX:${formatCount(tracker.daumMax)}`;
     }
@@ -9594,6 +9738,12 @@ function attachCardEvents(card) {
       if (scheduleToggleEl) {
         scheduleToggleEl.checked = finalScheduleEnabled;
       }
+      const daumOverrides = {};
+      if (sanitizedDomain === "daum") {
+        daumOverrides.daum_idle_watch_enabled = payload.daum_idle_watch_enabled;
+        daumOverrides.daum_idle_ip_change_seconds = payload.daum_idle_ip_change_seconds;
+        daumOverrides.daum_idle_stop_limit = payload.daum_idle_stop_limit;
+      }
       applyValuesToGlobalDraft({
         active_domain: sanitizedDomain,
         helo: payload.helo,
@@ -9607,6 +9757,7 @@ function attachCardEvents(card) {
         message_id_pattern: payload.message_id_pattern,
         stop_schedule_enabled: finalScheduleEnabled,
         stop_schedule_time: effectiveScheduleTime,
+        ...daumOverrides,
       });
       setGlobalStatus("선택한 카드 설정을 전체 기기에 적용합니다...", "info");
       copyGlobalBtn.disabled = true;
@@ -9626,6 +9777,7 @@ function attachCardEvents(card) {
             message_id_pattern: payload.message_id_pattern,
             stop_schedule_enabled: finalScheduleEnabled,
             stop_schedule_time: effectiveScheduleTime,
+            ...daumOverrides,
           },
         });
       } finally {
@@ -11982,6 +12134,9 @@ async function handleGlobalApply(options = {}) {
   const hasMessageIdPatternOverride = Object.prototype.hasOwnProperty.call(overrides, "message_id_pattern");
   const hasStopScheduleEnabledOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_enabled");
   const hasStopScheduleTimeOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_time");
+  const hasDaumIdleWatchOverride = Object.prototype.hasOwnProperty.call(overrides, "daum_idle_watch_enabled");
+  const hasDaumIdleIpOverride = Object.prototype.hasOwnProperty.call(overrides, "daum_idle_ip_change_seconds");
+  const hasDaumIdleStopLimitOverride = Object.prototype.hasOwnProperty.call(overrides, "daum_idle_stop_limit");
 
   let activeDomainValue;
   if (hasActiveDomainOverride) {
@@ -12120,6 +12275,37 @@ async function handleGlobalApply(options = {}) {
   if (messageIdPatternInput && messageIdPatternInput.value !== messageIdPatternValue) {
     messageIdPatternInput.value = messageIdPatternValue;
   }
+  let daumIdleWatchValue;
+  if (hasDaumIdleWatchOverride) {
+    daumIdleWatchValue = Boolean(overrides.daum_idle_watch_enabled);
+    state.globalDraft.daum_idle_watch_enabled = daumIdleWatchValue;
+    state.globalDirty.daum_idle_watch_enabled = true;
+  } else {
+    daumIdleWatchValue = Boolean(state.globalDraft.daum_idle_watch_enabled);
+  }
+  let daumIdleIpValue = Number(state.globalDraft.daum_idle_ip_change_seconds ?? DAUM_IDLE_IP_DEFAULT) || DAUM_IDLE_IP_DEFAULT;
+  if (hasDaumIdleIpOverride) {
+    const sanitizedIp = Number(
+      sanitizeDaumIdleIpSeconds(overrides.daum_idle_ip_change_seconds ?? DAUM_IDLE_IP_DEFAULT),
+    );
+    daumIdleIpValue = sanitizedIp;
+    state.globalDraft.daum_idle_ip_change_seconds = sanitizedIp;
+    state.globalDirty.daum_idle_ip_change_seconds = true;
+  }
+  let daumIdleStopLimitValue = Number(state.globalDraft.daum_idle_stop_limit ?? DAUM_IDLE_STOP_LIMIT_DEFAULT)
+    || DAUM_IDLE_STOP_LIMIT_DEFAULT;
+  if (hasDaumIdleStopLimitOverride) {
+    const sanitizedLimit = Number(
+      sanitizeDaumIdleStopLimit(
+        overrides.daum_idle_stop_limit ?? DAUM_IDLE_STOP_LIMIT_DEFAULT,
+        null,
+        daumIdleIpValue,
+      ),
+    );
+    daumIdleStopLimitValue = sanitizedLimit;
+    state.globalDraft.daum_idle_stop_limit = sanitizedLimit;
+    state.globalDirty.daum_idle_stop_limit = true;
+  }
   let stopScheduleEnabledOverrideValue;
   if (hasStopScheduleEnabledOverride) {
     stopScheduleEnabledOverrideValue = Boolean(overrides.stop_schedule_enabled);
@@ -12217,6 +12403,15 @@ async function handleGlobalApply(options = {}) {
   if (allHeadersUniqueValue !== undefined && (hasAllHeadersOverride || allHeadersUniqueInput)) {
     payload.all_headers_unique = Boolean(allHeadersUniqueValue);
   }
+  if (hasDaumIdleWatchOverride) {
+    payload.daum_idle_watch_enabled = daumIdleWatchValue;
+  }
+  if (hasDaumIdleIpOverride) {
+    payload.daum_idle_ip_change_seconds = daumIdleIpValue;
+  }
+  if (hasDaumIdleStopLimitOverride) {
+    payload.daum_idle_stop_limit = daumIdleStopLimitValue;
+  }
   payload.stop_schedule_enabled = toggleChecked && Boolean(sanitizedSchedule);
   payload.stop_schedule_time = sanitizedSchedule || "";
   payload.telegram_bot_token = telegramTokenValue;
@@ -12260,6 +12455,10 @@ async function handleGlobalApply(options = {}) {
         if (field === "substitution_rules") return "치환 변수";
         if (field === "telegram_bot_token") return "텔레그램 봇 토큰";
         if (field === "telegram_chat_id") return "텔레그램 챗 ID";
+        if (field === "daum_idle_watch_enabled") return "Sent 지연 감시";
+        if (field === "daum_idle_ip_change_seconds") return "IP 변경 대기(초)";
+        if (field === "daum_idle_stop_limit") return "연속 IP 변경 한계";
+        if (field === "daum_idle_stop_seconds") return "Sent 감시 누적 시간";
         return field.toUpperCase();
       });
       let message = fieldLabels.length
