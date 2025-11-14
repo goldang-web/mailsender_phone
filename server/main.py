@@ -6097,6 +6097,9 @@ def record_batch_stop_log(device_id: str, domain: str, payload: BatchStopLogCrea
         sent_total = int(payload.sent_total or 0)
         if sent_total < 0:
             sent_total = 0
+        if sent_total == 0:
+            # Sent가 0건이면 발송 기록을 남기지 않는다.
+            return {"result": "skipped", "reason": "sent_total_zero"}
         status_value = sanitize_optional_text(payload.status, length=64) or "unknown"
         stop_reason_value = sanitize_optional_text(payload.stop_reason, length=500)
         session_id_value = sanitize_optional_text(payload.session_id, length=64)
