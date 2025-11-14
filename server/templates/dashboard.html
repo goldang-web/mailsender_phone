@@ -2791,6 +2791,12 @@ button:not(:disabled):hover {
 
 <script>
 const MESSAGE_ID_PATTERN_DEFAULT = "<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${HELO}>";
+const DAUM_IDLE_IP_DEFAULT = 20;
+const DAUM_IDLE_IP_MIN = 5;
+const DAUM_IDLE_IP_MAX = 600;
+const DAUM_IDLE_STOP_LIMIT_DEFAULT = 3;
+const DAUM_IDLE_STOP_LIMIT_MIN = 1;
+const DAUM_IDLE_STOP_LIMIT_MAX = 10;
 const GLOBAL_FIELD_LIST = [
   "active_domain",
   "helo",
@@ -2895,12 +2901,6 @@ const IMAP_DEFAULT_RECHECK_ATTEMPTS = 2;
 const IMAP_RECHECK_MIN = 1;
 const IMAP_RECHECK_MAX = 3;
 const IMAP_DEFAULT_REROLL_ON_RETRY = false;
-const DAUM_IDLE_IP_DEFAULT = 20;
-const DAUM_IDLE_IP_MIN = 5;
-const DAUM_IDLE_IP_MAX = 600;
-const DAUM_IDLE_STOP_LIMIT_DEFAULT = 3;
-const DAUM_IDLE_STOP_LIMIT_MIN = 1;
-const DAUM_IDLE_STOP_LIMIT_MAX = 10;
 
 function createDefaultSubstitutionSnapshot() {
   return {
