@@ -3415,6 +3415,82 @@ def record_job_progress(
     )
 
 
+def seed_initial_daum_idle_progress(
+    conn: sqlite3.Connection,
+    job: Dict[str, Any],
+    config_snapshot: Optional[Dict[str, Any]],
+) -> None:
+    """Add a 0/0 Daum idle summary log so new batches start fresh on the dashboard."""
+
+    if not job or job.get("job_type") != "batch_send":
+        return
+    standardized_domain = normalize_domain(job.get("domain") or "")
+    if standardized_domain != "daum":
+        return
+    if not config_snapshot:
+        return
+    watch_enabled = sanitize_stop_schedule_enabled(
+        config_snapshot.get("daum_idle_watch_enabled")
+    )
+    if not watch_enabled:
+        return
+    job_row = conn.execute(
+        "SELECT * FROM jobs WHERE id=?",
+        (job["id"],),
+    ).fetchone()
+    if not job_row:
+        return
+    daum_ip_seconds = sanitize_daum_idle_seconds(
+        config_snapshot.get("daum_idle_ip_change_seconds"),
+        default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_ip_change_seconds", 20),
+        minimum=DAUM_IDLE_IP_MIN_SECONDS,
+        maximum=DAUM_IDLE_IP_MAX_SECONDS,
+    )
+    daum_stop_limit = resolve_daum_idle_stop_limit(
+        config_snapshot.get("daum_idle_stop_limit"),
+        ip_change_seconds=daum_ip_seconds,
+        legacy_seconds=config_snapshot.get("daum_idle_stop_seconds"),
+    ) or DAUM_IDLE_STOP_LIMIT_DEFAULT
+    daum_stop_seconds = convert_stop_limit_to_seconds(daum_stop_limit, daum_ip_seconds)
+    summary_payload = {
+        "processed": 0,
+        "sent": 0,
+        "sent_sequence": 0,
+        "sent_absolute": 0,
+        "failed": 0,
+        "block": 0,
+        "bcc": 0,
+        "anchor": 0,
+        "nouser": 0,
+        "remaining": 0,
+        "total": 0,
+        "reserved": 0,
+        "daum_idle_watch_enabled": True,
+        "daum_idle_enabled": True,
+        "daum_idle_ip_change_seconds": daum_ip_seconds,
+        "daum_idle_stop_seconds": daum_stop_seconds,
+        "daum_idle_stop_limit": daum_stop_limit,
+        "daum_idle_elapsed_seconds": 0,
+        "daum_idle_ip_change_count": 0,
+        "daum_idle_stop_triggered": False,
+        "daumIdleWatchEnabled": True,
+        "daumIdleEnabled": True,
+        "daumIdleIpChangeSeconds": daum_ip_seconds,
+        "daumIdleStopSeconds": daum_stop_seconds,
+        "daumIdleStopLimit": daum_stop_limit,
+        "daumIdleElapsedSeconds": 0,
+        "daumIdleIpChangeCount": 0,
+        "daumIdleStopTriggered": False,
+    }
+    record_job_progress(
+        conn,
+        job_row,
+        job_row["status"],
+        "Sent 지연 감시 초기화",
+        {"summary": summary_payload},
+    )
+
+
 def handle_job_completion(
     conn: sqlite3.Connection,
     job_row: sqlite3.Row,
@@ -5697,6 +5773,7 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                 "batch_send",
                 job_payload,
             )
+            seed_initial_daum_idle_progress(conn, job, config_snapshot)
             log_missing_substitutions(job, missing_tokens)
             created_jobs.append(job)
         conn.commit()
@@ -5857,6 +5934,7 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             "batch_send",
             job_payload,
         )
+        seed_initial_daum_idle_progress(conn, job, config_snapshot)
         conn.commit()
     log_missing_substitutions(job, missing_tokens)
     return {"job": job}
