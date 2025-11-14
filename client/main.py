@@ -6244,11 +6244,13 @@ class MailClient:
                 message = f"{message} · 다음MAX={daum_max_total}"
             if normalized == "daum" and daum_idle_guard and daum_idle_guard.enabled:
                 message = (
-                    f"{message} · Sent감시 {daum_idle_guard.ip_change_seconds}→{daum_idle_guard.stop_seconds}초"
+                    f"{message} · Sent감시 {daum_idle_guard.ip_change_seconds}초"
+                    f" · 연속 IP 변경 한계 {daum_idle_guard.stop_limit}회"
                 )
                 if daum_idle_guard.ip_change_count > 0:
                     message = (
-                        f"{message} · IP변경 {daum_idle_guard.ip_change_count}회"
+                        f"{message} · 현재 {daum_idle_guard.ip_change_count}/"
+                        f"{daum_idle_guard.stop_limit}회"
                     )
             return message
 
