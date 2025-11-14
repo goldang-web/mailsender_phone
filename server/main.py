@@ -46,8 +46,9 @@ IMAP_RECHECK_ATTEMPTS_MIN = 1
 IMAP_RECHECK_ATTEMPTS_MAX = 3
 DAUM_IDLE_IP_MIN_SECONDS = 5
 DAUM_IDLE_IP_MAX_SECONDS = 600
-DAUM_IDLE_STOP_MIN_SECONDS = 10
-DAUM_IDLE_STOP_MAX_SECONDS = 3600
+DAUM_IDLE_STOP_LIMIT_DEFAULT = 3
+DAUM_IDLE_STOP_MIN_LIMIT = 1
+DAUM_IDLE_STOP_MAX_LIMIT = 10
 
 DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "helo": "",
@@ -106,7 +107,7 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "message_id_pattern": MESSAGE_ID_PATTERN_DEFAULT,
     "daum_idle_watch_enabled": False,
     "daum_idle_ip_change_seconds": 20,
-    "daum_idle_stop_seconds": 120,
+    "daum_idle_stop_limit": DAUM_IDLE_STOP_LIMIT_DEFAULT,
 }
 
 IMAP_DELAY_MIN_SECONDS = 5
@@ -545,6 +546,85 @@ def sanitize_daum_idle_seconds(
     if seconds > maximum:
         return maximum
     return seconds
+
+
+def sanitize_daum_idle_limit(
+    value: Any,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        limit = int(value)
+    except (TypeError, ValueError):
+        limit = default
+    if limit < minimum:
+        return minimum
+    if limit > maximum:
+        return maximum
+    return limit
+
+
+def convert_stop_seconds_to_limit(stop_seconds: Any, ip_change_seconds: int) -> Optional[int]:
+    try:
+        seconds = int(stop_seconds)
+    except (TypeError, ValueError):
+        return None
+    if seconds <= 0 or ip_change_seconds <= 0:
+        return None
+    ratio = (seconds + ip_change_seconds - 1) // ip_change_seconds
+    if ratio < DAUM_IDLE_STOP_MIN_LIMIT:
+        ratio = DAUM_IDLE_STOP_MIN_LIMIT
+    if ratio > DAUM_IDLE_STOP_MAX_LIMIT:
+        ratio = DAUM_IDLE_STOP_MAX_LIMIT
+    return ratio
+
+
+def convert_stop_limit_to_seconds(limit: Any, ip_change_seconds: int) -> int:
+    try:
+        parsed_limit = int(limit)
+    except (TypeError, ValueError):
+        parsed_limit = DAUM_IDLE_STOP_LIMIT_DEFAULT
+    parsed_limit = sanitize_daum_idle_limit(
+        parsed_limit,
+        default=DAUM_IDLE_STOP_LIMIT_DEFAULT,
+        minimum=DAUM_IDLE_STOP_MIN_LIMIT,
+        maximum=DAUM_IDLE_STOP_MAX_LIMIT,
+    )
+    base = ip_change_seconds if ip_change_seconds and ip_change_seconds > 0 else DAUM_IDLE_IP_MIN_SECONDS
+    seconds = parsed_limit * base
+    max_seconds = DAUM_IDLE_IP_MAX_SECONDS * DAUM_IDLE_STOP_MAX_LIMIT
+    if seconds > max_seconds:
+        return max_seconds
+    if seconds < base:
+        return base
+    return seconds
+
+
+def resolve_daum_idle_stop_limit(
+    limit_value: Any,
+    *,
+    ip_change_seconds: int,
+    legacy_seconds: Any = None,
+    default: Optional[int] = None,
+) -> int:
+    effective_default = (
+        default
+        if default is not None
+        else DEFAULT_DOMAIN_CONFIG.get("daum_idle_stop_limit", DAUM_IDLE_STOP_LIMIT_DEFAULT)
+    )
+    candidate = limit_value
+    if candidate is None:
+        legacy_limit = convert_stop_seconds_to_limit(legacy_seconds, ip_change_seconds)
+        if legacy_limit is not None:
+            candidate = legacy_limit
+    return sanitize_daum_idle_limit(
+        candidate,
+        default=effective_default,
+        minimum=DAUM_IDLE_STOP_MIN_LIMIT,
+        maximum=DAUM_IDLE_STOP_MAX_LIMIT,
+    )
 
 
 def sanitize_stop_schedule_enabled(value: Any) -> bool:
@@ -1478,6 +1558,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 daum_idle_watch_enabled INTEGER NOT NULL DEFAULT 0,
                 daum_idle_ip_change_seconds INTEGER NOT NULL DEFAULT 20,
                 daum_idle_stop_seconds INTEGER NOT NULL DEFAULT 120,
+                daum_idle_stop_limit INTEGER NOT NULL DEFAULT {DAUM_IDLE_STOP_LIMIT_DEFAULT},
                 client_db_version INTEGER DEFAULT 0,
                 client_total INTEGER DEFAULT 0,
                 client_pending INTEGER DEFAULT 0,
@@ -1625,6 +1706,7 @@ def _init_db() -> None:
                 daum_idle_watch_enabled INTEGER NOT NULL DEFAULT 0,
                 daum_idle_ip_change_seconds INTEGER NOT NULL DEFAULT 20,
                 daum_idle_stop_seconds INTEGER NOT NULL DEFAULT 120,
+                daum_idle_stop_limit INTEGER NOT NULL DEFAULT 3,
                 client_db_version INTEGER DEFAULT 0,
                 client_total INTEGER DEFAULT 0,
                 client_pending INTEGER DEFAULT 0,
@@ -1779,6 +1861,24 @@ def _init_db() -> None:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN daum_idle_stop_seconds INTEGER NOT NULL DEFAULT 120"
             )
+        if "daum_idle_stop_limit" not in config_columns:
+            conn.execute(
+                f"ALTER TABLE device_configs ADD COLUMN daum_idle_stop_limit INTEGER NOT NULL DEFAULT {DAUM_IDLE_STOP_LIMIT_DEFAULT}"
+            )
+            rows = conn.execute(
+                "SELECT rowid, daum_idle_stop_seconds, daum_idle_ip_change_seconds FROM device_configs"
+            ).fetchall()
+            for row in rows:
+                derived_limit = convert_stop_seconds_to_limit(
+                    row["daum_idle_stop_seconds"], row["daum_idle_ip_change_seconds"] or DAUM_IDLE_IP_MIN_SECONDS
+                )
+                if derived_limit is None:
+                    derived_limit = DAUM_IDLE_STOP_LIMIT_DEFAULT
+                conn.execute(
+                    "UPDATE device_configs SET daum_idle_stop_limit=? WHERE rowid=?",
+                    (derived_limit, row["rowid"]),
+                )
+            config_columns.add("daum_idle_stop_limit")
         if "all_headers_unique" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN all_headers_unique INTEGER NOT NULL DEFAULT 0"
@@ -2349,14 +2449,12 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         minimum=DAUM_IDLE_IP_MIN_SECONDS,
         maximum=DAUM_IDLE_IP_MAX_SECONDS,
     )
-    daum_stop_seconds = sanitize_daum_idle_seconds(
-        row.get("daum_idle_stop_seconds"),
-        default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_stop_seconds", 120),
-        minimum=DAUM_IDLE_STOP_MIN_SECONDS,
-        maximum=DAUM_IDLE_STOP_MAX_SECONDS,
+    daum_stop_limit = resolve_daum_idle_stop_limit(
+        row.get("daum_idle_stop_limit"),
+        ip_change_seconds=daum_ip_change_seconds,
+        legacy_seconds=row.get("daum_idle_stop_seconds"),
     )
-    if daum_stop_seconds < daum_ip_change_seconds:
-        daum_stop_seconds = daum_ip_change_seconds
+    daum_stop_seconds = convert_stop_limit_to_seconds(daum_stop_limit, daum_ip_change_seconds)
     if include_secret:
         imap_password = password_raw
     else:
@@ -2378,6 +2476,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "rcpt_to": row.get("rcpt_to", ""),
         "daum_idle_watch_enabled": daum_watch_enabled,
         "daum_idle_ip_change_seconds": daum_ip_change_seconds,
+        "daum_idle_stop_limit": daum_stop_limit,
         "daum_idle_stop_seconds": daum_stop_seconds,
         "stop_schedule_enabled": schedule_enabled,
         "stop_schedule_time": schedule_time,
@@ -3522,7 +3621,8 @@ class DeviceConfigPayload(BaseModel):
     rcpt_to: Optional[str] = ""
     daum_idle_watch_enabled: Optional[bool] = False
     daum_idle_ip_change_seconds: Optional[int] = 20
-    daum_idle_stop_seconds: Optional[int] = 120
+    daum_idle_stop_limit: Optional[int] = DAUM_IDLE_STOP_LIMIT_DEFAULT
+    daum_idle_stop_seconds: Optional[int] = None
 
 
 class UpdateConfigRequest(DeviceConfigPayload):
@@ -4688,19 +4788,24 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
             minimum=DAUM_IDLE_IP_MIN_SECONDS,
             maximum=DAUM_IDLE_IP_MAX_SECONDS,
         )
-        raw_daum_stop = (
+        raw_daum_stop_limit = (
+            payload.daum_idle_stop_limit
+            if payload.daum_idle_stop_limit is not None
+            else config_data.get("daum_idle_stop_limit")
+        )
+        legacy_stop_source = (
             payload.daum_idle_stop_seconds
             if payload.daum_idle_stop_seconds is not None
             else config_data.get("daum_idle_stop_seconds")
         )
-        sanitized_daum_stop = sanitize_daum_idle_seconds(
-            raw_daum_stop,
-            default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_stop_seconds", 120),
-            minimum=DAUM_IDLE_STOP_MIN_SECONDS,
-            maximum=DAUM_IDLE_STOP_MAX_SECONDS,
+        sanitized_daum_stop_limit = resolve_daum_idle_stop_limit(
+            raw_daum_stop_limit,
+            ip_change_seconds=sanitized_daum_ip_change,
+            legacy_seconds=legacy_stop_source,
         )
-        if sanitized_daum_stop < sanitized_daum_ip_change:
-            sanitized_daum_stop = sanitized_daum_ip_change
+        sanitized_daum_stop_seconds = convert_stop_limit_to_seconds(
+            sanitized_daum_stop_limit, sanitized_daum_ip_change
+        )
         lock_mode = sanitize_substitution_lock_mode(config_data.get("substitution_lock_mode"))
         if payload.all_headers_unique is None:
             existing_flag = config_data.get("all_headers_unique", DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
@@ -4723,7 +4828,7 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
             """
             UPDATE device_configs
             SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, all_headers_unique=?, message_id_auto=?, message_id_pattern=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
-                daum_idle_watch_enabled=?, daum_idle_ip_change_seconds=?, daum_idle_stop_seconds=?,
+                daum_idle_watch_enabled=?, daum_idle_ip_change_seconds=?, daum_idle_stop_seconds=?, daum_idle_stop_limit=?,
                 updated_at=?
             WHERE device_id=? AND domain=?
             """,
@@ -4743,7 +4848,8 @@ def update_device_config(device_id: str, domain: str, payload: UpdateConfigReque
                 payload.rcpt_to or "",
                 1 if daum_watch_enabled else 0,
                 sanitized_daum_ip_change,
-                sanitized_daum_stop,
+                sanitized_daum_stop_seconds,
+                sanitized_daum_stop_limit,
                 now,
                 device_id,
                 normalized,
@@ -5316,14 +5422,12 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
         minimum=DAUM_IDLE_IP_MIN_SECONDS,
         maximum=DAUM_IDLE_IP_MAX_SECONDS,
     )
-    daum_stop_seconds = sanitize_daum_idle_seconds(
-        base.get("daum_idle_stop_seconds"),
-        default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_stop_seconds", 120),
-        minimum=DAUM_IDLE_STOP_MIN_SECONDS,
-        maximum=DAUM_IDLE_STOP_MAX_SECONDS,
+    daum_stop_limit = resolve_daum_idle_stop_limit(
+        base.get("daum_idle_stop_limit"),
+        ip_change_seconds=daum_ip_change_seconds,
+        legacy_seconds=base.get("daum_idle_stop_seconds"),
     )
-    if daum_stop_seconds < daum_ip_change_seconds:
-        daum_stop_seconds = daum_ip_change_seconds
+    daum_stop_seconds = convert_stop_limit_to_seconds(daum_stop_limit, daum_ip_change_seconds)
     return {
         "helo": base.get("helo", ""),
         "smtp_host": base.get("smtp_host", ""),
@@ -5340,6 +5444,7 @@ def build_config_snapshot(configs: Dict[str, Dict[str, Any]], domain: str) -> Di
         "rcpt_to": base.get("rcpt_to", ""),
         "daum_idle_watch_enabled": daum_watch_enabled,
         "daum_idle_ip_change_seconds": daum_ip_change_seconds,
+        "daum_idle_stop_limit": daum_stop_limit,
         "daum_idle_stop_seconds": daum_stop_seconds,
     }
 

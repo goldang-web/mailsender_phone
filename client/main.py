@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.108"
+APP_VERSION = "0.0.109"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -63,9 +63,9 @@ TELEGRAM_SUPPRESSION_WINDOW_SECONDS = 90.0
 DAUM_IDLE_IP_DEFAULT_SECONDS = 20
 DAUM_IDLE_IP_MIN_SECONDS = 5
 DAUM_IDLE_IP_MAX_SECONDS = 600
-DAUM_IDLE_STOP_DEFAULT_SECONDS = 120
-DAUM_IDLE_STOP_MIN_SECONDS = 10
-DAUM_IDLE_STOP_MAX_SECONDS = 3600
+DAUM_IDLE_STOP_LIMIT_DEFAULT = 3
+DAUM_IDLE_STOP_LIMIT_MIN = 1
+DAUM_IDLE_STOP_LIMIT_MAX = 10
 
 THROTTLE_MARKER_MESSAGES = {
     "550 5.7.2": "네이버 '550 5.7.2' 응답 감지",
@@ -802,6 +802,49 @@ def sanitize_daum_idle_seconds(
     return seconds
 
 
+def derive_daum_idle_stop_limit(stop_seconds: Optional[object], ip_seconds: int) -> Optional[int]:
+    try:
+        seconds = int(stop_seconds) if stop_seconds is not None else None
+    except (TypeError, ValueError):
+        seconds = None
+    if seconds is None or seconds <= 0 or ip_seconds <= 0:
+        return None
+    ratio = math.ceil(seconds / ip_seconds)
+    if ratio < DAUM_IDLE_STOP_LIMIT_MIN:
+        ratio = DAUM_IDLE_STOP_LIMIT_MIN
+    if ratio > DAUM_IDLE_STOP_LIMIT_MAX:
+        ratio = DAUM_IDLE_STOP_LIMIT_MAX
+    return ratio
+
+
+def sanitize_daum_idle_stop_limit(
+    value: Optional[object],
+    *,
+    ip_seconds: int,
+    default: Optional[int] = None,
+    legacy_seconds: Optional[object] = None,
+) -> int:
+    effective_default = (
+        int(default)
+        if default is not None
+        else DAUM_IDLE_STOP_LIMIT_DEFAULT
+    )
+    candidate = value
+    if candidate is None:
+        derived = derive_daum_idle_stop_limit(legacy_seconds, ip_seconds)
+        if derived is not None:
+            candidate = derived
+    try:
+        limit = int(candidate) if candidate is not None else effective_default
+    except (TypeError, ValueError):
+        limit = effective_default
+    if limit < DAUM_IDLE_STOP_LIMIT_MIN:
+        return DAUM_IDLE_STOP_LIMIT_MIN
+    if limit > DAUM_IDLE_STOP_LIMIT_MAX:
+        return DAUM_IDLE_STOP_LIMIT_MAX
+    return limit
+
+
 def sanitize_imap_recheck_attempts(
     value: Optional[object],
     *,
@@ -925,6 +968,7 @@ class ImapGuardOutcome:
 class DaumIdleGuardState:
     enabled: bool
     ip_change_seconds: int
+    stop_limit: int
     stop_seconds: int
     last_success_monotonic: float
     last_success_wall: float
@@ -940,6 +984,7 @@ class DaumIdleGuardState:
         self.last_success_monotonic = time.monotonic()
         self.last_success_wall = time.time()
         self.last_trigger_level = 0
+        self.ip_change_count = 0
         self.stop_triggered = False
         self.last_ip_change_message = None
 
@@ -1149,6 +1194,20 @@ class MailClient:
                 self.sent_sequences[key] = 0
         for domain in DOMAINS:
             self.sent_sequences.setdefault(domain, 0)
+        raw_idle_state = config.get("daum_idle_state")
+        if not isinstance(raw_idle_state, dict):
+            raw_idle_state = {}
+        self._daum_idle_state: Dict[str, Dict[str, int]] = {}
+        for domain in DOMAINS:
+            entry = raw_idle_state.get(domain) or {}
+            try:
+                count = max(0, int(entry.get("ip_change_count", 0)))
+            except (TypeError, ValueError):
+                count = 0
+            self._daum_idle_state[domain] = {"ip_change_count": count}
+        self.config["daum_idle_state"] = {
+            domain: state.copy() for domain, state in self._daum_idle_state.items()
+        }
         self.daum_throttle_counts: Dict[str, int] = {domain: 0 for domain in DOMAINS}
         self._sent_log_bases: Dict[str, int] = {}
         for domain in DOMAINS:
@@ -1520,12 +1579,14 @@ class MailClient:
         snapshot["domain_cycles"] = self.domain_cycles
         snapshot["stop_schedule"] = self._serialize_stop_schedule()
         snapshot["sent_sequences"] = self.sent_sequences
+        snapshot["daum_idle_state"] = self._serialize_daum_idle_state()
         snapshot["imap_settings"] = self._serialize_imap_settings()
         snapshot["telnet_debug_mode"] = self.telnet_debug_mode
         snapshot["telegram_bot_token"] = self.telegram_bot_token
         snapshot["telegram_chat_id"] = self.telegram_chat_id
         save_config(snapshot)
         self.config["sent_sequences"] = self.sent_sequences
+        self.config["daum_idle_state"] = snapshot["daum_idle_state"]
         self.config["imap_settings"] = snapshot["imap_settings"]
         self.config["telegram_bot_token"] = self.telegram_bot_token
         self.config["telegram_chat_id"] = self.telegram_chat_id
@@ -1546,6 +1607,27 @@ class MailClient:
                 "server_last_run": state.get("server_last_run"),
             }
         return serialized
+
+    def _serialize_daum_idle_state(self) -> Dict[str, Dict[str, int]]:
+        serialized: Dict[str, Dict[str, int]] = {}
+        for domain in DOMAINS:
+            serialized[domain] = {"ip_change_count": self._current_daum_idle_count(domain)}
+        return serialized
+
+    def _current_daum_idle_count(self, domain: str) -> int:
+        state = self._daum_idle_state.get(domain) or {}
+        try:
+            return max(0, int(state.get("ip_change_count") or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def _set_daum_idle_count(self, domain: str, count: int) -> None:
+        normalized = domain.lower()
+        state = self._daum_idle_state.setdefault(normalized, {})
+        safe_count = max(0, int(count))
+        state["ip_change_count"] = safe_count
+        cfg_state = self.config.setdefault("daum_idle_state", {})
+        cfg_state[normalized] = {"ip_change_count": safe_count}
 
     def _serialize_imap_settings(self) -> Dict[str, Dict[str, object]]:
         serialized: Dict[str, Dict[str, object]] = {}
@@ -6095,7 +6177,7 @@ class MailClient:
         last_poll_at = time.monotonic()
         domain_totals: Dict[str, int] = {status: 0 for status in EMAIL_STATUSES}
         daum_idle_guard: Optional[DaumIdleGuardState] = (
-            self._create_daum_idle_guard_state(config)
+            self._create_daum_idle_guard_state(normalized, config)
             if normalized == "daum"
             else None
         )
@@ -6373,7 +6455,12 @@ class MailClient:
                         pass
                     daum_idle_guard.last_trigger_level = next_level
                     if ip_success:
-                        daum_idle_guard.mark_ip_change()
+                        limit_hit = register_idle_ip_change(
+                            "다음 Sent 감시",
+                            "Sent 지연 감시 연속 IP 변경 한계",
+                        )
+                        if limit_hit:
+                            return
                         resume_message = f"다음 Sent 감시 · {combined_message}"
                         fatal_error = resume_message
                         stop_reason = resume_message
@@ -6400,20 +6487,6 @@ class MailClient:
                         )
                         release_pending_queue("Sent 지연 감시 IP 변경 실패")
                         return
-            if (
-                not daum_idle_guard.stop_triggered
-                and elapsed_seconds >= daum_idle_guard.stop_seconds
-            ):
-                daum_idle_guard.stop_triggered = True
-                fatal_error = f"다음 Sent 감시 · 누적 {elapsed_seconds}초 대기로 발송 중단"
-                stop_reason = fatal_error
-                stop_requested = True
-                emit_batch_halt_marker(
-                    "DAUM_IDLE_STOP",
-                    fatal_error,
-                    severity="warning",
-                )
-                release_pending_queue("Sent 지연 감시 중지")
 
         def check_schedule_trigger() -> None:
             nonlocal stop_requested, cancel_requested, stop_reason
@@ -6460,6 +6533,31 @@ class MailClient:
                             allow_repeat=True,
                         )
                     return released
+
+                def register_idle_ip_change(context_label: str, release_reason: str) -> bool:
+                    nonlocal fatal_error, stop_reason, stop_requested
+                    if not daum_idle_guard or not daum_idle_guard.enabled:
+                        return False
+                    daum_idle_guard.mark_ip_change()
+                    self._set_daum_idle_count(normalized, daum_idle_guard.ip_change_count)
+                    if daum_idle_guard.ip_change_count >= daum_idle_guard.stop_limit:
+                        limit_message = (
+                            f"{context_label} · 연속 IP 변경 {daum_idle_guard.ip_change_count}회 한계 도달"
+                            if context_label
+                            else f"연속 IP 변경 {daum_idle_guard.ip_change_count}회 한계 도달"
+                        )
+                        daum_idle_guard.stop_triggered = True
+                        fatal_error = limit_message
+                        stop_reason = limit_message
+                        stop_requested = True
+                        emit_batch_halt_marker(
+                            "DAUM_IDLE_STOP",
+                            limit_message,
+                            severity="warning",
+                        )
+                        release_pending_queue(release_reason)
+                        return True
+                    return False
 
                 def handle_user_cancel_request() -> bool:
                     nonlocal stop_requested, cancel_requested, stop_reason
@@ -7480,6 +7578,7 @@ class MailClient:
                         last_error = failure_detail
                     if daum_idle_guard and daum_idle_guard.enabled and session_success:
                         daum_idle_guard.record_success()
+                        self._set_daum_idle_count(normalized, 0)
 
                     mail_from_current = outcome.mail_from or mail_from_value
                     header_from_current = header_from_value
@@ -7610,8 +7709,12 @@ class MailClient:
                         except Exception:
                             pass
                         print(f"[배치 발송] {domain_label} · {ip_message}")
+                        limit_hit = False
                         if ip_success and daum_idle_guard and daum_idle_guard.enabled:
-                            daum_idle_guard.mark_ip_change()
+                            limit_hit = register_idle_ip_change(
+                                "SMTP 제한 대응",
+                                "Sent 지연 감시 연속 IP 변경 한계",
+                            )
                         if not ip_success:
                             fatal_error = f"{throttle_notice} · {ip_message}"
                             stop_reason = fatal_error
@@ -7623,6 +7726,8 @@ class MailClient:
                             )
                             release_pending_queue("SMTP 제한 응답 감지")
                         else:
+                            if limit_hit:
+                                return
                             throttle_resume_message = f"{throttle_notice} · IP 변경 완료, 재시작 필요"
                             fatal_error = throttle_resume_message
                             stop_reason = throttle_resume_message
@@ -8625,7 +8730,7 @@ class MailClient:
         line += f" | ip={ip_value}"
         return line
 
-    def _create_daum_idle_guard_state(self, config: Dict[str, Any]) -> Optional[DaumIdleGuardState]:
+    def _create_daum_idle_guard_state(self, domain: str, config: Dict[str, Any]) -> Optional[DaumIdleGuardState]:
         enabled = _normalize_bool_flag(config.get("daum_idle_watch_enabled"), default=False)
         ip_seconds = sanitize_daum_idle_seconds(
             config.get("daum_idle_ip_change_seconds"),
@@ -8633,23 +8738,25 @@ class MailClient:
             minimum=DAUM_IDLE_IP_MIN_SECONDS,
             maximum=DAUM_IDLE_IP_MAX_SECONDS,
         )
-        stop_seconds = sanitize_daum_idle_seconds(
-            config.get("daum_idle_stop_seconds"),
-            default=DAUM_IDLE_STOP_DEFAULT_SECONDS,
-            minimum=DAUM_IDLE_STOP_MIN_SECONDS,
-            maximum=DAUM_IDLE_STOP_MAX_SECONDS,
+        stop_limit = sanitize_daum_idle_stop_limit(
+            config.get("daum_idle_stop_limit"),
+            ip_seconds=ip_seconds,
+            legacy_seconds=config.get("daum_idle_stop_seconds"),
         )
-        if stop_seconds < ip_seconds:
-            stop_seconds = ip_seconds
-        if not enabled or ip_seconds <= 0 or stop_seconds <= 0:
+        if not enabled or ip_seconds <= 0 or stop_limit <= 0:
+            self._set_daum_idle_count(domain, 0)
             return None
+        stop_seconds = max(ip_seconds, stop_limit * ip_seconds)
         now_monotonic = time.monotonic()
+        stored_count = self._current_daum_idle_count(domain)
         return DaumIdleGuardState(
             enabled=True,
             ip_change_seconds=ip_seconds,
+            stop_limit=stop_limit,
             stop_seconds=stop_seconds,
             last_success_monotonic=now_monotonic,
             last_success_wall=time.time(),
+            ip_change_count=stored_count,
         )
 
     def _daum_idle_summary_payload(self, guard: Optional[DaumIdleGuardState]) -> Dict[str, object]:
@@ -8658,6 +8765,7 @@ class MailClient:
                 "daum_idle_enabled": False,
                 "daum_idle_ip_change_seconds": 0,
                 "daum_idle_stop_seconds": 0,
+                "daum_idle_stop_limit": 0,
                 "daum_idle_elapsed_seconds": 0,
                 "daum_idle_ip_change_count": 0,
                 "daum_idle_stop_triggered": False,
@@ -8671,6 +8779,7 @@ class MailClient:
             "daum_idle_enabled": True,
             "daum_idle_ip_change_seconds": guard.ip_change_seconds,
             "daum_idle_stop_seconds": guard.stop_seconds,
+            "daum_idle_stop_limit": guard.stop_limit,
             "daum_idle_elapsed_seconds": guard.elapsed_seconds(),
             "daum_idle_ip_change_count": guard.ip_change_count,
             "daum_idle_stop_triggered": guard.stop_triggered,

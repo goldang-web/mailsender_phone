@@ -206,13 +206,14 @@ class DispatchLoggingTests(unittest.TestCase):
         self.assertIn("| ip=198.51.100.10", line)
 
     def test_create_daum_idle_guard_state_requires_enable(self) -> None:
-        guard = self.client._create_daum_idle_guard_state({})
+        guard = self.client._create_daum_idle_guard_state("daum", {})
         self.assertIsNone(guard)
-        guard = self.client._create_daum_idle_guard_state({"daum_idle_watch_enabled": False})
+        guard = self.client._create_daum_idle_guard_state("daum", {"daum_idle_watch_enabled": False})
         self.assertIsNone(guard)
 
     def test_create_daum_idle_guard_state_clamps_bounds(self) -> None:
         guard = self.client._create_daum_idle_guard_state(
+            "daum",
             {
                 "daum_idle_watch_enabled": True,
                 "daum_idle_ip_change_seconds": 1,
@@ -222,12 +223,14 @@ class DispatchLoggingTests(unittest.TestCase):
         self.assertIsNotNone(guard)
         assert guard is not None
         self.assertEqual(guard.ip_change_seconds, client_main.DAUM_IDLE_IP_MIN_SECONDS)
-        self.assertEqual(guard.stop_seconds, client_main.DAUM_IDLE_STOP_MIN_SECONDS)
+        self.assertEqual(guard.stop_limit, client_main.DAUM_IDLE_STOP_LIMIT_MIN)
+        self.assertEqual(guard.stop_seconds, guard.stop_limit * guard.ip_change_seconds)
 
     def test_daum_idle_summary_payload_enabled(self) -> None:
         guard = client_main.DaumIdleGuardState(
             enabled=True,
             ip_change_seconds=30,
+            stop_limit=4,
             stop_seconds=120,
             last_success_monotonic=time.monotonic(),
             last_success_wall=time.time(),
@@ -238,6 +241,7 @@ class DispatchLoggingTests(unittest.TestCase):
         self.assertTrue(payload["daum_idle_enabled"])
         self.assertEqual(payload["daum_idle_ip_change_seconds"], 30)
         self.assertEqual(payload["daum_idle_ip_change_count"], 2)
+        self.assertEqual(payload["daum_idle_stop_limit"], 4)
         self.assertTrue(payload["daum_idle_stop_triggered"])
         self.assertIsInstance(payload["daum_idle_last_sent_at"], str)
 
@@ -245,6 +249,7 @@ class DispatchLoggingTests(unittest.TestCase):
         payload = self.client._daum_idle_summary_payload(None)
         self.assertFalse(payload["daum_idle_enabled"])
         self.assertEqual(payload["daum_idle_ip_change_seconds"], 0)
+        self.assertEqual(payload["daum_idle_stop_limit"], 0)
 
     def test_daum_throttle_counter_helpers(self) -> None:
         self.client._reset_daum_throttle_counter("daum")

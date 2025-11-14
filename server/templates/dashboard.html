@@ -2892,9 +2892,9 @@ const IMAP_DEFAULT_REROLL_ON_RETRY = false;
 const DAUM_IDLE_IP_DEFAULT = 20;
 const DAUM_IDLE_IP_MIN = 5;
 const DAUM_IDLE_IP_MAX = 600;
-const DAUM_IDLE_STOP_DEFAULT = 120;
-const DAUM_IDLE_STOP_MIN = 10;
-const DAUM_IDLE_STOP_MAX = 3600;
+const DAUM_IDLE_STOP_LIMIT_DEFAULT = 3;
+const DAUM_IDLE_STOP_LIMIT_MIN = 1;
+const DAUM_IDLE_STOP_LIMIT_MAX = 10;
 
 function createDefaultSubstitutionSnapshot() {
   return {
@@ -3260,7 +3260,7 @@ const CONFIG_FIELDS = [
   "anchor_email",
   "rcpt_to",
   "daum_idle_ip_change_seconds",
-  "daum_idle_stop_seconds",
+  "daum_idle_stop_limit",
 ];
 const CONFIG_TOGGLE_FIELDS = ["message_id_auto", "all_headers_unique", "daum_idle_watch_enabled"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
@@ -3746,21 +3746,42 @@ function sanitizeDaumIdleIpSeconds(value) {
   return String(clamped);
 }
 
-function sanitizeDaumIdleStopSeconds(value, ipSecondsValue = DAUM_IDLE_IP_DEFAULT) {
+function deriveDaumIdleStopLimit(stopSeconds, ipSecondsValue = DAUM_IDLE_IP_DEFAULT) {
   const ipSeconds = clampNumber(
     ipSecondsValue ?? DAUM_IDLE_IP_DEFAULT,
     DAUM_IDLE_IP_MIN,
     DAUM_IDLE_IP_MAX,
     DAUM_IDLE_IP_DEFAULT,
   );
-  const fallback = Math.max(ipSeconds, DAUM_IDLE_STOP_DEFAULT);
-  const clamped = clampNumber(
-    value ?? fallback,
-    DAUM_IDLE_STOP_MIN,
-    DAUM_IDLE_STOP_MAX,
-    fallback,
+  const seconds = Number(stopSeconds);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    return null;
+  }
+  const estimate = Math.ceil(seconds / ipSeconds);
+  return clampNumber(
+    estimate,
+    DAUM_IDLE_STOP_LIMIT_MIN,
+    DAUM_IDLE_STOP_LIMIT_MAX,
+    DAUM_IDLE_STOP_LIMIT_DEFAULT,
   );
-  return String(Math.max(clamped, ipSeconds));
+}
+
+function sanitizeDaumIdleStopLimit(value, legacySeconds = null, ipSecondsValue = DAUM_IDLE_IP_DEFAULT) {
+  let candidate = value;
+  if (candidate === undefined || candidate === null || candidate === "") {
+    const derived = deriveDaumIdleStopLimit(legacySeconds, ipSecondsValue);
+    if (derived !== null) {
+      candidate = derived;
+    }
+  }
+  return String(
+    clampNumber(
+      candidate ?? DAUM_IDLE_STOP_LIMIT_DEFAULT,
+      DAUM_IDLE_STOP_LIMIT_MIN,
+      DAUM_IDLE_STOP_LIMIT_MAX,
+      DAUM_IDLE_STOP_LIMIT_DEFAULT,
+    ),
+  );
 }
 
 function applyCardColumns(value) {
@@ -3785,8 +3806,9 @@ function initialFieldValues(config) {
   const daumIpValue = sanitizeDaumIdleIpSeconds(
     config?.daum_idle_ip_change_seconds ?? DAUM_IDLE_IP_DEFAULT,
   );
-  const daumStopValue = sanitizeDaumIdleStopSeconds(
-    config?.daum_idle_stop_seconds ?? DAUM_IDLE_STOP_DEFAULT,
+  const daumStopLimitValue = sanitizeDaumIdleStopLimit(
+    config?.daum_idle_stop_limit,
+    config?.daum_idle_stop_seconds,
     Number(daumIpValue),
   );
   return {
@@ -3804,7 +3826,7 @@ function initialFieldValues(config) {
     rcpt_to: config?.rcpt_to || "",
     daum_idle_watch_enabled: Boolean(config?.daum_idle_watch_enabled),
     daum_idle_ip_change_seconds: daumIpValue,
-    daum_idle_stop_seconds: daumStopValue,
+    daum_idle_stop_limit: daumStopLimitValue,
   };
 }
 
@@ -3866,9 +3888,10 @@ function collectConfigPayload(card, currentDevice, domain) {
     daumIdleIpInput.value = daumIdleIpValue;
   }
 
-  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_seconds"]');
-  let daumIdleStopValue = sanitizeDaumIdleStopSeconds(
-    daumIdleStopInput?.value ?? String(DAUM_IDLE_STOP_DEFAULT),
+  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_limit"]');
+  let daumIdleStopValue = sanitizeDaumIdleStopLimit(
+    daumIdleStopInput?.value,
+    null,
     Number(daumIdleIpValue),
   );
   if (daumIdleStopInput && daumIdleStopInput.value !== daumIdleStopValue) {
@@ -3902,7 +3925,7 @@ function collectConfigPayload(card, currentDevice, domain) {
       rcpt_to: card.querySelector('[data-field="rcpt_to"]').value.trim(),
       daum_idle_watch_enabled: daumIdleEnabled,
       daum_idle_ip_change_seconds: Number(daumIdleIpValue),
-      daum_idle_stop_seconds: Number(daumIdleStopValue),
+      daum_idle_stop_limit: Number(daumIdleStopValue),
     },
   };
 }
@@ -8063,7 +8086,8 @@ function bestConfig(device, domain) {
     rcpt_to: "",
     daum_idle_watch_enabled: false,
     daum_idle_ip_change_seconds: DAUM_IDLE_IP_DEFAULT,
-    daum_idle_stop_seconds: DAUM_IDLE_STOP_DEFAULT,
+    daum_idle_stop_limit: DAUM_IDLE_STOP_LIMIT_DEFAULT,
+    daum_idle_stop_seconds: DAUM_IDLE_IP_DEFAULT * DAUM_IDLE_STOP_LIMIT_DEFAULT,
     client_total: 0,
     client_pending: 0,
     client_sent: 0,
@@ -8456,9 +8480,21 @@ function updateSuccessTrackerFromDevice(device, domain) {
     const idleStopSeconds = parseSummaryNumber(
       summary.daum_idle_stop_seconds ?? summary.daumIdleStopSeconds ?? null,
     );
+    let idleStopLimit = parseSummaryNumber(
+      summary.daum_idle_stop_limit ?? summary.daumIdleStopLimit ?? null,
+    );
     const idleStopTriggered = Boolean(
       summary.daum_idle_stop_triggered ?? summary.daumIdleStopTriggered,
     );
+    if (!idleStopLimit) {
+      const derivedLimit = deriveDaumIdleStopLimit(
+        idleStopSeconds,
+        idleIpThreshold || DAUM_IDLE_IP_DEFAULT,
+      );
+      if (derivedLimit !== null) {
+        idleStopLimit = derivedLimit;
+      }
+    }
     if (idleEnabledRaw || idleElapsed || idleIpChanges || idleStopTriggered) {
       summaryDaumIdle = {
         enabled: Boolean(idleEnabledRaw),
@@ -8466,6 +8502,7 @@ function updateSuccessTrackerFromDevice(device, domain) {
         ipChanges: idleIpChanges,
         ipThreshold: idleIpThreshold,
         stopSeconds: idleStopSeconds,
+        stopLimit: idleStopLimit || DAUM_IDLE_STOP_LIMIT_DEFAULT,
         stopTriggered: idleStopTriggered,
       };
     }
@@ -8603,22 +8640,16 @@ function updateSuccessCounter(card, device) {
       const daumIdleInfo = summaryDaumIdle || tracker.daumIdle || null;
       if (daumIdleInfo?.enabled) {
         const idleSegments = [];
-        if (daumIdleInfo.elapsed > 0) {
-          idleSegments.push(`Sent대기 ${formatCount(daumIdleInfo.elapsed)}초`);
-        }
-        if (daumIdleInfo.ipChanges > 0) {
-          idleSegments.push(`IP변경 ${formatCount(daumIdleInfo.ipChanges)}회`);
-        }
-        if (daumIdleInfo.ipThreshold > 0 && daumIdleInfo.stopSeconds > 0) {
-          idleSegments.push(
-            `${formatCount(daumIdleInfo.ipThreshold)}→${formatCount(daumIdleInfo.stopSeconds)}초`,
-          );
-        }
-        if (!idleSegments.length) {
-          const baseWindow = daumIdleInfo.ipThreshold || DAUM_IDLE_IP_DEFAULT;
-          const baseStop = daumIdleInfo.stopSeconds || DAUM_IDLE_STOP_DEFAULT;
-          idleSegments.push(`Sent감시 ${formatCount(baseWindow)}→${formatCount(baseStop)}초`);
-        }
+        const waitThreshold = daumIdleInfo.ipThreshold || DAUM_IDLE_IP_DEFAULT;
+        const waitElapsed = Math.max(0, daumIdleInfo.elapsed || 0);
+        idleSegments.push(
+          `Sent대기 ${formatCount(waitElapsed)}초/${formatCount(waitThreshold)}초`,
+        );
+        const limitConfigured = daumIdleInfo.stopLimit || DAUM_IDLE_STOP_LIMIT_DEFAULT;
+        const limitProgress = Math.max(0, daumIdleInfo.ipChanges || 0);
+        idleSegments.push(
+          `IP변경 ${formatCount(limitProgress)}회/${formatCount(limitConfigured)}회`,
+        );
         if (daumIdleInfo.stopTriggered) {
           idleSegments.push("중지 임박");
         }
@@ -9096,8 +9127,8 @@ function populateConfigForm(card, device, domain) {
   if (daumIdleToggle) daumIdleToggle.checked = Boolean(cache.values.daum_idle_watch_enabled);
   const daumIdleIpInput = card.querySelector('[data-field="daum_idle_ip_change_seconds"]');
   if (daumIdleIpInput && document.activeElement !== daumIdleIpInput) daumIdleIpInput.value = cache.values.daum_idle_ip_change_seconds;
-  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_seconds"]');
-  if (daumIdleStopInput && document.activeElement !== daumIdleStopInput) daumIdleStopInput.value = cache.values.daum_idle_stop_seconds;
+  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_limit"]');
+  if (daumIdleStopInput && document.activeElement !== daumIdleStopInput) daumIdleStopInput.value = cache.values.daum_idle_stop_limit;
   toggleDomainSpecificFields(card, activeDomain);
   updateCardLockUI(card, config, activeDomain);
   updateDeviceSchedule(card, device, activeDomain, config);
@@ -9402,29 +9433,21 @@ function attachCardEvents(card) {
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
       markFieldDirty(currentDevice.id, domain, "daum_idle_ip_change_seconds", sanitized);
-      const stopInput = card.querySelector('[data-field="daum_idle_stop_seconds"]');
-      if (stopInput) {
-        const adjusted = sanitizeDaumIdleStopSeconds(stopInput.value, Number(sanitized));
-        if (stopInput.value !== adjusted) {
-          stopInput.value = adjusted;
-          markFieldDirty(currentDevice.id, domain, "daum_idle_stop_seconds", adjusted);
-        }
-      }
     });
   }
 
-  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_seconds"]');
+  const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_limit"]');
   if (daumIdleStopInput) {
     daumIdleStopInput.addEventListener("blur", () => {
       const ipValueRaw = card.querySelector('[data-field="daum_idle_ip_change_seconds"]')?.value;
       const ipValue = Number(ipValueRaw || DAUM_IDLE_IP_DEFAULT);
-      const sanitized = sanitizeDaumIdleStopSeconds(daumIdleStopInput.value, ipValue);
+      const sanitized = sanitizeDaumIdleStopLimit(daumIdleStopInput.value, null, ipValue);
       if (daumIdleStopInput.value !== sanitized) {
         daumIdleStopInput.value = sanitized;
       }
       const currentDevice = getDevice();
       const domain = getActiveDomain(card, currentDevice.active_domain);
-      markFieldDirty(currentDevice.id, domain, "daum_idle_stop_seconds", sanitized);
+      markFieldDirty(currentDevice.id, domain, "daum_idle_stop_limit", sanitized);
     });
   }
 
@@ -10131,12 +10154,12 @@ function buildDeviceCard(device) {
           <input type="number" class="input-compact" data-field="daum_idle_ip_change_seconds" min="5" max="600" step="5" placeholder="20">
         </label>
         <label class="field compact">
-          <span>누적 정지 한계(초)</span>
-          <input type="number" class="input-compact" data-field="daum_idle_stop_seconds" min="10" max="3600" step="10" placeholder="120">
+          <span>연속 IP 변경 한계(회)</span>
+          <input type="number" class="input-compact" data-field="daum_idle_stop_limit" min="1" max="10" step="1" placeholder="3">
         </label>
       </div>
       <p class="field-hint" data-domain-only="daum">
-        Sent가 지정 시간 동안 기록되지 않으면 자동으로 IP를 변경하고, 누적 대기가 한계에 도달하면 발송을 중단합니다.
+        Sent가 지정 시간 동안 기록되지 않으면 자동으로 IP를 변경하고, 연속 변경 횟수가 한계를 넘으면 발송을 중단합니다.
       </p>
       <div class="action-bar">
         <label class="field rcpt-field">
