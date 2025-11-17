@@ -7728,21 +7728,43 @@ class MailClient:
                             )
                             release_pending_queue("SMTP 제한 응답 감지")
                         else:
-                            if limit_hit:
-                                return
-                            throttle_resume_message = f"{throttle_notice} · IP 변경 완료, 재시작 필요"
-                            fatal_error = throttle_resume_message
-                            stop_reason = throttle_resume_message
-                            restart_required = True
-                            restart_reason = throttle_resume_message
-                            stop_requested = True
-                            emit_batch_halt_marker(
-                                "SMTP_THROTTLE",
-                                throttle_resume_message,
-                                severity="warning",
-                                allow_repeat=True,
-                            )
-                            release_pending_queue("SMTP 제한 응답 감지")
+                            if normalized == "naver":
+                                resume_message = f"{throttle_notice} · IP 변경 완료, 발송 계속"
+                                print(f"[배치 발송] {domain_label} · {resume_message}")
+                                try:
+                                    self.send_job_report(
+                                        JobResult(
+                                            job_id=job_id,
+                                            status="running",
+                                            message=resume_message,
+                                            result={
+                                                "logs": [
+                                                    {
+                                                        "log": resume_message,
+                                                        "delivery_status": "info",
+                                                    }
+                                                ]
+                                            },
+                                        )
+                                    )
+                                except Exception:
+                                    pass
+                            else:
+                                if limit_hit:
+                                    return
+                                throttle_resume_message = f"{throttle_notice} · IP 변경 완료, 재시작 필요"
+                                fatal_error = throttle_resume_message
+                                stop_reason = throttle_resume_message
+                                restart_required = True
+                                restart_reason = throttle_resume_message
+                                stop_requested = True
+                                emit_batch_halt_marker(
+                                    "SMTP_THROTTLE",
+                                    throttle_resume_message,
+                                    severity="warning",
+                                    allow_repeat=True,
+                                )
+                                release_pending_queue("SMTP 제한 응답 감지")
                     elif matched_message:
                         fatal_error = matched_message
                         stop_reason = fatal_error
