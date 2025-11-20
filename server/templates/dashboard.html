@@ -3211,6 +3211,14 @@ function updateDeviceFilterMeta(visibleCount) {
   metaEl.textContent = segments.join(" · ");
 }
 
+function collectDomainSwitchTargets(targetDomain) {
+  const normalized = sanitizeGlobalDomain(targetDomain);
+  return getVisibleDevices().filter((device) => {
+    const currentDomain = normalizeDeviceDomain(device?.active_domain || "naver");
+    return currentDomain !== normalized;
+  });
+}
+
 function updateDomainSwitchControls() {
   const container = document.getElementById("domainSwitchControls");
   if (!container) {
@@ -3221,12 +3229,17 @@ function updateDomainSwitchControls() {
   const visibleCount = visibleDevices.length;
   const scopeLabel = getFilterScopeLabel();
   const hintEl = document.getElementById("domainSwitchHint");
-  if (hintEl) {
-    hintEl.textContent = visibleCount
-      ? `${scopeLabel} · 대상 ${visibleCount}대에 적용됩니다.`
-      : `${scopeLabel}에 적용할 카드가 없습니다.`;
-  }
-  container.classList.toggle("is-disabled", !visibleCount);
+  const candidateCounts = { naver: 0, daum: 0 };
+  visibleDevices.forEach((device) => {
+    const deviceDomain = normalizeDeviceDomain(device?.active_domain || "naver");
+    if (deviceDomain !== "naver") {
+      candidateCounts.naver += 1;
+    }
+    if (deviceDomain !== "daum") {
+      candidateCounts.daum += 1;
+    }
+  });
+  let hasAction = false;
   container.querySelectorAll('[data-action="switch-domain"]').forEach((btn) => {
     const scopeAttr = btn.dataset.filterScope || "all";
     const scopes = scopeAttr
@@ -3235,8 +3248,92 @@ function updateDomainSwitchControls() {
       .filter((entry, index, arr) => entry && arr.indexOf(entry) === index);
     const shouldShow = scopes.includes(filter);
     btn.classList.toggle("hidden", !shouldShow);
-    btn.disabled = !visibleCount;
+    const targetDomain = sanitizeGlobalDomain(btn.dataset.target || "");
+    const candidateCount = candidateCounts[targetDomain] || 0;
+    if (!shouldShow) {
+      btn.disabled = true;
+      return;
+    }
+    btn.disabled = candidateCount === 0;
+    if (candidateCount > 0) {
+      hasAction = true;
+      btn.title = `${scopeLabel} 중 ${candidateCount}대를 ${DOMAIN_LABELS[targetDomain] || targetDomain} 도메인으로 전환합니다.`;
+    } else {
+      btn.title = `${DOMAIN_LABELS[targetDomain] || targetDomain} 도메인으로 전환할 카드가 없습니다.`;
+    }
   });
+  const primaryTarget = filter === "naver" ? "daum" : filter === "daum" ? "naver" : null;
+  let hintText;
+  if (!visibleCount) {
+    hintText = `${scopeLabel}에 표시된 카드가 없습니다.`;
+  } else if (!hasAction) {
+    hintText = `${scopeLabel}에 전환 가능한 카드가 없습니다.`;
+  } else if (primaryTarget) {
+    const count = candidateCounts[primaryTarget] || 0;
+    const label = DOMAIN_LABELS[primaryTarget] || primaryTarget;
+    hintText = `${scopeLabel} · ${label} 도메인으로 전환 ${count}대`;
+  } else {
+    const parts = [];
+    if (candidateCounts.naver) {
+      parts.push(`네이버 전환 ${candidateCounts.naver}대`);
+    }
+    if (candidateCounts.daum) {
+      parts.push(`다음 전환 ${candidateCounts.daum}대`);
+    }
+    hintText = parts.length ? `${scopeLabel} · ${parts.join(" · ")}` : `${scopeLabel}에 전환 가능한 카드가 없습니다.`;
+  }
+  if (hintEl) {
+    hintEl.textContent = hintText;
+  }
+  container.classList.toggle("is-disabled", !hasAction);
+}
+
+async function handleDomainSwitch(targetDomain, triggerButton) {
+  const normalized = sanitizeGlobalDomain(targetDomain);
+  const targets = collectDomainSwitchTargets(normalized);
+  const scopeLabel = getFilterScopeLabel();
+  if (!targets.length) {
+    setGlobalStatus(`${scopeLabel}에 전환할 카드가 없습니다.`, "info");
+    return;
+  }
+  const targetLabel = DOMAIN_LABELS[normalized] || normalized;
+  const originalText = triggerButton?.textContent;
+  if (triggerButton) {
+    triggerButton.disabled = true;
+    triggerButton.textContent = `${targetLabel} 전환 중...`;
+  }
+  setGlobalStatus(`${scopeLabel}: ${targetLabel} 도메인으로 전환 중...`, "info");
+  try {
+    const tasks = targets.map((device) =>
+      fetchJSON(`/api/devices/${device.id}/active-domain`, {
+        method: "POST",
+        body: JSON.stringify({ domain: normalized }),
+      })
+        .then(() => ({ success: true, device }))
+        .catch((error) => ({ success: false, device, error }))
+    );
+    const outcomes = await Promise.all(tasks);
+    const failures = outcomes.filter((result) => !result.success);
+    const successCount = outcomes.length - failures.length;
+    if (failures.length) {
+      const sample = failures[0];
+      const sampleName = sample.device?.name || sample.device?.id || "알 수 없는 디바이스";
+      const sampleMessage = sample.error?.message || "도메인 전환에 실패했습니다.";
+      const prefix = successCount > 0 ? `일부 카드(${successCount}대)는 전환했지만, ` : "";
+      setGlobalStatus(
+        `${scopeLabel}: ${prefix}${failures.length}대 전환 실패 · 예) ${sampleName} - ${sampleMessage}`,
+        successCount ? "warning" : "error",
+      );
+    } else {
+      setGlobalStatus(`${scopeLabel} · ${outcomes.length}대 도메인을 ${targetLabel}로 전환했습니다.`, "success");
+    }
+    await loadDevices({ silent: true });
+  } finally {
+    if (triggerButton) {
+      triggerButton.disabled = false;
+      triggerButton.textContent = originalText || `${targetLabel}로 전환`;
+    }
+  }
 }
 
 function initDomainSwitchControls() {
@@ -3253,10 +3350,7 @@ function initDomainSwitchControls() {
     if (!targetDomain) {
       return;
     }
-    handleGlobalApply({
-      overrides: { active_domain: targetDomain },
-      triggerButton: targetBtn,
-    });
+    handleDomainSwitch(targetDomain, targetBtn);
   });
   updateDomainSwitchControls();
 }
