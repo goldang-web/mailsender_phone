@@ -2413,7 +2413,9 @@ button:not(:disabled):hover {
           <div class="global-actions global-section-actions">
             <button class="secondary" id="globalSaveAllBtn">설정 저장</button>
             <button id="globalApplyBtn">전체 적용</button>
+            <button class="secondary" id="globalSendSingleBtn">단일 발송</button>
             <button class="secondary" id="globalSendAllBtn">전체 발송</button>
+            <button class="ghost" id="globalClearLogsBtn">로그 초기화</button>
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
           </div>
         </div>
@@ -11986,8 +11988,16 @@ if (globalTelegramTestBtn) {
   });
 }
 
+document.getElementById("globalSendSingleBtn").addEventListener("click", () => {
+  handleGlobalSendSingle();
+});
+
 document.getElementById("globalSendAllBtn").addEventListener("click", () => {
   handleGlobalSendAll();
+});
+
+document.getElementById("globalClearLogsBtn").addEventListener("click", () => {
+  handleGlobalClearLogs();
 });
 
 document.getElementById("globalStopAllBtn").addEventListener("click", () => {
@@ -12618,6 +12628,49 @@ async function handleTelegramTest() {
   }
 }
 
+async function handleGlobalSendSingle() {
+  const sendBtn = document.getElementById("globalSendSingleBtn");
+  if (!sendBtn) return;
+  const originalText = sendBtn.textContent;
+  sendBtn.disabled = true;
+  sendBtn.textContent = "단일 발송 예약 중...";
+  try {
+    const result = await fetchJSON("/api/global/actions/send-single", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    const scheduledCount = Number(result.device_count ?? 0);
+    const skipped = Array.isArray(result.skipped_devices) ? result.skipped_devices : [];
+    if (scheduledCount === 0) {
+      const skippedMessage = skipped.length
+        ? "단일 발송을 예약할 디바이스를 찾지 못했습니다. 각 카드의 RCPT TO 설정을 확인하세요."
+        : "단일 발송을 예약할 디바이스가 없습니다.";
+      setGlobalStatus(skippedMessage, "info");
+    } else {
+      let suffix = "";
+      if (skipped.length) {
+        const names = skipped
+          .map((item) => item?.name || item?.device_id)
+          .filter(Boolean)
+          .slice(0, 3);
+        if (names.length) {
+          const extra = skipped.length > names.length ? ` 외 ${skipped.length - names.length}대` : "";
+          suffix = ` (건너뜀: ${names.join(", ")}${extra})`;
+        } else {
+          suffix = " (일부 디바이스는 RCPT 설정이 없어 건너뛰었습니다.)";
+        }
+      }
+      setGlobalStatus(`총 ${scheduledCount}대에 단일 발송을 예약했습니다.${suffix}`, "success");
+    }
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(err.message || "단일 발송 예약에 실패했습니다.", "error");
+  } finally {
+    sendBtn.disabled = false;
+    sendBtn.textContent = originalText;
+  }
+}
+
 async function handleGlobalSendAll() {
   const sendBtn = document.getElementById("globalSendAllBtn");
   if (!sendBtn) return;
@@ -12636,6 +12689,36 @@ async function handleGlobalSendAll() {
   } finally {
     sendBtn.disabled = false;
     sendBtn.textContent = originalText;
+  }
+}
+
+async function handleGlobalClearLogs() {
+  const clearBtn = document.getElementById("globalClearLogsBtn");
+  if (!clearBtn) return;
+  const confirmed = confirm("모든 카드의 발송 로그를 초기화하시겠습니까? 이 작업은 되돌릴 수 없습니다.");
+  if (!confirmed) {
+    return;
+  }
+  const originalText = clearBtn.textContent;
+  clearBtn.disabled = true;
+  clearBtn.textContent = "로그 초기화 중...";
+  try {
+    const result = await fetchJSON("/api/global/actions/clear-logs", {
+      method: "POST",
+      body: JSON.stringify({}),
+    });
+    const totalCleared = Number(result.total_cleared ?? 0);
+    const deviceCount = Number(result.device_count ?? 0);
+    const clearedLabel = totalCleared > 0 ? `총 ${totalCleared}건 로그를 삭제했습니다.` : "삭제할 로그가 없었습니다.";
+    const deviceLabel = deviceCount > 0 ? ` (대상 ${deviceCount}대)` : "";
+    const statusType = totalCleared > 0 ? "success" : "info";
+    setGlobalStatus(`${clearedLabel}${deviceLabel}`, statusType);
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(err.message || "로그 초기화에 실패했습니다.", "error");
+  } finally {
+    clearBtn.disabled = false;
+    clearBtn.textContent = originalText;
   }
 }
 

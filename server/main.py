@@ -4154,12 +4154,26 @@ class GlobalBatchRequest(BaseModel):
     )
 
 
+class GlobalSingleRequest(BaseModel):
+    domain: Optional[str] = Field(
+        default="active",
+        description="명시하면 해당 도메인으로 단일 발송을 예약합니다. 기본은 각 디바이스의 활성 도메인입니다.",
+    )
+
+
 class GlobalStopRequest(BaseModel):
     reason: Optional[str] = None
 
 
 class ClearLogsRequest(BaseModel):
     domain: Optional[str] = None
+
+
+class GlobalClearLogsRequest(BaseModel):
+    domain: Optional[str] = Field(
+        default=None,
+        description="명시하면 해당 도메인 로그만 초기화합니다. 비우면 모든 도메인 로그를 삭제합니다.",
+    )
 
 
 class BatchStopLogCreateRequest(BaseModel):
@@ -5784,6 +5798,115 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
     }
 
 
+@app.post("/api/global/actions/send-single")
+def enqueue_global_single(payload: GlobalSingleRequest) -> Dict[str, Any]:
+    mode = (payload.domain or "active").strip().lower() or "active"
+    forced_domain: Optional[str] = None
+    if mode != "active":
+        forced_domain = normalize_domain(mode)
+    created_jobs: List[Dict[str, Any]] = []
+    skipped_devices: List[Dict[str, Any]] = []
+    with db_lock, get_conn() as conn:
+        device_rows = conn.execute(
+            "SELECT id, name, active_domain FROM devices ORDER BY name COLLATE NOCASE",
+        ).fetchall()
+        if not device_rows:
+            return {
+                "jobs": [],
+                "device_count": 0,
+                "mode": forced_domain or "active",
+                "skipped_devices": [],
+            }
+        global_config = load_global_config(conn=conn)
+        bot_token, chat_id = extract_telegram_credentials(global_config)
+        substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
+        context = build_substitution_context(substitution_rules)
+        for device_row in device_rows:
+            device_id = device_row["id"]
+            device_name = device_row["name"] or device_id
+            active_domain = normalize_domain(device_row["active_domain"] or "naver")
+            domain = forced_domain or active_domain
+            configs = load_device_configs(device_id, conn=conn)
+            if not configs:
+                skipped_devices.append(
+                    {"device_id": device_id, "name": device_name, "reason": "missing_config"}
+                )
+                continue
+            config_snapshot = build_config_snapshot(configs, domain)
+            config_snapshot["bcc_count"] = 0
+            config_snapshot["anchor_interval"] = 0
+            rcpt_to = (config_snapshot.get("rcpt_to") or "").strip()
+            if not rcpt_to:
+                skipped_devices.append(
+                    {"device_id": device_id, "name": device_name, "reason": "missing_rcpt"}
+                )
+                continue
+            template_config = dict(config_snapshot)
+            rng = random.SystemRandom()
+            base_config = configs.get(domain) or {}
+            lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
+            lock_snapshot = decode_substitution_snapshot(base_config.get("substitution_snapshot"))
+            resolved_config, resolved_rcpt, missing_tokens, _ = resolve_substitution_outputs(
+                config_snapshot,
+                substitution_rules,
+                lock_mode,
+                lock_snapshot,
+                context=context,
+                random_generator=rng,
+                rcpt_source=rcpt_to,
+                rcpt_override=False,
+            )
+            auto_enabled, pattern_value = resolve_message_id_settings(resolved_config)
+            resolved_config["message_id_auto"] = auto_enabled
+            resolved_config["message_id_pattern"] = pattern_value
+            raw_header_value = resolved_config.get("header")
+            if auto_enabled:
+                resolved_config["header"] = ensure_message_id_header(
+                    raw_header_value,
+                    auto_enabled=True,
+                    pattern_value=pattern_value,
+                    mail_from=resolved_config.get("mail_from"),
+                    helo=resolved_config.get("helo"),
+                )
+            elif not isinstance(raw_header_value, str):
+                resolved_config["header"] = str(raw_header_value or "")
+            substituted_rcpt = resolved_rcpt or rcpt_to
+            reroll_on_retry_enabled = sanitize_imap_reroll_on_retry(
+                base_config.get("imap_reroll_on_retry")
+            )
+            payload_map: Dict[str, Any] = {
+                "rcpt_to": substituted_rcpt,
+                "config": resolved_config,
+                "force_imap_check": False,
+            }
+            if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
+                payload_map["substitution"] = {
+                    "template": template_config,
+                    "rules": substitution_rules,
+                }
+            job_payload = attach_telegram_credentials(
+                payload_map,
+                bot_token=bot_token,
+                chat_id=chat_id,
+            )
+            job = create_job(
+                conn,
+                device_id,
+                domain,
+                "single_send",
+                job_payload,
+            )
+            log_missing_substitutions(job, missing_tokens)
+            created_jobs.append(job)
+        conn.commit()
+    return {
+        "jobs": [job["id"] for job in created_jobs],
+        "device_count": len(created_jobs),
+        "skipped_devices": skipped_devices,
+        "mode": forced_domain or "active",
+    }
+
+
 @app.post("/api/devices/{device_id}/actions/send-single")
 def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str, Any]:
     domain = normalize_domain(payload.domain)
@@ -6226,6 +6349,79 @@ def list_domain_files(device_id: str, domain: str) -> FileListResponse:
         for row in rows
     ]
     return FileListResponse(files=files)
+
+
+@app.post("/api/global/actions/clear-logs")
+def clear_global_logs(payload: GlobalClearLogsRequest) -> Dict[str, Any]:
+    normalized_domain: Optional[str] = None
+    if payload.domain:
+        normalized_domain = normalize_domain(payload.domain)
+    total_cleared = 0
+    device_results: List[Dict[str, Any]] = []
+    with db_lock, get_conn() as conn:
+        device_rows = conn.execute(
+            "SELECT id FROM devices ORDER BY name COLLATE NOCASE",
+        ).fetchall()
+        now = now_ts()
+        for row in device_rows:
+            device_id = row["id"]
+            if normalized_domain:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM send_logs
+                    WHERE device_id=?
+                      AND (domain=? OR domain IS NULL)
+                    """,
+                    (device_id, normalized_domain),
+                )
+                conn.execute(
+                    """
+                    UPDATE device_configs
+                    SET imap_reroll_success_count=0,
+                        updated_at=?
+                    WHERE device_id=? AND domain=?
+                    """,
+                    (now, device_id, normalized_domain),
+                )
+                job_payload = {"domains": [normalized_domain]}
+            else:
+                cursor = conn.execute(
+                    "DELETE FROM send_logs WHERE device_id=?",
+                    (device_id,),
+                )
+                conn.execute(
+                    """
+                    UPDATE device_configs
+                    SET imap_reroll_success_count=0,
+                        updated_at=?
+                    WHERE device_id=?
+                    """,
+                    (now, device_id),
+                )
+                job_payload = {"domains": []}
+            cleared = cursor.rowcount if cursor.rowcount is not None else 0
+            total_cleared += cleared
+            reset_job = create_job(
+                conn,
+                device_id,
+                normalized_domain,
+                "reset_sent_sequence",
+                job_payload,
+            )
+            device_results.append(
+                {
+                    "device_id": device_id,
+                    "cleared": cleared,
+                    "reset_job_id": reset_job["id"],
+                }
+            )
+        conn.commit()
+    return {
+        "device_count": len(device_results),
+        "total_cleared": total_cleared,
+        "domain": normalized_domain,
+        "results": device_results,
+    }
 
 
 @app.post("/api/devices/{device_id}/logs/clear")
