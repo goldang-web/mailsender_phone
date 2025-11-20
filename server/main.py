@@ -541,6 +541,22 @@ def normalize_anchor_email(value: Any) -> str:
     return candidate
 
 
+def sanitize_device_id_list(device_ids: Optional[Iterable[Any]]) -> List[str]:
+    if not device_ids:
+        return []
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for value in device_ids:
+        if value is None:
+            continue
+        text = str(value).strip()
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
+
+
 def sanitize_session_count(value: Any) -> int:
     try:
         count = int(value)
@@ -1529,6 +1545,7 @@ def apply_global_config_to_devices(
     values: Dict[str, str],
     *,
     target_domain: Optional[str] = None,
+    device_ids: Optional[Sequence[str]] = None,
 ) -> Tuple[int, int]:
     if not values:
         return 0, 0
@@ -1539,9 +1556,20 @@ def apply_global_config_to_devices(
         domains = DOMAINS
     fields = tuple(values.keys())
     now = now_ts()
-    device_rows = conn.execute(
-        "SELECT id FROM devices",
-    ).fetchall()
+    filtered_ids: Optional[Tuple[str, ...]] = None
+    if device_ids:
+        filtered_ids = tuple(dict.fromkeys(device_ids))
+        if not filtered_ids:
+            return 0, 0
+        placeholders = ",".join("?" for _ in filtered_ids)
+        device_rows = conn.execute(
+            f"SELECT id FROM devices WHERE id IN ({placeholders})",
+            filtered_ids,
+        ).fetchall()
+    else:
+        device_rows = conn.execute(
+            "SELECT id FROM devices",
+        ).fetchall()
     device_count = len(device_rows)
     if device_count == 0:
         return 0, 0
@@ -1558,12 +1586,26 @@ def apply_global_config_to_devices(
     return device_count, total_updates
 
 
-def apply_global_active_domain(conn: sqlite3.Connection, domain: str) -> int:
+def apply_global_active_domain(
+    conn: sqlite3.Connection,
+    domain: str,
+    device_ids: Optional[Sequence[str]] = None,
+) -> int:
     now = now_ts()
-    cursor = conn.execute(
-        "UPDATE devices SET active_domain=?, updated_at=?",
-        (domain, now),
-    )
+    if device_ids:
+        filtered_ids = tuple(dict.fromkeys(device_ids))
+        if not filtered_ids:
+            return 0
+        placeholders = ",".join("?" for _ in filtered_ids)
+        cursor = conn.execute(
+            f"UPDATE devices SET active_domain=?, updated_at=? WHERE id IN ({placeholders})",
+            (domain, now, *filtered_ids),
+        )
+    else:
+        cursor = conn.execute(
+            "UPDATE devices SET active_domain=?, updated_at=?",
+            (domain, now),
+        )
     return cursor.rowcount
 
 
@@ -3554,10 +3596,11 @@ def cancel_active_sends(
     cancel_message: str,
     device_id: Optional[str] = None,
     job_types: Optional[Iterable[str]] = None,
+    device_ids: Optional[Iterable[str]] = None,
 ) -> Dict[str, int]:
     allowed_types = tuple({job_type for job_type in (job_types or ("batch_send", "single_send")) if job_type})
     if not allowed_types:
-        return {"total_jobs": 0, "cancelled": 0, "cancel_requested": 0}
+        return {"total_jobs": 0, "cancelled": 0, "cancel_requested": 0, "pending_cancelled": 0}
     query = """
         SELECT jobs.*, devices.status AS device_status
         FROM jobs
@@ -3568,9 +3611,18 @@ def cancel_active_sends(
     job_type_placeholders = ",".join(["?"] * len(allowed_types))
     query = query.format(job_type_placeholders=job_type_placeholders)
     params: List[str] = list(allowed_types)
+    filtered_ids: Optional[List[str]] = None
     if device_id:
-        query = f"{query} AND jobs.device_id=?"
-        params.append(device_id)
+        filtered_ids = [device_id]
+    elif device_ids:
+        normalized_ids = sanitize_device_id_list(device_ids)
+        if not normalized_ids:
+            return {"total_jobs": 0, "cancelled": 0, "cancel_requested": 0, "pending_cancelled": 0}
+        filtered_ids = normalized_ids
+    if filtered_ids:
+        placeholders = ",".join("?" for _ in filtered_ids)
+        query = f"{query} AND jobs.device_id IN ({placeholders})"
+        params.extend(filtered_ids)
     job_rows = conn.execute(query, tuple(params)).fetchall()
     cancelled = 0
     pending_cancelled = 0
@@ -4101,7 +4153,14 @@ class DeviceLockCopyRequest(BaseModel):
     target_device_ids: List[str] = Field(default_factory=list)
 
 
-class GlobalConfigPayload(BaseModel):
+class DeviceScopedRequest(BaseModel):
+    device_ids: Optional[List[str]] = Field(
+        default=None,
+        description="작업 대상을 제한할 디바이스 ID 목록입니다. 비우면 전체 디바이스가 대상입니다.",
+    )
+
+
+class GlobalConfigPayload(DeviceScopedRequest):
     helo: Optional[str] = None
     smtp_host: Optional[str] = None
     mail_from: Optional[str] = None
@@ -4147,21 +4206,21 @@ class GlobalConfigResponse(BaseModel):
     daum_idle_stop_limit: int
 
 
-class GlobalBatchRequest(BaseModel):
+class GlobalBatchRequest(DeviceScopedRequest):
     domain: Optional[str] = Field(
         default="active",
         description="명시하면 해당 도메인으로 전체 발송을 예약합니다. 기본은 각 디바이스의 활성 도메인입니다.",
     )
 
 
-class GlobalSingleRequest(BaseModel):
+class GlobalSingleRequest(DeviceScopedRequest):
     domain: Optional[str] = Field(
         default="active",
         description="명시하면 해당 도메인으로 단일 발송을 예약합니다. 기본은 각 디바이스의 활성 도메인입니다.",
     )
 
 
-class GlobalStopRequest(BaseModel):
+class GlobalStopRequest(DeviceScopedRequest):
     reason: Optional[str] = None
 
 
@@ -4169,7 +4228,7 @@ class ClearLogsRequest(BaseModel):
     domain: Optional[str] = None
 
 
-class GlobalClearLogsRequest(BaseModel):
+class GlobalClearLogsRequest(DeviceScopedRequest):
     domain: Optional[str] = Field(
         default=None,
         description="명시하면 해당 도메인 로그만 초기화합니다. 비우면 모든 도메인 로그를 삭제합니다.",
@@ -4389,6 +4448,7 @@ def get_global_config_endpoint() -> GlobalConfigResponse:
 def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]:
     fields_set = getattr(payload, "__fields_set__", set())
     domain_update_requested = "active_domain" in fields_set
+    target_device_ids = sanitize_device_id_list(payload.device_ids)
     target_domain: Optional[str] = None
     if "target_domain" in fields_set:
         raw_target_domain = (payload.target_domain or "").strip().lower()
@@ -4577,14 +4637,20 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 stored_config["telegram_chat_id"] = sanitized_chat_id
         else:
             stored_config["telegram_chat_id"] = sanitize_telegram_chat_id(stored_config.get("telegram_chat_id"))
+        device_scope = target_device_ids or None
         device_count, update_count = apply_global_config_to_devices(
             conn,
             apply_values,
             target_domain=target_domain,
+            device_ids=device_scope,
         )
         domain_update_count = 0
         if active_domain_changed:
-            domain_update_count = apply_global_active_domain(conn, requested_active_domain)
+            domain_update_count = apply_global_active_domain(
+                conn,
+                requested_active_domain,
+                device_ids=device_scope,
+            )
             applied_fields.append("active_domain")
         stored_config["active_domain"] = requested_active_domain
         device_count = max(device_count, domain_update_count)
@@ -5722,10 +5788,20 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
     if mode != "active":
         forced_domain = normalize_domain(mode)
     created_jobs: List[Dict[str, Any]] = []
+    target_device_ids = sanitize_device_id_list(payload.device_ids)
     with db_lock, get_conn() as conn:
         device_rows = conn.execute(
             "SELECT id, active_domain FROM devices ORDER BY name COLLATE NOCASE",
         ).fetchall()
+        if target_device_ids:
+            allowed_ids = set(target_device_ids)
+            device_rows = [row for row in device_rows if row["id"] in allowed_ids]
+            if not device_rows:
+                return {
+                    "jobs": [],
+                    "device_count": 0,
+                    "mode": forced_domain or "active",
+                }
         global_config = load_global_config(conn=conn)
         bot_token, chat_id = extract_telegram_credentials(global_config)
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
@@ -5806,10 +5882,14 @@ def enqueue_global_single(payload: GlobalSingleRequest) -> Dict[str, Any]:
         forced_domain = normalize_domain(mode)
     created_jobs: List[Dict[str, Any]] = []
     skipped_devices: List[Dict[str, Any]] = []
+    target_device_ids = sanitize_device_id_list(payload.device_ids)
     with db_lock, get_conn() as conn:
         device_rows = conn.execute(
             "SELECT id, name, active_domain FROM devices ORDER BY name COLLATE NOCASE",
         ).fetchall()
+        if target_device_ids:
+            allowed_ids = set(target_device_ids)
+            device_rows = [row for row in device_rows if row["id"] in allowed_ids]
         if not device_rows:
             return {
                 "jobs": [],
@@ -6230,8 +6310,13 @@ def get_job_detail(job_id: str) -> Dict[str, Any]:
 @app.post("/api/global/actions/stop")
 def request_global_stop(payload: GlobalStopRequest) -> Dict[str, Any]:
     cancel_message = (payload.reason or "").strip() or "사용자가 전체 중지를 요청했습니다."
+    target_device_ids = sanitize_device_id_list(payload.device_ids)
     with db_lock, get_conn() as conn:
-        result = cancel_active_sends(conn, cancel_message)
+        result = cancel_active_sends(
+            conn,
+            cancel_message,
+            device_ids=target_device_ids or None,
+        )
         conn.commit()
     return result
 
@@ -6358,10 +6443,21 @@ def clear_global_logs(payload: GlobalClearLogsRequest) -> Dict[str, Any]:
         normalized_domain = normalize_domain(payload.domain)
     total_cleared = 0
     device_results: List[Dict[str, Any]] = []
+    target_device_ids = sanitize_device_id_list(payload.device_ids)
     with db_lock, get_conn() as conn:
         device_rows = conn.execute(
             "SELECT id FROM devices ORDER BY name COLLATE NOCASE",
         ).fetchall()
+        if target_device_ids:
+            allowed_ids = set(target_device_ids)
+            device_rows = [row for row in device_rows if row["id"] in allowed_ids]
+            if not device_rows:
+                return {
+                    "device_count": 0,
+                    "total_cleared": 0,
+                    "domain": normalized_domain,
+                    "results": [],
+                }
         now = now_ts()
         for row in device_rows:
             device_id = row["id"]

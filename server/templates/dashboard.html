@@ -886,6 +886,17 @@ header {
   width: 36px;
   height: 36px;
 }
+.substitution-refresh-actions {
+  display: inline-flex;
+  flex-wrap: nowrap;
+  gap: 8px;
+  align-items: center;
+}
+.substitution-copy-btn {
+  border-radius: 50%;
+  width: 36px;
+  height: 36px;
+}
 .substitution-row[data-refreshing="true"] .substitution-refresh-btn {
   opacity: 0.65;
   pointer-events: none;
@@ -1274,6 +1285,9 @@ header {
   --card-accent-border: rgba(148, 163, 184, 0.45);
 }
 .card.online-hidden {
+  display: none;
+}
+.card.domain-hidden {
   display: none;
 }
 .card-header {
@@ -2362,6 +2376,112 @@ button:not(:disabled):hover {
   gap: 10px;
   flex-wrap: wrap;
 }
+.device-filter-bar {
+  margin: 24px 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.device-filter-tabs {
+  display: inline-flex;
+  gap: 6px;
+  background: var(--color-surface);
+  border-radius: 999px;
+  padding: 4px 6px;
+  box-shadow: inset 0 0 0 1px var(--color-border);
+  width: fit-content;
+}
+.device-filter-tab {
+  border: 1px solid transparent;
+  background: var(--color-surface-subtle);
+  color: var(--color-muted);
+  font-weight: 600;
+  padding: 6px 16px;
+  border-radius: 999px;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.device-filter-tab:is(:hover, :focus-visible) {
+  background: var(--color-surface);
+  border-color: var(--color-border);
+  color: var(--color-text);
+}
+.device-filter-tab.is-active {
+  color: #0f172a;
+  box-shadow: 0 2px 8px rgba(15, 23, 42, 0.18);
+}
+.device-filter-tab.is-active[data-filter="all"] {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.25), rgba(129, 140, 248, 0.55));
+  border-color: rgba(99, 102, 241, 0.6);
+}
+.device-filter-tab.is-active[data-filter="naver"] {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.25), rgba(52, 211, 153, 0.55));
+  border-color: rgba(16, 185, 129, 0.6);
+}
+.device-filter-tab.is-active[data-filter="daum"] {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.25), rgba(96, 165, 250, 0.55));
+  border-color: rgba(59, 130, 246, 0.6);
+}
+.device-filter-tab:not(.is-active) {
+  border-color: var(--color-border-subtle);
+}
+.device-filter-tabs::after {
+  content: "";
+  display: block;
+  flex: 0 0 0;
+  border-right: 1px solid transparent;
+}
+.device-filter-count {
+  font-size: 12px;
+  line-height: 1;
+  color: inherit;
+}
+.device-filter-meta {
+  font-size: 12px;
+  color: var(--color-muted-soft);
+}
+.global-tab-nav {
+  margin-top: 12px;
+  display: inline-flex;
+  background: var(--color-surface);
+  border-radius: 999px;
+  padding: 4px;
+  gap: 6px;
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.global-tab-btn {
+  border: none;
+  background: transparent;
+  padding: 6px 18px;
+  border-radius: 999px;
+  font-weight: 600;
+  color: var(--color-muted);
+  cursor: pointer;
+  transition: background 0.2s ease, color 0.2s ease;
+}
+.global-tab-btn:is(:hover, :focus-visible) {
+  background: var(--color-surface-subtle);
+  color: var(--color-text);
+}
+.global-tab-btn.is-active {
+  background: var(--color-accent-subtle);
+  color: var(--color-text);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.18);
+}
+.global-tab-btn.is-active[data-tab="control"] {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.18), rgba(59, 130, 246, 0.4));
+  color: #0f172a;
+}
+.global-tab-btn.is-active[data-tab="settings"] {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.2), rgba(16, 185, 129, 0.45));
+  color: #064e3b;
+}
+.global-tab-panel.hidden {
+  display: none !important;
+}
 .last-sync {
   font-size: 12px;
   color: var(--color-muted-soft);
@@ -2400,41 +2520,48 @@ button:not(:disabled):hover {
   </div>
 </header>
 
+<div class="device-filter-bar">
+  <div class="device-filter-tabs" role="tablist" aria-label="도메인 필터" id="deviceFilterTabs">
+    <button type="button" class="device-filter-tab" data-role="deviceFilterTab" data-filter="all" aria-pressed="false">
+      전체
+      <span class="device-filter-count" data-filter-count="all">0</span>
+    </button>
+    <button type="button" class="device-filter-tab" data-role="deviceFilterTab" data-filter="naver" aria-pressed="false">
+      네이버
+      <span class="device-filter-count" data-filter-count="naver">0</span>
+    </button>
+    <button type="button" class="device-filter-tab" data-role="deviceFilterTab" data-filter="daum" aria-pressed="false">
+      다음
+      <span class="device-filter-count" data-filter-count="daum">0</span>
+    </button>
+  </div>
+  <div class="device-filter-meta" id="deviceFilterMeta">선택한 탭 기준 카드가 표시됩니다.</div>
+</div>
+
 <section class="global-panel" id="globalPanel">
   <div class="global-header">
     <h2>공통 발송 설정</h2>
     <div class="global-updated" id="globalUpdatedAt">아직 적용 기록이 없습니다.</div>
+    <div class="global-tab-nav" id="globalTabNav" role="tablist" aria-label="공통 발송 탭">
+      <button type="button" class="global-tab-btn" data-role="globalTab" data-tab="control" aria-pressed="false">제어</button>
+      <button type="button" class="global-tab-btn" data-role="globalTab" data-tab="settings" aria-pressed="false">설정</button>
+    </div>
   </div>
   <div class="global-layout">
     <div class="global-primary">
-      <div class="global-section">
+      <div class="global-section global-tab-panel" data-global-tab-panel="control" aria-hidden="false">
         <div class="global-section-header">
           <h3 class="global-section-title">발송 제어</h3>
           <div class="global-actions global-section-actions">
             <button class="secondary" id="globalSaveAllBtn">설정 저장</button>
-            <button id="globalApplyBtn">전체 적용</button>
             <button class="secondary" id="globalSendSingleBtn">단일 발송</button>
             <button class="secondary" id="globalSendAllBtn">전체 발송</button>
             <button class="ghost" id="globalClearLogsBtn">로그 초기화</button>
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
           </div>
         </div>
-        <div class="global-form">
-          <label class="field">
-            <span>Message-ID 패턴</span>
-            <input type="text" id="globalMessageIdPattern" placeholder="<${랜덤:영소:6}.${랜덤:숫자:4}.${랜덤:영소숫자:12}@${HELO}>" autocomplete="off" spellcheck="false">
-          </label>
-          <label class="inline-checkbox">
-            <input type="checkbox" id="globalMessageIdAuto">
-            <span>Message-ID 자동 삽입</span>
-          </label>
-          <label class="inline-checkbox">
-            <input type="checkbox" id="globalAllHeadersUnique">
-            <span>모든 헤더 개별화</span>
-          </label>
-        </div>
       </div>
-      <div class="global-split">
+      <div class="global-split global-tab-panel hidden" data-global-tab-panel="settings" aria-hidden="true">
         <div class="global-section">
           <h3 class="global-section-title">시간 제어</h3>
           <div class="global-schedule">
@@ -2805,15 +2932,12 @@ const GLOBAL_FIELD_LIST = [
   "smtp_host",
   "mail_from",
   "header",
-  "all_headers_unique",
   "session_count",
   "bcc_count",
   "stop_schedule_enabled",
   "stop_schedule_time",
   "telegram_bot_token",
   "telegram_chat_id",
-  "message_id_auto",
-  "message_id_pattern",
   "daum_idle_watch_enabled",
   "daum_idle_ip_change_seconds",
   "daum_idle_stop_limit",
@@ -2824,7 +2948,6 @@ const GLOBAL_DEFAULTS = {
   smtp_host: "",
   mail_from: "",
   header: "",
-  all_headers_unique: false,
   session_count: "1",
   bcc_count: "0",
   stop_schedule_enabled: false,
@@ -2832,8 +2955,6 @@ const GLOBAL_DEFAULTS = {
   substitution_rules: [],
   telegram_bot_token: "",
   telegram_chat_id: "",
-  message_id_auto: true,
-  message_id_pattern: MESSAGE_ID_PATTERN_DEFAULT,
   daum_idle_watch_enabled: false,
   daum_idle_ip_change_seconds: DAUM_IDLE_IP_DEFAULT,
   daum_idle_stop_limit: DAUM_IDLE_STOP_LIMIT_DEFAULT,
@@ -2844,21 +2965,22 @@ const GLOBAL_INPUT_IDS = {
   smtp_host: "globalSmtpHost",
   mail_from: "globalMailFrom",
   header: "globalHeader",
-  all_headers_unique: "globalAllHeadersUnique",
   session_count: "globalSessionCount",
   bcc_count: "globalBccCount",
   stop_schedule_enabled: "globalStopScheduleToggle",
   stop_schedule_time: "globalStopScheduleTime",
   telegram_bot_token: "globalTelegramBotToken",
   telegram_chat_id: "globalTelegramChatId",
-  message_id_auto: "globalMessageIdAuto",
-  message_id_pattern: "globalMessageIdPattern",
 };
 const LOG_PANEL_STORAGE_KEY = "dashboardLogPanels";
 const LOG_PANEL_MIN_HEIGHT = 160;
 const LOG_PANEL_MAX_HEIGHT = 560;
 const LOG_PANEL_DEFAULT_HEIGHT = 220;
 const LOG_PANEL_MANUAL_INTERVAL_MS = 1200;
+const GLOBAL_TAB_STORAGE_KEY = "dashboard.globalTab";
+const GLOBAL_TAB_KEYS = ["control", "settings"];
+const DOMAIN_FILTER_STORAGE_KEY = "dashboard.domainFilter";
+const DOMAIN_FILTERS = ["all", "naver", "daum"];
 
 function loadLogPanelPreferences() {
   if (typeof localStorage === "undefined") {
@@ -2886,6 +3008,266 @@ function persistLogPanelPreferences(preferences) {
   } catch (err) {
     console.warn("로그 패널 설정 저장에 실패했습니다.", err);
   }
+}
+
+function sanitizeDomainFilter(value) {
+  const candidate = String(value ?? "").trim().toLowerCase();
+  if (candidate === "naver" || candidate === "daum") {
+    return candidate;
+  }
+  return "all";
+}
+
+function loadDomainFilterPreference() {
+  if (typeof localStorage === "undefined") {
+    return "all";
+  }
+  try {
+    const stored = localStorage.getItem(DOMAIN_FILTER_STORAGE_KEY);
+    if (!stored) {
+      return "all";
+    }
+    return sanitizeDomainFilter(stored);
+  } catch (err) {
+    console.warn("도메인 필터 설정을 불러오지 못했습니다.", err);
+    return "all";
+  }
+}
+
+function persistDomainFilterPreference(filter) {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(DOMAIN_FILTER_STORAGE_KEY, sanitizeDomainFilter(filter));
+  } catch (err) {
+    console.warn("도메인 필터 설정 저장에 실패했습니다.", err);
+  }
+}
+
+function sanitizeGlobalTab(value) {
+  const candidate = String(value ?? "").trim().toLowerCase();
+  if (GLOBAL_TAB_KEYS.includes(candidate)) {
+    return candidate;
+  }
+  return "control";
+}
+
+function loadGlobalTabPreference() {
+  if (typeof localStorage === "undefined") {
+    return "control";
+  }
+  try {
+    const stored = localStorage.getItem(GLOBAL_TAB_STORAGE_KEY);
+    if (!stored) {
+      return "control";
+    }
+    return sanitizeGlobalTab(stored);
+  } catch (err) {
+    console.warn("글로벌 탭 설정을 불러오지 못했습니다.", err);
+    return "control";
+  }
+}
+
+function persistGlobalTabPreference(tab) {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(GLOBAL_TAB_STORAGE_KEY, sanitizeGlobalTab(tab));
+  } catch (err) {
+    console.warn("글로벌 탭 설정 저장에 실패했습니다.", err);
+  }
+}
+
+function getDomainFilterLabel(filter = state.domainFilter) {
+  const resolved = sanitizeDomainFilter(filter);
+  if (resolved === "naver") {
+    return "네이버";
+  }
+  if (resolved === "daum") {
+    return "다음";
+  }
+  return "전체";
+}
+
+function shouldApplyOnlineFilter() {
+  if (!state.filterOnlineOnly || state.deviceEditMode) {
+    return false;
+  }
+  return (state.devices || []).some((device) => (device?.status || "") === "connected");
+}
+
+function matchesDomainFilter(device, filter = state.domainFilter) {
+  if (!device) {
+    return false;
+  }
+  const resolved = sanitizeDomainFilter(filter);
+  if (resolved === "all") {
+    return true;
+  }
+  const deviceDomain = normalizeDeviceDomain(device.active_domain || "naver");
+  return deviceDomain === resolved;
+}
+
+function isDeviceVisibleForFilter(device) {
+  if (!device) {
+    return false;
+  }
+  if (!matchesDomainFilter(device)) {
+    return false;
+  }
+  if (shouldApplyOnlineFilter() && device.status !== "connected") {
+    return false;
+  }
+  return true;
+}
+
+function getVisibleDevices() {
+  return (state.devices || []).filter((device) => isDeviceVisibleForFilter(device));
+}
+
+function getActionTargetDeviceIds() {
+  return getVisibleDevices()
+    .map((device) => device?.id)
+    .filter((deviceId) => Boolean(deviceId));
+}
+
+function computeDomainCounts() {
+  const counts = { all: 0, naver: 0, daum: 0 };
+  (state.devices || []).forEach((device) => {
+    if (!device) return;
+    counts.all += 1;
+    const domain = normalizeDeviceDomain(device.active_domain || "naver");
+    counts[domain] = (counts[domain] || 0) + 1;
+  });
+  return counts;
+}
+
+function updateDeviceFilterCounts() {
+  const counts = computeDomainCounts();
+  document.querySelectorAll("[data-filter-count]").forEach((countEl) => {
+    const filterKey = sanitizeDomainFilter(countEl.dataset.filterCount || "all");
+    let value = counts.all;
+    if (filterKey === "naver" || filterKey === "daum") {
+      value = counts[filterKey] || 0;
+    }
+    countEl.textContent = value;
+  });
+}
+
+function updateDeviceFilterTabs() {
+  const current = sanitizeDomainFilter(state.domainFilter);
+  document.querySelectorAll('[data-role="deviceFilterTab"]').forEach((tab) => {
+    const filter = sanitizeDomainFilter(tab.dataset.filter || "all");
+    const isActive = filter === current;
+    tab.classList.toggle("is-active", isActive);
+    tab.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
+}
+
+function getFilterScopeLabel() {
+  const domainLabel = getDomainFilterLabel();
+  if (shouldApplyOnlineFilter()) {
+    return `${domainLabel} 온라인 카드`;
+  }
+  if (domainLabel === "전체") {
+    return "전체 카드";
+  }
+  return `${domainLabel} 카드`;
+}
+
+function updateDeviceFilterMeta(visibleCount) {
+  const metaEl = document.getElementById("deviceFilterMeta");
+  if (!metaEl) {
+    return;
+  }
+  const counts = computeDomainCounts();
+  const domainFilter = sanitizeDomainFilter(state.domainFilter);
+  const total = domainFilter === "all" ? counts.all : counts[domainFilter] || 0;
+  const visible = typeof visibleCount === "number" ? visibleCount : getVisibleDevices().length;
+  const segments = [getFilterScopeLabel()];
+  segments.push(`표시 ${visible}대`);
+  segments.push(`총 ${total}대`);
+  if (shouldApplyOnlineFilter()) {
+    segments.push("온라인만 보기");
+  }
+  metaEl.textContent = segments.join(" · ");
+}
+
+function setDomainFilter(nextFilter) {
+  const resolved = sanitizeDomainFilter(nextFilter);
+  if (resolved === state.domainFilter) {
+    return;
+  }
+  state.domainFilter = resolved;
+  persistDomainFilterPreference(resolved);
+  updateDeviceFilterTabs();
+  renderDevices();
+  updateDeviceFilterCounts();
+}
+
+function updateGlobalTabButtons() {
+  const current = sanitizeGlobalTab(state.globalTab);
+  document.querySelectorAll('[data-role="globalTab"]').forEach((btn) => {
+    const tab = sanitizeGlobalTab(btn.dataset.tab || "control");
+    const isActive = tab === current;
+    btn.classList.toggle("is-active", isActive);
+    btn.setAttribute("aria-pressed", isActive ? "true" : "false");
+  });
+}
+
+function applyGlobalTabVisibility() {
+  const current = sanitizeGlobalTab(state.globalTab);
+  document.querySelectorAll("[data-global-tab-panel]").forEach((panel) => {
+    const target = sanitizeGlobalTab(panel.dataset.globalTabPanel || "control");
+    const shouldShow = target === current;
+    panel.classList.toggle("hidden", !shouldShow);
+    panel.setAttribute("aria-hidden", shouldShow ? "false" : "true");
+  });
+}
+
+function setGlobalTab(tab) {
+  const normalized = sanitizeGlobalTab(tab);
+  if (normalized === state.globalTab) {
+    return;
+  }
+  state.globalTab = normalized;
+  persistGlobalTabPreference(normalized);
+  updateGlobalTabButtons();
+  applyGlobalTabVisibility();
+}
+
+function initGlobalTabs() {
+  const nav = document.getElementById("globalTabNav");
+  if (nav) {
+    nav.addEventListener("click", (event) => {
+      const target = event.target.closest('[data-role="globalTab"]');
+      if (!target) return;
+      const tab = target.dataset.tab || "control";
+      setGlobalTab(tab);
+    });
+  }
+  updateGlobalTabButtons();
+  applyGlobalTabVisibility();
+}
+
+function initDeviceFilterTabs() {
+  const container = document.getElementById("deviceFilterTabs");
+  if (!container) {
+    return;
+  }
+  container.addEventListener("click", (event) => {
+    const target = event.target.closest('[data-role="deviceFilterTab"]');
+    if (!target) {
+      return;
+    }
+    const filter = target.dataset.filter || "all";
+    setDomainFilter(filter);
+  });
+  updateDeviceFilterTabs();
+  updateDeviceFilterCounts();
+  updateDeviceFilterMeta();
 }
 
 const initialLogPanelPreferences = loadLogPanelPreferences();
@@ -2982,15 +3364,12 @@ const state = {
     smtp_host: false,
     mail_from: false,
     header: false,
-    all_headers_unique: false,
     session_count: false,
     bcc_count: false,
     stop_schedule_enabled: false,
     stop_schedule_time: false,
     telegram_bot_token: false,
     telegram_chat_id: false,
-    message_id_auto: false,
-    message_id_pattern: false,
     daum_idle_watch_enabled: false,
     daum_idle_ip_change_seconds: false,
     daum_idle_stop_limit: false,
@@ -3055,6 +3434,8 @@ const state = {
   telegramAutoSaveHandle: null,
   telegramSaving: false,
   deviceEditMode: false,
+  globalTab: loadGlobalTabPreference(),
+  domainFilter: loadDomainFilterPreference(),
   filterOnlineOnly: false,
   deletingDevices: new Set(),
 };
@@ -3155,6 +3536,12 @@ const SUBSTITUTION_ICON_MARKUP = {
     <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
       <path d="M12 3a9 9 0 018.485 5.515" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
       <path d="M12 21a9 9 0 110-18" opacity="0.15" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+  `,
+  copy: `
+    <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <rect x="7.5" y="7.5" width="11" height="13" rx="2" ry="2" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+      <path d="M5 15V5a2 2 0 012-2h9" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
   `,
   trash: `
@@ -5352,7 +5739,7 @@ function renderSubstitutionDraft() {
   }
 
   if (activeTab === "static") {
-    updateRefreshAllButton(staticEntries, preview);
+    syncSubstitutionRefreshAllButton(preview, staticEntries);
   }
   updateSubstitutionModalButtons();
 
@@ -5504,6 +5891,8 @@ function renderSubstitutionDraft() {
 
         const refreshCell = document.createElement("div");
         refreshCell.className = "substitution-cell substitution-refresh-cell refresh-cell no-label";
+        const refreshActions = document.createElement("div");
+        refreshActions.className = "substitution-refresh-actions";
         const refreshBtn = document.createElement("button");
         refreshBtn.type = "button";
         refreshBtn.className = "ghost icon-button substitution-refresh-btn";
@@ -5519,7 +5908,16 @@ function renderSubstitutionDraft() {
           refreshBtn.disabled = false;
           refreshBtn.innerHTML = SUBSTITUTION_ICON_MARKUP.refresh;
         }
-        refreshCell.appendChild(refreshBtn);
+        refreshActions.appendChild(refreshBtn);
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "ghost icon-button substitution-copy-btn";
+        copyBtn.dataset.subAction = "copy-value";
+        copyBtn.setAttribute("aria-label", "치환 문구 복사");
+        copyBtn.title = "치환 문구 복사";
+        copyBtn.innerHTML = SUBSTITUTION_ICON_MARKUP.copy;
+        refreshActions.appendChild(copyBtn);
+        refreshCell.appendChild(refreshActions);
         row.appendChild(refreshCell);
 
         const deleteBtn = document.createElement("button");
@@ -5647,24 +6045,65 @@ function renderSubstitutionDraft() {
     return section;
   }
 
-  function updateRefreshAllButton(staticEntriesList, previewState) {
-    const refreshAllBtn = document.getElementById("substitutionRefreshAllBtn");
-    if (!refreshAllBtn) return;
-    if (!staticEntriesList.length) {
-      refreshAllBtn.disabled = true;
-      refreshAllBtn.textContent = "전체 새로고침";
-      refreshAllBtn.removeAttribute("data-state");
-      return;
-    }
-    if (previewState.globalPending) {
-      refreshAllBtn.disabled = true;
-      refreshAllBtn.textContent = "전체 새로고침 중...";
-      refreshAllBtn.dataset.state = "loading";
-      return;
-    }
-    refreshAllBtn.disabled = false;
+}
+
+function syncSubstitutionRefreshAllButton(previewState = null, staticEntriesOverride = null) {
+  const refreshAllBtn = document.getElementById("substitutionRefreshAllBtn");
+  if (!refreshAllBtn) return;
+  const preview = previewState || getSubstitutionPreviewState();
+  let staticEntriesList = staticEntriesOverride;
+  if (!Array.isArray(staticEntriesList)) {
+    const draft = Array.isArray(state.substitutionDraft) ? state.substitutionDraft : [];
+    staticEntriesList = draft
+      .map((rule, index) => ({ rule, index }))
+      .filter(({ rule }) => normalizeSubstitutionMode(rule?.mode) === "static");
+  }
+  if (!staticEntriesList.length) {
+    refreshAllBtn.disabled = true;
     refreshAllBtn.textContent = "전체 새로고침";
     refreshAllBtn.removeAttribute("data-state");
+    return;
+  }
+  if (preview.globalPending) {
+    refreshAllBtn.disabled = true;
+    refreshAllBtn.textContent = "전체 새로고침 중...";
+    refreshAllBtn.dataset.state = "loading";
+    return;
+  }
+  refreshAllBtn.disabled = false;
+  refreshAllBtn.textContent = "전체 새로고침";
+  refreshAllBtn.removeAttribute("data-state");
+}
+
+function syncSubstitutionRowView(index, previewState = null) {
+  if (!Number.isInteger(index) || index < 0) {
+    return;
+  }
+  const container = document.getElementById("substitutionTable");
+  if (!container) return;
+  const row = container.querySelector(`.substitution-row[data-index="${index}"][data-sub-kind="static"]`);
+  if (!row) return;
+  const preview = previewState || getSubstitutionPreviewState();
+  const isPending = preview.globalPending || preview.pending.has(index);
+  row.dataset.refreshing = isPending ? "true" : "false";
+  const refreshBtn = row.querySelector(".substitution-refresh-btn");
+  if (refreshBtn) {
+    if (isPending) {
+      refreshBtn.dataset.state = "loading";
+      refreshBtn.disabled = true;
+      refreshBtn.innerHTML = SUBSTITUTION_ICON_MARKUP.spinner;
+    } else {
+      refreshBtn.removeAttribute("data-state");
+      refreshBtn.disabled = false;
+      refreshBtn.innerHTML = SUBSTITUTION_ICON_MARKUP.refresh;
+    }
+  }
+  const rule = Array.isArray(state.substitutionDraft) ? state.substitutionDraft[index] : null;
+  const valueInput = row.querySelector('input[data-sub-field="value"]');
+  if (valueInput && rule && normalizeSubstitutionMode(rule.mode) === "static") {
+    const nextValue = typeof rule.value === "string" ? rule.value : "";
+    valueInput.value = nextValue;
+    valueInput.title = nextValue;
   }
 }
 
@@ -5857,7 +6296,81 @@ function handleSubstitutionClick(event) {
   if (action === "refresh-row") {
     event.preventDefault();
     scheduleSubstitutionRecompute(index, { immediate: true });
+    return;
   }
+  if (action === "copy-value") {
+    event.preventDefault();
+    copySubstitutionValue(row, index);
+    return;
+  }
+}
+
+async function copySubstitutionValue(row, index) {
+  if (!row) {
+    return;
+  }
+  const valueInput = row.querySelector('input[data-sub-field="value"]');
+  const text = typeof valueInput?.value === "string" ? valueInput.value : "";
+  if (!text) {
+    setSubstitutionFeedback("복사할 치환 문구가 없습니다. 새로고침으로 값을 생성하세요.", "error", {
+      persist: true,
+    });
+    return;
+  }
+  const rule = Array.isArray(state.substitutionDraft) ? state.substitutionDraft[index] : null;
+  const keyLabel = typeof rule?.key === "string" && rule.key ? ` (${rule.key})` : "";
+  try {
+    await writeSubstitutionTextToClipboard(text);
+    setSubstitutionFeedback(`치환 문구${keyLabel}를 클립보드에 복사했습니다.`, "success", {
+      persist: false,
+      duration: 2500,
+    });
+  } catch (err) {
+    console.error("substitution copy failed", err);
+    setSubstitutionFeedback("클립보드 복사에 실패했습니다.", "error", { persist: true });
+  }
+}
+
+function writeSubstitutionTextToClipboard(text) {
+  if (!text) {
+    return Promise.reject(new Error("empty clipboard text"));
+  }
+  if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    if (typeof document === "undefined" || !document.body) {
+      reject(new Error("document body missing"));
+      return;
+    }
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.setAttribute("readonly", "");
+    textarea.style.position = "fixed";
+    textarea.style.top = "-9999px";
+    textarea.style.left = "-9999px";
+    textarea.style.opacity = "0";
+    document.body.appendChild(textarea);
+    textarea.focus();
+    textarea.select();
+    try {
+      textarea.setSelectionRange(0, textarea.value.length);
+    } catch (err) {
+      // 일부 구형 브라우저에서는 setSelectionRange가 없을 수 있다.
+    }
+    try {
+      const successful = document.execCommand("copy");
+      document.body.removeChild(textarea);
+      if (successful) {
+        resolve();
+      } else {
+        reject(new Error("copy command blocked"));
+      }
+    } catch (err) {
+      document.body.removeChild(textarea);
+      reject(err);
+    }
+  });
 }
 
 function scheduleSubstitutionRecompute(index, options = {}) {
@@ -5907,12 +6420,12 @@ async function performSubstitutionRecompute(index) {
   if (!sourceText) {
     rule.value = "";
     preview.pending.delete(index);
-    renderSubstitutionDraft();
+    syncSubstitutionRowView(index, preview);
     validateSubstitutionDraft({ showMessage: false });
     return;
   }
   preview.pending.add(index);
-  renderSubstitutionDraft();
+  syncSubstitutionRowView(index, preview);
   try {
     const response = await requestSubstitutionPreview([{ key, source: sourceText, encoding }]);
     const results = Array.isArray(response?.results) ? response.results : [];
@@ -5921,11 +6434,11 @@ async function performSubstitutionRecompute(index) {
     }
     rule.value = typeof results[0] === "string" ? results[0] : "";
     preview.pending.delete(index);
-    renderSubstitutionDraft();
+    syncSubstitutionRowView(index, preview);
     validateSubstitutionDraft({ showMessage: false });
   } catch (err) {
     preview.pending.delete(index);
-    renderSubstitutionDraft();
+    syncSubstitutionRowView(index, preview);
     state.substitutionInvalidRows.add(index);
     updateSubstitutionRowValidity();
     setSubstitutionFeedback(err?.message || "치환 결과를 계산하지 못했습니다.", "error", { persist: true });
@@ -9430,6 +9943,8 @@ function attachCardEvents(card) {
         }
         updateSuccessCounter(card, updatedDevice);
         renderMonitoring();
+        renderDevices();
+        updateDeviceFilterCounts();
         setNotice(card, `${DOMAIN_LABELS[domain]} 도메인으로 전환했습니다.`);
       } catch (err) {
         setNotice(card, err.message || "도메인 전환에 실패했습니다.", "error");
@@ -10598,8 +11113,8 @@ function renderDevices() {
     emptyHint.dataset.defaultMessage = emptyHint.textContent;
   }
 
-  const hasOnlineDevices = (state.devices || []).some((device) => device.status === "connected");
-  const filterOnlineOnly = Boolean(state.filterOnlineOnly && !state.deviceEditMode && hasOnlineDevices);
+  const applyOnlineFilter = shouldApplyOnlineFilter();
+  const domainFilter = sanitizeDomainFilter(state.domainFilter);
   let visibleCards = 0;
 
   state.devices.forEach((device) => {
@@ -10613,11 +11128,14 @@ function renderDevices() {
       container.appendChild(card);
     }
     updateDeviceCard(card, device);
-    const shouldHide = filterOnlineOnly && device.status !== "connected";
-    card.classList.toggle("online-hidden", shouldHide);
+    const activeDomain = getActiveDomain(card, device.active_domain);
+    const hideForDomain = domainFilter !== "all" && activeDomain !== domainFilter;
+    const hideForOnline = applyOnlineFilter && device.status !== "connected";
+    card.classList.toggle("domain-hidden", hideForDomain);
+    card.classList.toggle("online-hidden", hideForOnline);
     card.classList.toggle("editing", state.deviceEditMode);
     updateCardDeleteButton(card, device);
-    if (!shouldHide) {
+    if (!hideForDomain && !hideForOnline) {
       visibleCards += 1;
     }
     seenIds.add(device.id);
@@ -10640,8 +11158,17 @@ function renderDevices() {
 
   if (!visibleCards) {
     const hasDevices = (state.devices || []).length > 0;
-    if (hasDevices && filterOnlineOnly) {
-      emptyHint.textContent = "표시할 온라인 디바이스가 없습니다. 전체 보기를 선택하면 모든 카드가 표시됩니다.";
+    if (hasDevices) {
+      if (applyOnlineFilter) {
+        const onlineMessage = domainFilter === "all"
+          ? "표시할 온라인 디바이스가 없습니다. 전체 보기를 선택하면 모든 카드가 표시됩니다."
+          : `${getDomainFilterLabel(domainFilter)} 탭에 온라인 디바이스가 없습니다.`;
+        emptyHint.textContent = onlineMessage;
+      } else if (domainFilter !== "all") {
+        emptyHint.textContent = `${getDomainFilterLabel(domainFilter)} 탭에 표시할 카드가 없습니다.`;
+      } else if (emptyHint.dataset.defaultMessage) {
+        emptyHint.textContent = emptyHint.dataset.defaultMessage;
+      }
     } else if (emptyHint.dataset.defaultMessage) {
       emptyHint.textContent = emptyHint.dataset.defaultMessage;
     }
@@ -10652,6 +11179,7 @@ function renderDevices() {
     }
     emptyHint.style.display = "none";
   }
+  updateDeviceFilterMeta(visibleCards);
   updateLockActionButtons();
   refreshLockIndicators();
   if (state.lockCopy.open) {
@@ -10676,6 +11204,8 @@ async function loadDevices(options = {}) {
       device.active_domain = normalizeDeviceDomain(device.active_domain || "naver");
     });
     state.devices = devices;
+    updateDeviceFilterCounts();
+    updateDeviceFilterTabs();
     if (state.filterOnlineOnly) {
       const hasOnlineDevices = (state.devices || []).some((device) => device.status === "connected");
       const hasAnyDevices = (state.devices || []).length > 0;
@@ -11967,6 +12497,8 @@ if (shuffleBtn) {
 }
 
 initGlobalForm();
+initGlobalTabs();
+initDeviceFilterTabs();
 initSubstitutionSection();
 initSinglePreviewModal();
 
@@ -11976,10 +12508,6 @@ if (globalSaveAllBtn) {
     handleGlobalSaveAll();
   });
 }
-
-document.getElementById("globalApplyBtn").addEventListener("click", () => {
-  handleGlobalApply();
-});
 
 const globalTelegramTestBtn = document.getElementById("globalTelegramTestBtn");
 if (globalTelegramTestBtn) {
@@ -12050,6 +12578,12 @@ if (lockCopyModal) {
 async function handleGlobalSaveAll() {
   const saveBtn = document.getElementById("globalSaveAllBtn");
   if (!saveBtn) return;
+  const scopeLabel = getFilterScopeLabel();
+  const targetDeviceSet = new Set(getActionTargetDeviceIds());
+  if (!targetDeviceSet.size) {
+    setGlobalStatus(`${scopeLabel}에 저장할 카드가 없습니다.`, "info");
+    return;
+  }
   const originalText = saveBtn.textContent;
   saveBtn.disabled = true;
   saveBtn.textContent = "설정 저장 중...";
@@ -12074,6 +12608,9 @@ async function handleGlobalSaveAll() {
     if (!device || !device.id) {
       continue;
     }
+    if (!targetDeviceSet.has(device.id)) {
+      continue;
+    }
     const domain = getActiveDomain(card, device.active_domain);
     const cacheEntry = fieldCache?.[device.id]?.[domain];
     if (!cacheEntry?.dirty) {
@@ -12096,11 +12633,11 @@ async function handleGlobalSaveAll() {
       const sample = failures[0];
       const prefix = successCount > 0 ? `총 ${successCount}대는 저장했지만, ` : "";
       const detail = sample.device ? `${sample.device} - ${sample.message}` : sample.message;
-      setGlobalStatus(`${prefix}${failures.length}대의 카드에서 설정 저장이 실패했습니다. 예: ${detail}`, "error");
+      setGlobalStatus(`${scopeLabel}: ${prefix}${failures.length}대의 카드에서 설정 저장이 실패했습니다. 예: ${detail}`, "error");
     } else if (dirtyTargets === 0) {
-      setGlobalStatus("저장할 변경 사항이 없습니다. 모든 카드가 최신 상태입니다.", "info");
+      setGlobalStatus(`${scopeLabel}에 저장할 변경 사항이 없습니다.`, "info");
     } else {
-      setGlobalStatus(`총 ${successCount}대의 카드 설정을 저장했습니다.`, "success");
+      setGlobalStatus(`${scopeLabel} 기준으로 ${successCount}대의 카드 설정을 저장했습니다.`, "success");
       try {
         await loadDevices({ silent: true });
       } catch (refreshErr) {
@@ -12115,33 +12652,32 @@ async function handleGlobalSaveAll() {
 
 async function handleGlobalApply(options = {}) {
   const overrides = options?.overrides && typeof options.overrides === "object" ? options.overrides : {};
-  const applyBtn = document.getElementById("globalApplyBtn");
+  const applyBtn = options?.triggerButton || document.getElementById("globalApplyBtn");
   const heloInput = document.getElementById("globalHelo");
   const smtpHostInput = document.getElementById("globalSmtpHost");
   const mailInput = document.getElementById("globalMailFrom");
   const headerInput = document.getElementById("globalHeader");
   const sessionInput = document.getElementById("globalSessionCount");
   const bccInput = document.getElementById("globalBccCount");
-  const allHeadersUniqueInput = document.getElementById("globalAllHeadersUnique");
-  const messageIdAutoInput = document.getElementById("globalMessageIdAuto");
-  const messageIdPatternInput = document.getElementById("globalMessageIdPattern");
   const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
   const scheduleToggle = document.getElementById("globalStopScheduleToggle");
   const scheduleTimeInput = document.getElementById("globalStopScheduleTime");
   const telegramTokenInput = document.getElementById("globalTelegramBotToken");
   const telegramChatInput = document.getElementById("globalTelegramChatId");
-  if (!applyBtn) return;
+  const scopeLabel = getFilterScopeLabel();
+  const targetDeviceIds = getActionTargetDeviceIds();
+  if (!targetDeviceIds.length) {
+    setGlobalStatus(`${scopeLabel}에 적용할 카드가 없습니다.`, "info");
+    return;
+  }
 
   const hasActiveDomainOverride = Object.prototype.hasOwnProperty.call(overrides, "active_domain");
   const hasHeloOverride = Object.prototype.hasOwnProperty.call(overrides, "helo");
   const hasSmtpHostOverride = Object.prototype.hasOwnProperty.call(overrides, "smtp_host");
   const hasMailFromOverride = Object.prototype.hasOwnProperty.call(overrides, "mail_from");
   const hasHeaderOverride = Object.prototype.hasOwnProperty.call(overrides, "header");
-  const hasAllHeadersOverride = Object.prototype.hasOwnProperty.call(overrides, "all_headers_unique");
   const hasSessionOverride = Object.prototype.hasOwnProperty.call(overrides, "session_count");
   const hasBccOverride = Object.prototype.hasOwnProperty.call(overrides, "bcc_count");
-  const hasMessageIdAutoOverride = Object.prototype.hasOwnProperty.call(overrides, "message_id_auto");
-  const hasMessageIdPatternOverride = Object.prototype.hasOwnProperty.call(overrides, "message_id_pattern");
   const hasStopScheduleEnabledOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_enabled");
   const hasStopScheduleTimeOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_time");
   const hasDaumIdleWatchOverride = Object.prototype.hasOwnProperty.call(overrides, "daum_idle_watch_enabled");
@@ -12217,19 +12753,6 @@ async function handleGlobalApply(options = {}) {
     }
   }
 
-  let allHeadersUniqueValue;
-  if (hasAllHeadersOverride) {
-    allHeadersUniqueValue = Boolean(overrides.all_headers_unique);
-  } else if (allHeadersUniqueInput) {
-    allHeadersUniqueValue = Boolean(allHeadersUniqueInput.checked);
-  } else {
-    allHeadersUniqueValue = Boolean(state.globalDraft.all_headers_unique ?? GLOBAL_DEFAULTS.all_headers_unique);
-  }
-  state.globalDraft.all_headers_unique = allHeadersUniqueValue;
-  if (allHeadersUniqueInput) {
-    allHeadersUniqueInput.checked = allHeadersUniqueValue;
-  }
-
   let sessionValue;
   if (hasSessionOverride) {
     sessionValue = sanitizeSessionValue(String(overrides.session_count ?? ""));
@@ -12258,32 +12781,6 @@ async function handleGlobalApply(options = {}) {
       bccInput.value = bccValue;
     }
     state.globalDraft.bcc_count = bccValue;
-  }
-  let messageIdAutoValue;
-  if (hasMessageIdAutoOverride) {
-    messageIdAutoValue = Boolean(overrides.message_id_auto);
-  } else if (messageIdAutoInput) {
-    messageIdAutoValue = Boolean(messageIdAutoInput.checked);
-  } else {
-    messageIdAutoValue = Boolean(state.globalDraft.message_id_auto ?? GLOBAL_DEFAULTS.message_id_auto);
-  }
-  state.globalDraft.message_id_auto = messageIdAutoValue;
-  if (messageIdAutoInput) {
-    messageIdAutoInput.checked = messageIdAutoValue;
-  }
-
-  let messageIdPatternValue;
-  if (hasMessageIdPatternOverride) {
-    messageIdPatternValue = (overrides.message_id_pattern ?? "").toString();
-  } else if (messageIdPatternInput) {
-    messageIdPatternValue = messageIdPatternInput.value ?? state.globalDraft.message_id_pattern ?? MESSAGE_ID_PATTERN_DEFAULT;
-  } else {
-    messageIdPatternValue = state.globalDraft.message_id_pattern ?? MESSAGE_ID_PATTERN_DEFAULT;
-  }
-  messageIdPatternValue = (messageIdPatternValue || "").trim() || MESSAGE_ID_PATTERN_DEFAULT;
-  state.globalDraft.message_id_pattern = messageIdPatternValue;
-  if (messageIdPatternInput && messageIdPatternInput.value !== messageIdPatternValue) {
-    messageIdPatternInput.value = messageIdPatternValue;
   }
   let daumIdleWatchValue;
   if (hasDaumIdleWatchOverride) {
@@ -12386,6 +12883,7 @@ async function handleGlobalApply(options = {}) {
   if (activeDomainValue !== undefined && (hasActiveDomainOverride || activeDomainRadio)) {
     payload.active_domain = activeDomainValue;
   }
+  payload.device_ids = targetDeviceIds;
   if (heloValue !== undefined && (hasHeloOverride || heloInput)) {
     payload.helo = heloValue;
   }
@@ -12404,15 +12902,6 @@ async function handleGlobalApply(options = {}) {
   if (bccValue !== undefined && (hasBccOverride || bccInput)) {
     payload.bcc_count = parseBccInput(bccValue);
   }
-  if (messageIdAutoValue !== undefined && (hasMessageIdAutoOverride || messageIdAutoInput)) {
-    payload.message_id_auto = Boolean(messageIdAutoValue);
-  }
-  if (messageIdPatternValue !== undefined && (hasMessageIdPatternOverride || messageIdPatternInput)) {
-    payload.message_id_pattern = messageIdPatternValue;
-  }
-  if (allHeadersUniqueValue !== undefined && (hasAllHeadersOverride || allHeadersUniqueInput)) {
-    payload.all_headers_unique = Boolean(allHeadersUniqueValue);
-  }
   if (hasDaumIdleWatchOverride) {
     payload.daum_idle_watch_enabled = daumIdleWatchValue;
   }
@@ -12428,9 +12917,11 @@ async function handleGlobalApply(options = {}) {
   payload.telegram_chat_id = telegramChatValue;
   payload.substitution_rules = substitutionPayload;
 
-  const originalText = applyBtn.textContent;
-  applyBtn.disabled = true;
-  applyBtn.textContent = "전체 적용 중...";
+  const originalText = applyBtn?.textContent;
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.textContent = "전체 적용 중...";
+  }
   try {
     const result = await fetchJSON("/api/global/config/apply", {
       method: "POST",
@@ -12449,7 +12940,7 @@ async function handleGlobalApply(options = {}) {
       const summary = scheduleEnabled
         ? `자동 중지 설정이 이미 최신 상태입니다${scheduleTime ? ` (매일 ${scheduleTime})` : ""}.`
         : "변경할 값이 없어 기존 설정을 유지했습니다.";
-      setGlobalStatus(summary, "info");
+      setGlobalStatus(`${scopeLabel} · ${summary}`, "info");
     } else {
       const fieldLabels = appliedFields.map((field) => {
         if (field === "active_domain") return "활성 도메인";
@@ -12458,9 +12949,6 @@ async function handleGlobalApply(options = {}) {
         if (field === "header") return "HEADER";
         if (field === "session_count") return "세션 수";
         if (field === "bcc_count") return "BCC 수";
-        if (field === "message_id_auto") return "Message-ID 자동 삽입";
-        if (field === "message_id_pattern") return "Message-ID 패턴";
-        if (field === "all_headers_unique") return "모든 헤더 개별화";
         if (field === "stop_schedule") return "자동 중지";
         if (field === "substitution_rules") return "치환 변수";
         if (field === "telegram_bot_token") return "텔레그램 봇 토큰";
@@ -12478,7 +12966,7 @@ async function handleGlobalApply(options = {}) {
         ? `자동 중지: 활성 (매일 ${scheduleTime || "--"})`
         : "자동 중지: 비활성";
       message = `${message} · ${scheduleSummary}`;
-      setGlobalStatus(message, "success");
+      setGlobalStatus(`${scopeLabel} · ${message}`, "success");
     }
 
     GLOBAL_FIELD_LIST.forEach((field) => {
@@ -12495,15 +12983,18 @@ async function handleGlobalApply(options = {}) {
     updateGlobalScheduleUI({ error: null });
     await loadDevices({ silent: true });
   } catch (err) {
-    setGlobalStatus(err.message || "전체 적용에 실패했습니다.", "error");
+    const errorMessage = err.message || "전체 적용에 실패했습니다.";
+    setGlobalStatus(`${scopeLabel}: ${errorMessage}`, "error");
     GLOBAL_FIELD_LIST.forEach((field) => {
       state.globalDirty[field] = false;
     });
     renderGlobalConfig(state.globalConfig);
     updateGlobalScheduleUI({ error: null });
   } finally {
-    applyBtn.disabled = false;
-    applyBtn.textContent = originalText;
+    if (applyBtn) {
+      applyBtn.disabled = false;
+      applyBtn.textContent = originalText;
+    }
   }
 }
 
@@ -12631,13 +13122,19 @@ async function handleTelegramTest() {
 async function handleGlobalSendSingle() {
   const sendBtn = document.getElementById("globalSendSingleBtn");
   if (!sendBtn) return;
+  const scopeLabel = getFilterScopeLabel();
+  const targetIds = getActionTargetDeviceIds();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 예약할 디바이스가 없습니다.`, "info");
+    return;
+  }
   const originalText = sendBtn.textContent;
   sendBtn.disabled = true;
   sendBtn.textContent = "단일 발송 예약 중...";
   try {
     const result = await fetchJSON("/api/global/actions/send-single", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ device_ids: targetIds }),
     });
     const scheduledCount = Number(result.device_count ?? 0);
     const skipped = Array.isArray(result.skipped_devices) ? result.skipped_devices : [];
@@ -12645,7 +13142,7 @@ async function handleGlobalSendSingle() {
       const skippedMessage = skipped.length
         ? "단일 발송을 예약할 디바이스를 찾지 못했습니다. 각 카드의 RCPT TO 설정을 확인하세요."
         : "단일 발송을 예약할 디바이스가 없습니다.";
-      setGlobalStatus(skippedMessage, "info");
+      setGlobalStatus(`${scopeLabel}: ${skippedMessage}`, "info");
     } else {
       let suffix = "";
       if (skipped.length) {
@@ -12660,11 +13157,11 @@ async function handleGlobalSendSingle() {
           suffix = " (일부 디바이스는 RCPT 설정이 없어 건너뛰었습니다.)";
         }
       }
-      setGlobalStatus(`총 ${scheduledCount}대에 단일 발송을 예약했습니다.${suffix}`, "success");
+      setGlobalStatus(`${scopeLabel} ${scheduledCount}대에 단일 발송을 예약했습니다.${suffix}`, "success");
     }
     await loadDevices({ silent: true });
   } catch (err) {
-    setGlobalStatus(err.message || "단일 발송 예약에 실패했습니다.", "error");
+    setGlobalStatus(`${scopeLabel}: ${err.message || "단일 발송 예약에 실패했습니다."}`, "error");
   } finally {
     sendBtn.disabled = false;
     sendBtn.textContent = originalText;
@@ -12674,18 +13171,24 @@ async function handleGlobalSendSingle() {
 async function handleGlobalSendAll() {
   const sendBtn = document.getElementById("globalSendAllBtn");
   if (!sendBtn) return;
+  const scopeLabel = getFilterScopeLabel();
+  const targetIds = getActionTargetDeviceIds();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 예약할 디바이스가 없습니다.`, "info");
+    return;
+  }
   const originalText = sendBtn.textContent;
   sendBtn.disabled = true;
   sendBtn.textContent = "전체 발송 예약 중...";
   try {
     const result = await fetchJSON("/api/global/actions/send-batch", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ device_ids: targetIds }),
     });
-    setGlobalStatus(`총 ${result.device_count ?? 0}대에 전체 발송을 예약했습니다.`, "success");
+    setGlobalStatus(`${scopeLabel} ${result.device_count ?? 0}대에 전체 발송을 예약했습니다.`, "success");
     await loadDevices({ silent: true });
   } catch (err) {
-    setGlobalStatus(err.message || "전체 발송 예약에 실패했습니다.", "error");
+    setGlobalStatus(`${scopeLabel}: ${err.message || "전체 발송 예약에 실패했습니다."}`, "error");
   } finally {
     sendBtn.disabled = false;
     sendBtn.textContent = originalText;
@@ -12695,7 +13198,14 @@ async function handleGlobalSendAll() {
 async function handleGlobalClearLogs() {
   const clearBtn = document.getElementById("globalClearLogsBtn");
   if (!clearBtn) return;
-  const confirmed = confirm("모든 카드의 발송 로그를 초기화하시겠습니까? 이 작업은 되돌릴 수 없습니다.");
+  const scopeLabel = getFilterScopeLabel();
+  const targetIds = getActionTargetDeviceIds();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 초기화할 카드가 없습니다.`, "info");
+    return;
+  }
+  const domainFilter = sanitizeDomainFilter(state.domainFilter);
+  const confirmed = confirm(`${scopeLabel}의 발송 로그를 초기화하시겠습니까? 이 작업은 되돌릴 수 없습니다.`);
   if (!confirmed) {
     return;
   }
@@ -12703,19 +13213,23 @@ async function handleGlobalClearLogs() {
   clearBtn.disabled = true;
   clearBtn.textContent = "로그 초기화 중...";
   try {
+    const payload = { device_ids: targetIds };
+    if (domainFilter === "naver" || domainFilter === "daum") {
+      payload.domain = domainFilter;
+    }
     const result = await fetchJSON("/api/global/actions/clear-logs", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(payload),
     });
     const totalCleared = Number(result.total_cleared ?? 0);
     const deviceCount = Number(result.device_count ?? 0);
     const clearedLabel = totalCleared > 0 ? `총 ${totalCleared}건 로그를 삭제했습니다.` : "삭제할 로그가 없었습니다.";
     const deviceLabel = deviceCount > 0 ? ` (대상 ${deviceCount}대)` : "";
     const statusType = totalCleared > 0 ? "success" : "info";
-    setGlobalStatus(`${clearedLabel}${deviceLabel}`, statusType);
+    setGlobalStatus(`${scopeLabel}: ${clearedLabel}${deviceLabel}`, statusType);
     await loadDevices({ silent: true });
   } catch (err) {
-    setGlobalStatus(err.message || "로그 초기화에 실패했습니다.", "error");
+    setGlobalStatus(`${scopeLabel}: ${err.message || "로그 초기화에 실패했습니다."}`, "error");
   } finally {
     clearBtn.disabled = false;
     clearBtn.textContent = originalText;
@@ -12725,27 +13239,33 @@ async function handleGlobalClearLogs() {
 async function handleGlobalStopAll() {
   const stopBtn = document.getElementById("globalStopAllBtn");
   if (!stopBtn) return;
+  const scopeLabel = getFilterScopeLabel();
+  const targetIds = getActionTargetDeviceIds();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 중지할 작업이 없습니다.`, "info");
+    return;
+  }
   const originalText = stopBtn.textContent;
   stopBtn.disabled = true;
   stopBtn.textContent = "중지 요청 중...";
   try {
     const result = await fetchJSON("/api/global/actions/stop", {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify({ device_ids: targetIds }),
     });
     const cancelled = result.cancelled ?? 0;
     const cancelRequested = result.cancel_requested ?? 0;
     const pendingCleared = result.pending_cancelled ?? 0;
     const affected = cancelled + cancelRequested;
     if (affected === 0) {
-      setGlobalStatus("중지할 발송 작업이 없습니다.", "info");
+      setGlobalStatus(`${scopeLabel}에 중지할 발송 작업이 없습니다.`, "info");
     } else {
       const pendingLabel = pendingCleared > 0 ? ` (대기 ${pendingCleared}건 즉시 정리)` : "";
-      setGlobalStatus(`즉시 중지 ${cancelled}건${pendingLabel}, 중지 요청 ${cancelRequested}건을 처리했습니다.`, "success");
+      setGlobalStatus(`${scopeLabel}: 즉시 중지 ${cancelled}건${pendingLabel}, 중지 요청 ${cancelRequested}건을 처리했습니다.`, "success");
     }
     await loadDevices({ silent: true });
   } catch (err) {
-    setGlobalStatus(err.message || "전체 중지 요청에 실패했습니다.", "error");
+    setGlobalStatus(`${scopeLabel}: ${err.message || "전체 중지 요청에 실패했습니다."}`, "error");
   } finally {
     stopBtn.disabled = false;
     stopBtn.textContent = originalText;
