@@ -2561,6 +2561,7 @@ button:not(:disabled):hover {
             <button class="secondary" id="globalSendSingleBtn">단일 발송</button>
             <button class="secondary" id="globalSendAllBtn">전체 발송</button>
             <button class="ghost" id="globalClearLogsBtn">로그 초기화</button>
+            <button class="ghost" id="globalClearBatchLogsBtn" hidden>발송 기록 초기화</button>
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
           </div>
         </div>
@@ -3209,6 +3210,20 @@ function updateDeviceFilterMeta(visibleCount) {
     segments.push("온라인만 보기");
   }
   metaEl.textContent = segments.join(" · ");
+}
+
+function updateGlobalBatchLogButton() {
+  const button = document.getElementById("globalClearBatchLogsBtn");
+  if (!button) {
+    return;
+  }
+  const isDaumTab = sanitizeDomainFilter(state.domainFilter) === "daum";
+  button.hidden = !isDaumTab;
+  button.setAttribute("aria-hidden", isDaumTab ? "false" : "true");
+  if (!isDaumTab) {
+    button.disabled = false;
+    button.textContent = "발송 기록 초기화";
+  }
 }
 
 function collectDomainSwitchTargets(targetDomain) {
@@ -11342,6 +11357,7 @@ function renderDevices() {
   updateDeviceFilterMeta(visibleCards);
   updateDomainSwitchControls();
   updateLockActionButtons();
+  updateGlobalBatchLogButton();
   refreshLockIndicators();
   if (state.lockCopy.open) {
     renderLockCopyTargets();
@@ -12690,6 +12706,10 @@ document.getElementById("globalClearLogsBtn").addEventListener("click", () => {
   handleGlobalClearLogs();
 });
 
+document.getElementById("globalClearBatchLogsBtn").addEventListener("click", () => {
+  handleGlobalClearBatchLogs();
+});
+
 document.getElementById("globalStopAllBtn").addEventListener("click", () => {
   handleGlobalStopAll();
 });
@@ -13392,6 +13412,51 @@ async function handleGlobalClearLogs() {
     await loadDevices({ silent: true });
   } catch (err) {
     setGlobalStatus(`${scopeLabel}: ${err.message || "로그 초기화에 실패했습니다."}`, "error");
+  } finally {
+    clearBtn.disabled = false;
+    clearBtn.textContent = originalText;
+  }
+}
+
+async function handleGlobalClearBatchLogs() {
+  const clearBtn = document.getElementById("globalClearBatchLogsBtn");
+  if (!clearBtn) return;
+  const domainFilter = sanitizeDomainFilter(state.domainFilter);
+  const scopeLabel = getFilterScopeLabel();
+  if (domainFilter !== "daum") {
+    setGlobalStatus(`${scopeLabel}: 발송 기록 초기화는 다음 탭에서만 사용할 수 있습니다.`, "info");
+    return;
+  }
+  const targetIds = getActionTargetDeviceIds();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 초기화할 카드가 없습니다.`, "info");
+    return;
+  }
+  const confirmed = confirm("다음 카드의 발송 기록을 초기화하시겠습니까? 이 작업은 되돌릴 수 없습니다.");
+  if (!confirmed) {
+    return;
+  }
+  const originalText = clearBtn.textContent;
+  clearBtn.disabled = true;
+  clearBtn.textContent = "발송 기록 초기화 중...";
+  try {
+    const result = await fetchJSON("/api/global/actions/clear-batch-logs", {
+      method: "POST",
+      body: JSON.stringify({
+        device_ids: targetIds,
+        domain: "daum",
+      }),
+    });
+    const totalCleared = Number(result.total_cleared ?? 0);
+    const deviceCount = Number(result.device_count ?? 0);
+    const clearedLabel =
+      totalCleared > 0 ? `총 ${totalCleared}건 발송 기록을 삭제했습니다.` : "삭제할 발송 기록이 없었습니다.";
+    const deviceLabel = deviceCount > 0 ? ` (대상 ${deviceCount}대)` : "";
+    const statusType = totalCleared > 0 ? "success" : "info";
+    setGlobalStatus(`${scopeLabel}: ${clearedLabel}${deviceLabel}`, statusType);
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(`${scopeLabel}: ${err.message || "발송 기록 초기화에 실패했습니다."}`, "error");
   } finally {
     clearBtn.disabled = false;
     clearBtn.textContent = originalText;

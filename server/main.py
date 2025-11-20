@@ -4235,6 +4235,13 @@ class GlobalClearLogsRequest(DeviceScopedRequest):
     )
 
 
+class GlobalClearBatchLogsRequest(DeviceScopedRequest):
+    domain: Optional[str] = Field(
+        default="daum",
+        description="발송 기록을 초기화할 도메인을 지정합니다. 현재는 'daum'만 지원합니다.",
+    )
+
+
 class BatchStopLogCreateRequest(BaseModel):
     job_id: Optional[str] = None
     session_id: Optional[str] = None
@@ -6509,6 +6516,57 @@ def clear_global_logs(payload: GlobalClearLogsRequest) -> Dict[str, Any]:
                     "device_id": device_id,
                     "cleared": cleared,
                     "reset_job_id": reset_job["id"],
+                }
+            )
+        conn.commit()
+    return {
+        "device_count": len(device_results),
+        "total_cleared": total_cleared,
+        "domain": normalized_domain,
+        "results": device_results,
+    }
+
+
+@app.post("/api/global/actions/clear-batch-logs")
+def clear_global_batch_logs(payload: GlobalClearBatchLogsRequest) -> Dict[str, Any]:
+    normalized_domain = normalize_domain(payload.domain or "daum")
+    if normalized_domain != "daum":
+        raise HTTPException(
+            status_code=400,
+            detail="발송 기록 초기화는 다음 도메인에서만 지원합니다.",
+        )
+    target_device_ids = sanitize_device_id_list(payload.device_ids)
+    total_cleared = 0
+    device_results: List[Dict[str, Any]] = []
+    with db_lock, get_conn() as conn:
+        device_rows = conn.execute(
+            "SELECT id FROM devices ORDER BY name COLLATE NOCASE",
+        ).fetchall()
+        if target_device_ids:
+            allowed_ids = set(target_device_ids)
+            device_rows = [row for row in device_rows if row["id"] in allowed_ids]
+            if not device_rows:
+                return {
+                    "device_count": 0,
+                    "total_cleared": 0,
+                    "domain": normalized_domain,
+                    "results": [],
+                }
+        for row in device_rows:
+            device_id = row["id"]
+            cursor = conn.execute(
+                """
+                DELETE FROM batch_stop_logs
+                WHERE device_id=? AND domain=?
+                """,
+                (device_id, normalized_domain),
+            )
+            deleted = cursor.rowcount or 0
+            total_cleared += deleted
+            device_results.append(
+                {
+                    "device_id": device_id,
+                    "deleted": deleted,
                 }
             )
         conn.commit()
