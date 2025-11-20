@@ -2506,7 +2506,11 @@ button:not(:disabled):hover {
   <div class="refresh-group">
     <label class="inline-field" for="cardColumnsInput">
       <span>카드 열 수</span>
-      <input type="number" id="cardColumnsInput" min="2" max="6" step="1" value="4">
+      <select id="cardColumnsInput">
+        <option value="2">2열</option>
+        <option value="3">3열</option>
+        <option value="4">4열</option>
+      </select>
     </label>
     <label class="inline-field" for="themeSelect">
       <span>테마</span>
@@ -3663,7 +3667,7 @@ const CONFIG_FIELDS = [
 const CONFIG_TOGGLE_FIELDS = ["message_id_auto", "all_headers_unique", "daum_idle_watch_enabled"];
 const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
-const CARD_COLUMNS_MAX = 6;
+const CARD_COLUMNS_MAX = 4;
 const CARD_COLUMNS_DEFAULT = 4;
 const BCC_MIN = 0;
 const ANCHOR_MIN = 1;
