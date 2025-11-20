@@ -2564,6 +2564,18 @@ button:not(:disabled):hover {
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
           </div>
         </div>
+        <div class="domain-switch" id="domainSwitchControls">
+          <div class="domain-switch-head">
+            <h4>도메인 일괄 전환</h4>
+            <p class="domain-switch-hint" id="domainSwitchHint">현재 표시된 카드에만 적용됩니다.</p>
+          </div>
+          <div class="domain-switch-actions">
+            <button type="button" class="secondary" data-action="switch-domain" data-target="naver" data-filter-scope="all">전체 카드 · 모두 네이버 도메인으로</button>
+            <button type="button" class="secondary" data-action="switch-domain" data-target="daum" data-filter-scope="all">전체 카드 · 모두 다음 도메인으로</button>
+            <button type="button" class="ghost" data-action="switch-domain" data-target="daum" data-filter-scope="naver">네이버 카드만 다음으로 전환</button>
+            <button type="button" class="ghost" data-action="switch-domain" data-target="naver" data-filter-scope="daum">다음 카드만 네이버로 전환</button>
+          </div>
+        </div>
       </div>
       <div class="global-split global-tab-panel hidden" data-global-tab-panel="settings" aria-hidden="true">
         <div class="global-section">
@@ -3197,6 +3209,56 @@ function updateDeviceFilterMeta(visibleCount) {
     segments.push("온라인만 보기");
   }
   metaEl.textContent = segments.join(" · ");
+}
+
+function updateDomainSwitchControls() {
+  const container = document.getElementById("domainSwitchControls");
+  if (!container) {
+    return;
+  }
+  const filter = sanitizeDomainFilter(state.domainFilter);
+  const visibleDevices = getVisibleDevices();
+  const visibleCount = visibleDevices.length;
+  const scopeLabel = getFilterScopeLabel();
+  const hintEl = document.getElementById("domainSwitchHint");
+  if (hintEl) {
+    hintEl.textContent = visibleCount
+      ? `${scopeLabel} · 대상 ${visibleCount}대에 적용됩니다.`
+      : `${scopeLabel}에 적용할 카드가 없습니다.`;
+  }
+  container.classList.toggle("is-disabled", !visibleCount);
+  container.querySelectorAll('[data-action="switch-domain"]').forEach((btn) => {
+    const scopeAttr = btn.dataset.filterScope || "all";
+    const scopes = scopeAttr
+      .split(",")
+      .map((item) => sanitizeDomainFilter(item.trim()))
+      .filter((entry, index, arr) => entry && arr.indexOf(entry) === index);
+    const shouldShow = scopes.includes(filter);
+    btn.classList.toggle("hidden", !shouldShow);
+    btn.disabled = !visibleCount;
+  });
+}
+
+function initDomainSwitchControls() {
+  const container = document.getElementById("domainSwitchControls");
+  if (!container) {
+    return;
+  }
+  container.addEventListener("click", (event) => {
+    const targetBtn = event.target.closest('[data-action="switch-domain"]');
+    if (!targetBtn || targetBtn.disabled) {
+      return;
+    }
+    const targetDomain = sanitizeGlobalDomain(targetBtn.dataset.target || "");
+    if (!targetDomain) {
+      return;
+    }
+    handleGlobalApply({
+      overrides: { active_domain: targetDomain },
+      triggerButton: targetBtn,
+    });
+  });
+  updateDomainSwitchControls();
 }
 
 function setDomainFilter(nextFilter) {
@@ -11184,6 +11246,7 @@ function renderDevices() {
     emptyHint.style.display = "none";
   }
   updateDeviceFilterMeta(visibleCards);
+  updateDomainSwitchControls();
   updateLockActionButtons();
   refreshLockIndicators();
   if (state.lockCopy.open) {
@@ -12503,6 +12566,7 @@ if (shuffleBtn) {
 initGlobalForm();
 initGlobalTabs();
 initDeviceFilterTabs();
+initDomainSwitchControls();
 initSubstitutionSection();
 initSinglePreviewModal();
 
