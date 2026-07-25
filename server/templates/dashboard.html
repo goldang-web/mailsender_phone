@@ -2561,6 +2561,7 @@ button:not(:disabled):hover {
             <button class="secondary" id="globalSendSingleBtn">단일 발송</button>
             <button class="secondary" id="globalSendAllBtn">전체 발송</button>
             <button class="ghost" id="globalChangeIpBtn">IP 변경</button>
+            <button class="ghost" id="globalDisconnectBtn">전체 연결해제</button>
             <button class="ghost" id="globalClearLogsBtn">로그 초기화</button>
             <button class="ghost" id="globalClearBatchLogsBtn" hidden>발송 기록 초기화</button>
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
@@ -2588,6 +2589,10 @@ button:not(:disabled):hover {
                 <label class="schedule-toggle">
                   <input type="checkbox" id="globalStopScheduleToggle">
                   <span>자동 중지</span>
+                </label>
+                <label class="schedule-toggle">
+                  <input type="checkbox" id="globalStopScheduleDisconnectToggle">
+                  <span>중지 후 연결해제</span>
                 </label>
                 <span class="schedule-status-pill" id="globalStopSchedulePill">비활성</span>
               </div>
@@ -2954,6 +2959,7 @@ const GLOBAL_FIELD_LIST = [
   "bcc_count",
   "stop_schedule_enabled",
   "stop_schedule_time",
+  "stop_schedule_disconnect",
   "telegram_bot_token",
   "telegram_chat_id",
   "daum_idle_watch_enabled",
@@ -2970,6 +2976,7 @@ const GLOBAL_DEFAULTS = {
   bcc_count: "0",
   stop_schedule_enabled: false,
   stop_schedule_time: "",
+  stop_schedule_disconnect: false,
   substitution_rules: [],
   telegram_bot_token: "",
   telegram_chat_id: "",
@@ -2987,6 +2994,7 @@ const GLOBAL_INPUT_IDS = {
   bcc_count: "globalBccCount",
   stop_schedule_enabled: "globalStopScheduleToggle",
   stop_schedule_time: "globalStopScheduleTime",
+  stop_schedule_disconnect: "globalStopScheduleDisconnectToggle",
   telegram_bot_token: "globalTelegramBotToken",
   telegram_chat_id: "globalTelegramChatId",
 };
@@ -5354,10 +5362,12 @@ async function requestDeviceScheduleUpdate(card, device, domain, payload) {
   const scheduleCard = card.querySelector('[data-role="deviceSchedule"]');
   const toggle = scheduleCard?.querySelector('[data-field="stop_schedule_enabled"]');
   const timeInput = scheduleCard?.querySelector('[data-field="stop_schedule_time"]');
+  const disconnectToggle = scheduleCard?.querySelector('[data-field="stop_schedule_disconnect"]');
   const previousConfig = bestConfig(device, normalizedDomain);
   scheduleCard?.classList.add("is-updating");
   if (toggle) toggle.disabled = true;
   if (timeInput) timeInput.disabled = true;
+  if (disconnectToggle) disconnectToggle.disabled = true;
   try {
     const result = await fetchJSON(`/api/devices/${device.id}/domains/${normalizedDomain}/schedule`, {
       method: "POST",
@@ -5387,12 +5397,16 @@ async function requestDeviceScheduleUpdate(card, device, domain, payload) {
     if (timeInput) {
       timeInput.value = sanitizeScheduleTime(previousConfig?.stop_schedule_time) || "";
     }
+    if (disconnectToggle) {
+      disconnectToggle.checked = Boolean(previousConfig?.stop_schedule_disconnect);
+    }
     setNotice(card, err?.message || "스케줄 업데이트에 실패했습니다.", "error");
     throw err;
   } finally {
     scheduleCard?.classList.remove("is-updating");
     if (toggle) toggle.disabled = false;
     if (timeInput) timeInput.disabled = false;
+    if (disconnectToggle) disconnectToggle.disabled = false;
   }
 }
 
@@ -5401,12 +5415,14 @@ function updateDeviceSchedule(card, device, domain, config) {
   if (!scheduleCard) return;
   const toggle = scheduleCard.querySelector('[data-field="stop_schedule_enabled"]');
   const timeInput = scheduleCard.querySelector('[data-field="stop_schedule_time"]');
+  const disconnectToggle = scheduleCard.querySelector('[data-field="stop_schedule_disconnect"]');
   const statusEl = scheduleCard.querySelector('[data-role="scheduleStatus"]');
   const nextRunEl = scheduleCard.querySelector('[data-role="scheduleNextRun"]');
   const lastRunEl = scheduleCard.querySelector('[data-role="scheduleLastRun"]');
   const hintEl = scheduleCard.querySelector('[data-role="scheduleHint"]');
 
   const enabled = Boolean(config?.stop_schedule_enabled);
+  const disconnectEnabled = Boolean(config?.stop_schedule_disconnect);
   const timeValue = sanitizeScheduleTime(config?.stop_schedule_time) || "";
   const nextRunValue = enabled && timeValue
     ? formatDate(config?.stop_schedule_next_run || computeDeviceNextRun(timeValue))
@@ -5422,6 +5438,10 @@ function updateDeviceSchedule(card, device, domain, config) {
       timeInput.value = timeValue;
     }
     timeInput.disabled = false;
+  }
+  if (disconnectToggle) {
+    disconnectToggle.checked = disconnectEnabled;
+    disconnectToggle.disabled = false;
   }
 
   scheduleCard.classList.toggle("active", enabled && Boolean(timeValue));
@@ -5452,7 +5472,8 @@ function updateDeviceSchedule(card, device, domain, config) {
     } else if (!enabled) {
       hintEl.textContent = `저장된 시간 ${timeValue} · 토글을 켜면 적용됩니다.`;
     } else {
-      hintEl.textContent = "예약된 시간에 현재 작업이 중단됩니다.";
+      const disconnectText = disconnectEnabled ? " 연결해제까지 실행합니다." : "";
+      hintEl.textContent = `예약된 시간에 현재 작업이 중단됩니다.${disconnectText}`;
     }
   }
 }
@@ -5514,6 +5535,7 @@ function updateGlobalScheduleUI(options = {}) {
   }
   const toggle = document.getElementById("globalStopScheduleToggle");
   const timeInput = document.getElementById("globalStopScheduleTime");
+  const disconnectToggle = document.getElementById("globalStopScheduleDisconnectToggle");
   const cardEl = document.getElementById("globalScheduleCard");
   const pillEl = document.getElementById("globalStopSchedulePill");
   const hintEl = document.getElementById("globalStopScheduleHint");
@@ -5523,6 +5545,7 @@ function updateGlobalScheduleUI(options = {}) {
   const rawValue = timeInput?.value ?? state.globalDraft.stop_schedule_time ?? "";
   const sanitized = sanitizeScheduleTime(rawValue);
   const toggleChecked = Boolean(toggle?.checked);
+  const disconnectChecked = Boolean(disconnectToggle?.checked);
   const effectivelyEnabled = toggleChecked && Boolean(sanitized);
 
   if (cardEl) {
@@ -5552,7 +5575,8 @@ function updateGlobalScheduleUI(options = {}) {
     } else if (!toggleChecked) {
       hintEl.textContent = `저장된 시간 ${sanitized} · 토글을 켜면 적용됩니다.`;
     } else {
-      hintEl.textContent = `${sanitized}에 자동 중지가 실행됩니다.`;
+      const disconnectText = disconnectChecked ? " · 중지 후 연결해제" : "";
+      hintEl.textContent = `${sanitized}에 자동 중지가 실행됩니다${disconnectText}.`;
     }
   }
 }
@@ -5576,6 +5600,9 @@ function normalizeGlobalFieldValue(field, value) {
   }
   if (field === "stop_schedule_time") {
     return sanitizeScheduleTime(value ?? "");
+  }
+  if (field === "stop_schedule_disconnect") {
+    return Boolean(value);
   }
   if (field === "all_headers_unique") {
     return Boolean(value);
@@ -7398,6 +7425,14 @@ function initGlobalForm() {
         if (!input.checked) {
           state.globalScheduleError = "";
         }
+        updateGlobalScheduleUI({ error: null });
+      });
+      return;
+    }
+    if (field === "stop_schedule_disconnect") {
+      input.addEventListener("change", () => {
+        state.globalDirty[field] = true;
+        state.globalDraft[field] = Boolean(input.checked);
         updateGlobalScheduleUI({ error: null });
       });
       return;
@@ -10061,6 +10096,32 @@ function attachCardEvents(card) {
     });
   }
 
+  const disconnectBtn = card.querySelector('button[data-action="disconnect-device"]');
+  if (disconnectBtn) {
+    disconnectBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      if (!currentDevice?.id) {
+        return;
+      }
+      const confirmed = confirm(`'${currentDevice.name || currentDevice.id}' 디바이스 연결을 해제하시겠습니까? 폰에서 다시 1번을 눌러야 재연결됩니다.`);
+      if (!confirmed) {
+        return;
+      }
+      const originalText = disconnectBtn.textContent;
+      disconnectBtn.disabled = true;
+      disconnectBtn.textContent = "연결해제 중...";
+      try {
+        await fetchJSON(`/api/devices/${currentDevice.id}/actions/disconnect`, { method: "POST" });
+        setNotice(card, "연결해제 작업을 요청했습니다.", "success");
+        await loadDevices({ silent: true });
+      } catch (err) {
+        disconnectBtn.disabled = false;
+        disconnectBtn.textContent = originalText || "연결해제";
+        setNotice(card, err.message || "연결해제 요청에 실패했습니다.", "error");
+      }
+    });
+  }
+
   const deleteBtn = card.querySelector('button[data-action="delete-device"]');
   if (deleteBtn) {
     deleteBtn.addEventListener("click", async () => {
@@ -10290,6 +10351,7 @@ function attachCardEvents(card) {
 
   const scheduleToggle = card.querySelector('[data-field="stop_schedule_enabled"]');
   const scheduleTimeInput = card.querySelector('[data-field="stop_schedule_time"]');
+  const scheduleDisconnectToggle = card.querySelector('[data-field="stop_schedule_disconnect"]');
 
   if (scheduleTimeInput) {
     const commitTimeChange = async () => {
@@ -10330,6 +10392,7 @@ function attachCardEvents(card) {
         await requestDeviceScheduleUpdate(card, currentDevice, domain, {
           enabled: wantsEnable && Boolean(sanitized),
           time: sanitized,
+          disconnect: Boolean(scheduleDisconnectToggle?.checked),
         });
       } catch (err) {
         // 오류 메시지는 requestDeviceScheduleUpdate 내부에서 처리됩니다.
@@ -10379,9 +10442,29 @@ function attachCardEvents(card) {
         await requestDeviceScheduleUpdate(card, currentDevice, domain, {
           enabled: wantsEnable,
           time: wantsEnable ? timeForRequest : sanitized,
+          disconnect: Boolean(scheduleDisconnectToggle?.checked),
         });
       } catch (err) {
         // 이미 처리됨
+      }
+    });
+  }
+
+  if (scheduleDisconnectToggle) {
+    scheduleDisconnectToggle.addEventListener("change", async () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      const config = bestConfig(currentDevice, domain);
+      const timeInput = card.querySelector('[data-field="stop_schedule_time"]');
+      const sanitized = sanitizeScheduleTime(formatScheduleInputValue(timeInput?.value ?? "")) || sanitizeScheduleTime(config?.stop_schedule_time) || "";
+      try {
+        await requestDeviceScheduleUpdate(card, currentDevice, domain, {
+          enabled: Boolean(config?.stop_schedule_enabled) && Boolean(sanitized),
+          time: sanitized,
+          disconnect: Boolean(scheduleDisconnectToggle.checked),
+        });
+      } catch (err) {
+        // requestDeviceScheduleUpdate에서 UI를 복구합니다.
       }
     });
   }
@@ -10905,6 +10988,7 @@ function buildDeviceCard(device) {
           <span class="status-dot"></span>
           <span data-role="statusText"></span>
         </div>
+        <button type="button" class="ghost small" data-action="disconnect-device" title="클라이언트 연결을 해제합니다.">연결해제</button>
         <button type="button" class="card-delete-btn danger small" data-action="delete-device" title="디바이스를 삭제합니다.">삭제</button>
       </div>
     </div>
@@ -11067,6 +11151,10 @@ function buildDeviceCard(device) {
           <input type="checkbox" data-field="stop_schedule_enabled">
           <span>자동 중지</span>
         </label>
+        <label class="schedule-toggle">
+          <input type="checkbox" data-field="stop_schedule_disconnect">
+          <span>중지 후 연결해제</span>
+        </label>
         <span class="device-schedule-pill" data-role="scheduleStatus">비활성</span>
       </div>
       <div class="device-schedule-body">
@@ -11101,6 +11189,10 @@ function updateDeviceCard(card, device) {
   if (statusChip) statusChip.className = statusClass(device.status);
   const statusText = card.querySelector('[data-role="statusText"]');
   if (statusText) statusText.textContent = STATUS_LABELS[device.status] || device.status || "상태 미확인";
+  const disconnectBtn = card.querySelector('button[data-action="disconnect-device"]');
+  if (disconnectBtn) {
+    disconnectBtn.disabled = isOffline;
+  }
 
   card.querySelectorAll('[data-role="domainRadio"]').forEach((radio) => {
     radio.name = `domain-${device.id}`;
@@ -12707,6 +12799,10 @@ document.getElementById("globalChangeIpBtn").addEventListener("click", () => {
   handleGlobalChangeIp();
 });
 
+document.getElementById("globalDisconnectBtn").addEventListener("click", () => {
+  handleGlobalDisconnect();
+});
+
 document.getElementById("globalClearLogsBtn").addEventListener("click", () => {
   handleGlobalClearLogs();
 });
@@ -12849,6 +12945,7 @@ async function handleGlobalApply(options = {}) {
   const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
   const scheduleToggle = document.getElementById("globalStopScheduleToggle");
   const scheduleTimeInput = document.getElementById("globalStopScheduleTime");
+  const scheduleDisconnectToggle = document.getElementById("globalStopScheduleDisconnectToggle");
   const telegramTokenInput = document.getElementById("globalTelegramBotToken");
   const telegramChatInput = document.getElementById("globalTelegramChatId");
   const scopeLabel = getFilterScopeLabel();
@@ -12867,6 +12964,7 @@ async function handleGlobalApply(options = {}) {
   const hasBccOverride = Object.prototype.hasOwnProperty.call(overrides, "bcc_count");
   const hasStopScheduleEnabledOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_enabled");
   const hasStopScheduleTimeOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_time");
+  const hasStopScheduleDisconnectOverride = Object.prototype.hasOwnProperty.call(overrides, "stop_schedule_disconnect");
   const hasDaumIdleWatchOverride = Object.prototype.hasOwnProperty.call(overrides, "daum_idle_watch_enabled");
   const hasDaumIdleIpOverride = Object.prototype.hasOwnProperty.call(overrides, "daum_idle_ip_change_seconds");
   const hasDaumIdleStopLimitOverride = Object.prototype.hasOwnProperty.call(overrides, "daum_idle_stop_limit");
@@ -13022,6 +13120,14 @@ async function handleGlobalApply(options = {}) {
     state.globalDraft.stop_schedule_time = sanitizedOverride;
     state.globalDirty.stop_schedule_time = true;
   }
+  if (hasStopScheduleDisconnectOverride) {
+    const disconnectValue = Boolean(overrides.stop_schedule_disconnect);
+    if (scheduleDisconnectToggle) {
+      scheduleDisconnectToggle.checked = disconnectValue;
+    }
+    state.globalDraft.stop_schedule_disconnect = disconnectValue;
+    state.globalDirty.stop_schedule_disconnect = true;
+  }
   const telegramTokenValue = telegramTokenInput?.value.trim() ?? "";
   const telegramChatValue = telegramChatInput?.value.trim() ?? "";
   if (telegramTokenInput && telegramTokenInput.value !== telegramTokenValue) {
@@ -13037,6 +13143,7 @@ async function handleGlobalApply(options = {}) {
   }
   const sanitizedSchedule = sanitizeScheduleTime(formattedSchedule);
   const toggleChecked = Boolean(scheduleToggle?.checked);
+  const disconnectChecked = Boolean(scheduleDisconnectToggle?.checked);
   if (formattedSchedule.trim() && !sanitizedSchedule) {
     updateGlobalScheduleUI({ error: "HH:MM 형식으로 입력하세요." });
     scheduleTimeInput?.focus();
@@ -13050,8 +13157,10 @@ async function handleGlobalApply(options = {}) {
 
   state.globalDraft.stop_schedule_time = sanitizedSchedule || "";
   state.globalDraft.stop_schedule_enabled = toggleChecked;
+  state.globalDraft.stop_schedule_disconnect = disconnectChecked;
   state.globalDirty.stop_schedule_time = true;
   state.globalDirty.stop_schedule_enabled = true;
+  state.globalDirty.stop_schedule_disconnect = true;
   state.globalDraft.telegram_bot_token = telegramTokenValue;
   state.globalDraft.telegram_chat_id = telegramChatValue;
   state.globalDirty.telegram_bot_token = true;
@@ -13100,6 +13209,7 @@ async function handleGlobalApply(options = {}) {
   }
   payload.stop_schedule_enabled = toggleChecked && Boolean(sanitizedSchedule);
   payload.stop_schedule_time = sanitizedSchedule || "";
+  payload.stop_schedule_disconnect = disconnectChecked;
   payload.telegram_bot_token = telegramTokenValue;
   payload.telegram_chat_id = telegramChatValue;
   payload.substitution_rules = substitutionPayload;
@@ -13137,6 +13247,7 @@ async function handleGlobalApply(options = {}) {
         if (field === "session_count") return "세션 수";
         if (field === "bcc_count") return "BCC 수";
         if (field === "stop_schedule") return "자동 중지";
+        if (field === "stop_schedule_disconnect") return "중지 후 연결해제";
         if (field === "substitution_rules") return "치환 변수";
         if (field === "telegram_bot_token") return "텔레그램 봇 토큰";
         if (field === "telegram_chat_id") return "텔레그램 챗 ID";
@@ -13150,7 +13261,7 @@ async function handleGlobalApply(options = {}) {
         ? `총 ${affected}대에 ${fieldLabels.join(", ")} 값을 적용했습니다.`
         : `총 ${affected}대에 설정을 적용했습니다.`;
       const scheduleSummary = scheduleEnabled
-        ? `자동 중지: 활성 (매일 ${scheduleTime || "--"})`
+        ? `자동 중지: 활성 (매일 ${scheduleTime || "--"}${serverConfig.stop_schedule_disconnect ? ", 연결해제 포함" : ""})`
         : "자동 중지: 비활성";
       message = `${message} · ${scheduleSummary}`;
       setGlobalStatus(`${scopeLabel} · ${message}`, "success");
@@ -13415,6 +13526,45 @@ async function handleGlobalChangeIp() {
   } finally {
     changeBtn.disabled = false;
     changeBtn.textContent = originalText;
+  }
+}
+
+async function handleGlobalDisconnect() {
+  const disconnectBtn = document.getElementById("globalDisconnectBtn");
+  if (!disconnectBtn) return;
+  const scopeLabel = getFilterScopeLabel();
+  const targetIds = getActionTargetDeviceIds();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 연결해제할 카드가 없습니다.`, "info");
+    return;
+  }
+  const confirmed = confirm(`${scopeLabel}의 디바이스 연결을 해제하시겠습니까? 진행 중인 발송은 중지되고, 폰에서 다시 1번을 눌러야 재연결됩니다.`);
+  if (!confirmed) {
+    return;
+  }
+  const originalText = disconnectBtn.textContent;
+  disconnectBtn.disabled = true;
+  disconnectBtn.textContent = "연결해제 중...";
+  try {
+    const result = await fetchJSON("/api/global/actions/disconnect", {
+      method: "POST",
+      body: JSON.stringify({
+        device_ids: targetIds,
+        reason: "사용자가 전체 연결해제를 요청했습니다.",
+      }),
+    });
+    const deviceCount = Number(result.device_count ?? 0);
+    if (deviceCount === 0) {
+      setGlobalStatus(`${scopeLabel}: 연결해제할 디바이스가 없습니다.`, "info");
+    } else {
+      setGlobalStatus(`${scopeLabel} ${deviceCount}대에 연결해제를 요청했습니다.`, "success");
+    }
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(`${scopeLabel}: ${err.message || "연결해제 요청에 실패했습니다."}`, "error");
+  } finally {
+    disconnectBtn.disabled = false;
+    disconnectBtn.textContent = originalText;
   }
 }
 

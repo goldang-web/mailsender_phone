@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.114"
+APP_VERSION = "0.0.115"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -1044,6 +1044,7 @@ class MailClient:
             self.stop_schedules[domain] = {
                 "enabled": enabled,
                 "time": schedule_time or "",
+                "disconnect": sanitize_bool_flag(entry.get("disconnect")),
                 "last_run": last_run_local,
                 "server_last_run": server_last_run,
                 "needs_sync": bool(last_run_local and last_run_local != server_last_run),
@@ -1161,6 +1162,7 @@ class MailClient:
         }
         self.connected = False
         self._disconnect_logged = False
+        self._remote_disconnect_requested = False
         self.job_controls: Dict[str, Dict[str, object]] = {}
         self._state_errors: Dict[str, str] = {}
         self._recovery_failures: Dict[str, str] = {}
@@ -1603,6 +1605,7 @@ class MailClient:
             serialized[domain] = {
                 "enabled": bool(state.get("enabled")),
                 "time": state.get("time") or "",
+                "disconnect": sanitize_bool_flag(state.get("disconnect")),
                 "last_run": state.get("last_run"),
                 "server_last_run": state.get("server_last_run"),
             }
@@ -4432,6 +4435,7 @@ class MailClient:
             state = {
                 "enabled": False,
                 "time": "",
+                "disconnect": False,
                 "last_run": None,
                 "server_last_run": None,
                 "needs_sync": False,
@@ -5324,6 +5328,8 @@ class MailClient:
             return self.handle_imap_manual_check(domain, payload, job_id)
         if job_type == "change_ip":
             return self.handle_change_ip(job_id)
+        if job_type == "disconnect":
+            return self.handle_disconnect(job_id, payload)
         if job_type == "reset_sent_sequence":
             return self.handle_reset_sent_sequence(domain, payload, job_id)
         return JobResult(job_id=job_id, status="failed", message="지원하지 않는 작업 유형입니다.")
@@ -8515,6 +8521,20 @@ class MailClient:
             error=None if success else message,
         )
 
+    def handle_disconnect(self, job_id: str, payload: Dict[str, object]) -> JobResult:
+        reason = str(payload.get("reason") or "대시보드에서 연결해제를 요청했습니다.").strip()
+        if not reason:
+            reason = "대시보드에서 연결해제를 요청했습니다."
+        self._remote_disconnect_requested = True
+        self.connected = False
+        print(f"[연결해제] {reason}")
+        return JobResult(
+            job_id=job_id,
+            status="success",
+            message="연결해제 요청을 처리했습니다.",
+            result={"reason": reason},
+        )
+
     def handle_reset_sent_sequence(self, domain: Optional[str], payload: Dict[str, object], job_id: str) -> JobResult:
         targets: Set[str] = set()
         if domain:
@@ -8963,6 +8983,9 @@ class MailClient:
                         if job_id:
                             self.job_controls.pop(job_id, None)
                             self._cancel_ack_sent.discard(job_id)
+                        if self._remote_disconnect_requested:
+                            print("[연결해제] 클라이언트 동기화를 종료합니다. 다시 연결하려면 프로그램을 재시작하세요.")
+                            return
                     if not self.offline_mode:
                         self._flush_pending_job_reports()
                     time.sleep(self.interval)
@@ -9002,6 +9025,8 @@ class MailClient:
             server_last_run = self._sanitize_schedule_date(payload.get("stop_schedule_last_run"))
             previous_enabled = bool(state.get("enabled"))
             previous_time = state.get("time") or ""
+            previous_disconnect = sanitize_bool_flag(state.get("disconnect"))
+            server_disconnect = sanitize_bool_flag(payload.get("stop_schedule_disconnect"))
             desired_time = server_time or ""
             if server_enabled != previous_enabled or desired_time != previous_time:
                 state["enabled"] = server_enabled
@@ -9015,6 +9040,9 @@ class MailClient:
                     state["needs_sync"] = False
                     self._schedule_events.pop(normalized, None)
                     server_last_run = None
+                changed = True
+            if server_disconnect != previous_disconnect:
+                state["disconnect"] = server_disconnect
                 changed = True
             if server_last_run:
                 if self._is_date_newer(server_last_run, state.get("last_run")):

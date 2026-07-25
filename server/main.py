@@ -78,6 +78,7 @@ DEFAULT_DOMAIN_CONFIG: Dict[str, Any] = {
     "client_last_cycle_processed": 0,
     "stop_schedule_enabled": False,
     "stop_schedule_time": "",
+    "stop_schedule_disconnect": False,
     "stop_schedule_last_run": None,
     "imap_enabled": False,
     "imap_username": "",
@@ -153,6 +154,7 @@ GLOBAL_CONFIG_DEFAULTS: Dict[str, Any] = {
     "active_domain": "naver",
     "stop_schedule_enabled": False,
     "stop_schedule_time": "",
+    "stop_schedule_disconnect": False,
     "substitution_rules": [],
     "telegram_bot_token": "",
     "telegram_chat_id": "",
@@ -174,6 +176,7 @@ GLOBAL_CONFIG_DEVICE_FIELDS = (
     "session_count",
     "message_id_auto",
     "message_id_pattern",
+    "stop_schedule_disconnect",
     "daum_idle_watch_enabled",
     "daum_idle_ip_change_seconds",
     "daum_idle_stop_limit",
@@ -1277,6 +1280,7 @@ def sanitize_global_config_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
     sanitized["stop_schedule_time"] = schedule_time
     schedule_enabled = sanitize_stop_schedule_enabled(raw.get("stop_schedule_enabled"))
     sanitized["stop_schedule_enabled"] = schedule_enabled if schedule_time else False
+    sanitized["stop_schedule_disconnect"] = sanitize_stop_schedule_enabled(raw.get("stop_schedule_disconnect"))
     sanitized["substitution_rules"] = sanitize_substitution_rules(raw.get("substitution_rules"))
     sanitized["telegram_bot_token"] = sanitize_telegram_bot_token(raw.get("telegram_bot_token"))
     sanitized["telegram_chat_id"] = sanitize_telegram_chat_id(raw.get("telegram_chat_id"))
@@ -1657,6 +1661,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 client_last_cycle_processed INTEGER DEFAULT 0,
                 stop_schedule_enabled INTEGER NOT NULL DEFAULT 0,
                 stop_schedule_time TEXT DEFAULT '',
+                stop_schedule_disconnect INTEGER NOT NULL DEFAULT 0,
                 stop_schedule_last_run TEXT,
                 imap_enabled INTEGER NOT NULL DEFAULT 0,
                 imap_username TEXT DEFAULT '',
@@ -1701,7 +1706,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 client_updated_at, client_reserved, client_remaining,
                 client_cycle_completed, client_cycle_count,
                 client_last_cycle_at, client_last_cycle_processed,
-                stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
+                stop_schedule_enabled, stop_schedule_time, stop_schedule_disconnect, stop_schedule_last_run,
                 imap_enabled, imap_username, imap_password, imap_delay_seconds, imap_single_delay_seconds,
                 imap_allowed_latency_seconds,
                 imap_failure_action,
@@ -1727,7 +1732,7 @@ def _remove_anchor_imap_columns(conn: sqlite3.Connection) -> None:
                 client_updated_at, client_reserved, client_remaining,
                 client_cycle_completed, client_cycle_count,
                 client_last_cycle_at, client_last_cycle_processed,
-                stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
+                stop_schedule_enabled, stop_schedule_time, 0 AS stop_schedule_disconnect, stop_schedule_last_run,
                 imap_enabled, imap_username, imap_password, imap_delay_seconds, imap_delay_seconds AS imap_single_delay_seconds,
                 imap_delay_seconds AS imap_allowed_latency_seconds,
                 'none' AS imap_failure_action,
@@ -1789,6 +1794,7 @@ def _init_db() -> None:
                 daum_idle_ip_change_seconds INTEGER NOT NULL DEFAULT 20,
                 daum_idle_stop_seconds INTEGER NOT NULL DEFAULT 120,
                 daum_idle_stop_limit INTEGER NOT NULL DEFAULT 3,
+                stop_schedule_disconnect INTEGER NOT NULL DEFAULT 0,
                 client_db_version INTEGER DEFAULT 0,
                 client_total INTEGER DEFAULT 0,
                 client_pending INTEGER DEFAULT 0,
@@ -1999,6 +2005,10 @@ def _init_db() -> None:
         if "stop_schedule_time" not in config_columns:
             conn.execute(
                 "ALTER TABLE device_configs ADD COLUMN stop_schedule_time TEXT DEFAULT ''"
+            )
+        if "stop_schedule_disconnect" not in config_columns:
+            conn.execute(
+                "ALTER TABLE device_configs ADD COLUMN stop_schedule_disconnect INTEGER NOT NULL DEFAULT 0"
             )
         if "stop_schedule_last_run" not in config_columns:
             conn.execute(
@@ -2313,7 +2323,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     client_updated_at, client_reserved, client_remaining,
                     client_cycle_completed, client_cycle_count,
                     client_last_cycle_at, client_last_cycle_processed,
-                    stop_schedule_enabled, stop_schedule_time, stop_schedule_last_run,
+                    stop_schedule_enabled, stop_schedule_time, stop_schedule_disconnect, stop_schedule_last_run,
                     imap_enabled, imap_username, imap_password, imap_delay_seconds,
                     imap_single_delay_seconds, imap_allowed_latency_seconds,
                     imap_failure_action, imap_notify_before_stop_all, imap_purge_before_check, imap_reroll_on_retry, imap_recheck_attempts,
@@ -2327,7 +2337,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                 VALUES (
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?, ?, ?, ?, ?, ?
@@ -2364,6 +2374,7 @@ def ensure_device(device_id: str, name: str, public_ip: Optional[str] = None) ->
                     DEFAULT_DOMAIN_CONFIG["client_last_cycle_processed"],
                     1 if DEFAULT_DOMAIN_CONFIG["stop_schedule_enabled"] else 0,
                     DEFAULT_DOMAIN_CONFIG["stop_schedule_time"],
+                    1 if DEFAULT_DOMAIN_CONFIG["stop_schedule_disconnect"] else 0,
                     DEFAULT_DOMAIN_CONFIG["stop_schedule_last_run"],
                     1 if DEFAULT_DOMAIN_CONFIG["imap_enabled"] else 0,
                     DEFAULT_DOMAIN_CONFIG["imap_username"],
@@ -2440,6 +2451,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
     session_value = max(1, session_value)
     schedule_enabled = sanitize_stop_schedule_enabled(row.get("stop_schedule_enabled"))
     schedule_time = sanitize_stop_schedule_time(row.get("stop_schedule_time"))
+    schedule_disconnect = sanitize_stop_schedule_enabled(row.get("stop_schedule_disconnect"))
     schedule_last_run = sanitize_stop_schedule_last_run(row.get("stop_schedule_last_run"))
     schedule_next_run = compute_next_stop_schedule(schedule_time) if schedule_enabled and schedule_time else None
     imap_enabled = sanitize_imap_enabled(row.get("imap_enabled"))
@@ -2562,6 +2574,7 @@ def serialize_config(row: Dict[str, Any], *, include_secret: bool = True) -> Dic
         "daum_idle_stop_seconds": daum_stop_seconds,
         "stop_schedule_enabled": schedule_enabled,
         "stop_schedule_time": schedule_time,
+        "stop_schedule_disconnect": schedule_disconnect,
         "stop_schedule_last_run": schedule_last_run,
         "stop_schedule_next_run": schedule_next_run,
         "updated_at": row.get("updated_at"),
@@ -3589,6 +3602,11 @@ def handle_job_completion(
                 job_row["id"],
             ),
         )
+    elif job_row["job_type"] == "disconnect" and status == "success":
+        conn.execute(
+            "UPDATE devices SET status='disconnected', updated_at=? WHERE id=?",
+            (now, job_row["device_id"]),
+        )
 
 
 def cancel_active_sends(
@@ -3890,6 +3908,7 @@ class ActiveDomainRequest(BaseModel):
 class DeviceScheduleUpdateRequest(BaseModel):
     enabled: bool
     time: Optional[str] = None
+    disconnect: Optional[bool] = None
 
 
 class DomainPreviewEntryPayload(BaseModel):
@@ -4172,6 +4191,7 @@ class GlobalConfigPayload(DeviceScopedRequest):
     target_domain: Optional[str] = None
     stop_schedule_enabled: Optional[bool] = None
     stop_schedule_time: Optional[str] = None
+    stop_schedule_disconnect: Optional[bool] = None
     substitution_rules: Optional[List[SubstitutionRule]] = None
     telegram_bot_token: Optional[str] = None
     telegram_chat_id: Optional[str] = None
@@ -4193,6 +4213,7 @@ class GlobalConfigResponse(BaseModel):
     active_domain: str
     stop_schedule_enabled: bool
     stop_schedule_time: str
+    stop_schedule_disconnect: bool
     updated_at: Optional[str] = None
     stop_schedule_last_run: Optional[str] = None
     stop_schedule_next_run: Optional[str] = None
@@ -4237,6 +4258,10 @@ class GlobalClearLogsRequest(DeviceScopedRequest):
 
 class GlobalChangeIpRequest(DeviceScopedRequest):
     pass
+
+
+class GlobalDisconnectRequest(DeviceScopedRequest):
+    reason: Optional[str] = None
 
 
 class GlobalClearBatchLogsRequest(DeviceScopedRequest):
@@ -4389,6 +4414,7 @@ def preview_substitution_endpoint(payload: SubstitutionPreviewRequest) -> Substi
 def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse:
     schedule_time = sanitize_stop_schedule_time(config.get("stop_schedule_time"))
     schedule_enabled = sanitize_stop_schedule_enabled(config.get("stop_schedule_enabled"))
+    schedule_disconnect = sanitize_stop_schedule_enabled(config.get("stop_schedule_disconnect"))
     if schedule_enabled and not schedule_time:
         schedule_enabled = False
     raw_all_headers = config.get("all_headers_unique")
@@ -4432,6 +4458,7 @@ def build_global_config_response(config: Dict[str, Any]) -> GlobalConfigResponse
         active_domain=sanitize_global_active_domain(config.get("active_domain")),
         stop_schedule_enabled=schedule_enabled,
         stop_schedule_time=schedule_time or "",
+        stop_schedule_disconnect=schedule_disconnect,
         updated_at=config.get("updated_at"),
         stop_schedule_last_run=config.get("stop_schedule_last_run"),
         stop_schedule_next_run=config.get("stop_schedule_next_run"),
@@ -4522,6 +4549,11 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 candidate_pattern = str(raw_value or "").strip() or MESSAGE_ID_PATTERN_DEFAULT
                 value_to_apply = candidate_pattern
                 should_apply = True
+            elif field == "stop_schedule_disconnect":
+                if raw_value is None:
+                    continue
+                value_to_apply = 1 if raw_value else 0
+                should_apply = True
             elif field == "daum_idle_watch_enabled":
                 if raw_value is None:
                     continue
@@ -4559,6 +4591,8 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 apply_values[field] = value_to_apply
                 if field in ("message_id_auto", "all_headers_unique"):
                     stored_config[field] = bool(value_to_apply)
+                elif field == "stop_schedule_disconnect":
+                    stored_config[field] = bool(raw_value)
                 elif field == "daum_idle_watch_enabled":
                     stored_config[field] = bool(raw_value)
                 else:
@@ -5645,8 +5679,14 @@ def update_device_schedule(device_id: str, domain: str, payload: DeviceScheduleU
         previous_enabled = sanitize_stop_schedule_enabled(config_data.get("stop_schedule_enabled"))
         previous_time = sanitize_stop_schedule_time(config_data.get("stop_schedule_time"))
         previous_last_run = sanitize_stop_schedule_last_run(config_data.get("stop_schedule_last_run"))
+        previous_disconnect = sanitize_stop_schedule_enabled(config_data.get("stop_schedule_disconnect"))
         requested_enabled = sanitize_stop_schedule_enabled(payload.enabled)
         requested_time = sanitize_stop_schedule_time(payload.time)
+        requested_disconnect = (
+            sanitize_stop_schedule_enabled(payload.disconnect)
+            if payload.disconnect is not None
+            else previous_disconnect
+        )
         if requested_enabled and not requested_time:
             raise HTTPException(status_code=400, detail="예약을 켜려면 유효한 HH:MM 형식의 시간을 입력하세요.")
         schedule_time = requested_time if requested_enabled else (requested_time or previous_time or "")
@@ -5664,6 +5704,7 @@ def update_device_schedule(device_id: str, domain: str, payload: DeviceScheduleU
             UPDATE device_configs
             SET stop_schedule_enabled=?,
                 stop_schedule_time=?,
+                stop_schedule_disconnect=?,
                 stop_schedule_last_run=?,
                 updated_at=?
             WHERE device_id=? AND domain=?
@@ -5671,6 +5712,7 @@ def update_device_schedule(device_id: str, domain: str, payload: DeviceScheduleU
             (
                 schedule_enabled_flag,
                 schedule_time or "",
+                1 if requested_disconnect else 0,
                 schedule_last_run,
                 now,
                 device_id,
@@ -6030,6 +6072,47 @@ def enqueue_global_change_ip(payload: GlobalChangeIpRequest) -> Dict[str, Any]:
     }
 
 
+@app.post("/api/global/actions/disconnect")
+def enqueue_global_disconnect(payload: GlobalDisconnectRequest) -> Dict[str, Any]:
+    target_device_ids = sanitize_device_id_list(payload.device_ids)
+    reason = (payload.reason or "").strip() or "사용자가 연결해제를 요청했습니다."
+    scheduled_results: List[Dict[str, Any]] = []
+    with db_lock, get_conn() as conn:
+        stop_result = cancel_active_sends(
+            conn,
+            reason,
+            device_ids=target_device_ids or None,
+            job_types=("batch_send", "single_send"),
+        )
+        device_rows = conn.execute(
+            "SELECT id FROM devices ORDER BY name COLLATE NOCASE",
+        ).fetchall()
+        if target_device_ids:
+            allowed_ids = set(target_device_ids)
+            device_rows = [row for row in device_rows if row["id"] in allowed_ids]
+            if not device_rows:
+                return {
+                    "device_count": 0,
+                    "results": [],
+                    "stop_result": stop_result,
+                }
+        for row in device_rows:
+            device_id = row["id"]
+            job = create_job(conn, device_id, None, "disconnect", {"reason": reason})
+            scheduled_results.append(
+                {
+                    "device_id": device_id,
+                    "job_id": job["id"],
+                }
+            )
+        conn.commit()
+    return {
+        "device_count": len(scheduled_results),
+        "results": scheduled_results,
+        "stop_result": stop_result,
+    }
+
+
 @app.post("/api/devices/{device_id}/actions/send-single")
 def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str, Any]:
     domain = normalize_domain(payload.domain)
@@ -6195,6 +6278,24 @@ def enqueue_change_ip(device_id: str) -> Dict[str, Any]:
         job = create_job(conn, device_id, None, "change_ip", {})
         conn.commit()
     return {"job": job}
+
+
+@app.post("/api/devices/{device_id}/actions/disconnect")
+def enqueue_disconnect(device_id: str) -> Dict[str, Any]:
+    reason = "사용자가 연결해제를 요청했습니다."
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        stop_result = cancel_active_sends(
+            conn,
+            reason,
+            device_ids=[device_id],
+            job_types=("batch_send", "single_send"),
+        )
+        job = create_job(conn, device_id, None, "disconnect", {"reason": reason})
+        conn.commit()
+    return {"job": job, "stop_result": stop_result}
 
 
 @app.post("/api/jobs/{job_id}/cancel")
@@ -6997,6 +7098,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             (payload.device_name, now, public_ip, now, device_id),
         )
         schedule_triggers: List[str] = []
+        schedule_disconnect_triggers: List[str] = []
         for state in payload.domain_states:
             domain = normalize_domain(state.domain)
             cycle_completed_value: Optional[int]
@@ -7010,7 +7112,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             )
             config_row = conn.execute(
                 """
-                SELECT stop_schedule_last_run
+                SELECT stop_schedule_last_run, stop_schedule_disconnect
                 FROM device_configs
                 WHERE device_id=? AND domain=?
                 """,
@@ -7024,6 +7126,8 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             state_last_run = sanitize_stop_schedule_last_run(state.stop_schedule_last_run)
             if state_last_run and state_last_run != previous_last_run:
                 schedule_triggers.append(domain)
+                if sanitize_stop_schedule_enabled(config_row["stop_schedule_disconnect"] if config_row else None):
+                    schedule_disconnect_triggers.append(domain)
             conn.execute(
                 """
                 UPDATE device_configs
@@ -7089,6 +7193,14 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             )
             if schedule_auto_stop_result.get("cancelled") or schedule_auto_stop_result.get("cancel_requested"):
                 log_console(f"[SCHEDULE] 디바이스 {device_id} 자동 중지: {schedule_reason}")
+            if schedule_disconnect_triggers:
+                disconnect_payload = {
+                    "reason": schedule_reason,
+                    "domains": schedule_disconnect_triggers,
+                    "origin": "schedule",
+                }
+                create_job(conn, device_id, None, "disconnect", disconnect_payload)
+                log_console(f"[SCHEDULE] 디바이스 {device_id} 자동 연결해제 예약: {schedule_reason}")
         auto_stop_context: Optional[Dict[str, Any]] = None
         device_stop_context: Optional[Dict[str, Any]] = None
         job_type_cache: Dict[str, str] = {}
@@ -7434,6 +7546,7 @@ def heartbeat(device_id: str, payload: HeartbeatRequest) -> HeartbeatResponse:
             WHERE device_id=? AND status='pending' AND cancel_requested=0
             ORDER BY
                 CASE job_type
+                    WHEN 'disconnect' THEN -2
                     WHEN 'reset_sent_sequence' THEN -1
                     WHEN 'imap_manual_check' THEN 0
                     WHEN 'single_send' THEN 0
