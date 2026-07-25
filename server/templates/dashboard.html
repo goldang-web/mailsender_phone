@@ -2560,6 +2560,7 @@ button:not(:disabled):hover {
             <button class="secondary" id="globalSaveAllBtn">설정 저장</button>
             <button class="secondary" id="globalSendSingleBtn">단일 발송</button>
             <button class="secondary" id="globalSendAllBtn">전체 발송</button>
+            <button class="ghost" id="globalChangeIpBtn">IP 변경</button>
             <button class="ghost" id="globalClearLogsBtn">로그 초기화</button>
             <button class="ghost" id="globalClearBatchLogsBtn" hidden>발송 기록 초기화</button>
             <button class="danger" id="globalStopAllBtn">전체 중지</button>
@@ -12702,6 +12703,10 @@ document.getElementById("globalSendAllBtn").addEventListener("click", () => {
   handleGlobalSendAll();
 });
 
+document.getElementById("globalChangeIpBtn").addEventListener("click", () => {
+  handleGlobalChangeIp();
+});
+
 document.getElementById("globalClearLogsBtn").addEventListener("click", () => {
   handleGlobalClearLogs();
 });
@@ -13374,6 +13379,42 @@ async function handleGlobalSendAll() {
   } finally {
     sendBtn.disabled = false;
     sendBtn.textContent = originalText;
+  }
+}
+
+async function handleGlobalChangeIp() {
+  const changeBtn = document.getElementById("globalChangeIpBtn");
+  if (!changeBtn) return;
+  const scopeLabel = getFilterScopeLabel();
+  const targetIds = getActionTargetDeviceIds();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 IP 변경을 요청할 카드가 없습니다.`, "info");
+    return;
+  }
+  const confirmed = confirm(`${scopeLabel}의 디바이스에 IP 변경을 요청하시겠습니까? 진행 중 작업은 네트워크 재연결로 잠시 지연될 수 있습니다.`);
+  if (!confirmed) {
+    return;
+  }
+  const originalText = changeBtn.textContent;
+  changeBtn.disabled = true;
+  changeBtn.textContent = "IP 변경 중...";
+  try {
+    const result = await fetchJSON("/api/global/actions/change-ip", {
+      method: "POST",
+      body: JSON.stringify({ device_ids: targetIds }),
+    });
+    const deviceCount = Number(result.device_count ?? 0);
+    if (deviceCount === 0) {
+      setGlobalStatus(`${scopeLabel}: IP 변경을 요청할 디바이스가 없습니다.`, "info");
+    } else {
+      setGlobalStatus(`${scopeLabel} ${deviceCount}대에 IP 변경을 요청했습니다.`, "success");
+    }
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(`${scopeLabel}: ${err.message || "IP 변경 요청에 실패했습니다."}`, "error");
+  } finally {
+    changeBtn.disabled = false;
+    changeBtn.textContent = originalText;
   }
 }
 

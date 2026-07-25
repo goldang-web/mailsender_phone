@@ -4235,6 +4235,10 @@ class GlobalClearLogsRequest(DeviceScopedRequest):
     )
 
 
+class GlobalChangeIpRequest(DeviceScopedRequest):
+    pass
+
+
 class GlobalClearBatchLogsRequest(DeviceScopedRequest):
     domain: Optional[str] = Field(
         default="daum",
@@ -5991,6 +5995,38 @@ def enqueue_global_single(payload: GlobalSingleRequest) -> Dict[str, Any]:
         "device_count": len(created_jobs),
         "skipped_devices": skipped_devices,
         "mode": forced_domain or "active",
+    }
+
+
+@app.post("/api/global/actions/change-ip")
+def enqueue_global_change_ip(payload: GlobalChangeIpRequest) -> Dict[str, Any]:
+    target_device_ids = sanitize_device_id_list(payload.device_ids)
+    scheduled_results: List[Dict[str, Any]] = []
+    with db_lock, get_conn() as conn:
+        device_rows = conn.execute(
+            "SELECT id FROM devices ORDER BY name COLLATE NOCASE",
+        ).fetchall()
+        if target_device_ids:
+            allowed_ids = set(target_device_ids)
+            device_rows = [row for row in device_rows if row["id"] in allowed_ids]
+            if not device_rows:
+                return {
+                    "device_count": 0,
+                    "results": [],
+                }
+        for row in device_rows:
+            device_id = row["id"]
+            job = create_job(conn, device_id, None, "change_ip", {})
+            scheduled_results.append(
+                {
+                    "device_id": device_id,
+                    "job_id": job["id"],
+                }
+            )
+        conn.commit()
+    return {
+        "device_count": len(scheduled_results),
+        "results": scheduled_results,
     }
 
 
