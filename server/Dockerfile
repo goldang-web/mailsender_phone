@@ -22,7 +22,11 @@ COPY pyproject.toml uv.lock ./
 #    - requirements.txt 대신 pyproject.toml에 명시된 FastAPI, uvicorn 등을 직접 설치합니다.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential \
-    && pip install --no-cache-dir fastapi>=0.118.2 jinja2>=3.1.6 python-multipart>=0.0.20 uvicorn>=0.37.0 \
+    && pip install --no-cache-dir \
+        "fastapi==0.118.2" \
+        "jinja2==3.1.6" \
+        "python-multipart==0.0.20" \
+        "uvicorn==0.37.0" \
     && apt-get purge -y --auto-remove build-essential \
     && rm -rf /var/lib/apt/lists/*
 

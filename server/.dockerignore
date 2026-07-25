@@ -1,0 +1,17 @@
+# Runtime data is mounted separately by docker-compose.yml.
+control.db
+email_logs.db
+storage/
+
+# Local development and source-control metadata.
+.git/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Local environment and editor files.
+.env
+.env.*
+.idea/
+.vscode/

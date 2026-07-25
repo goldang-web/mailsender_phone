@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.115"
+APP_VERSION = "0.0.116"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
