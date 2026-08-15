@@ -6709,12 +6709,14 @@ async def deploy_global_domain_file(
     server_file_mode: str = Form("replace"),
     client_db_mode: str = Form("reset"),
     inject: bool = Form(True),
+    shuffle_after_inject: bool = Form(False),
 ) -> Dict[str, Any]:
     normalized = normalize_domain(domain)
     selected_device_ids = parse_form_device_ids(device_ids)
     server_mode = sanitize_global_db_server_file_mode(server_file_mode)
     client_mode = sanitize_global_db_client_db_mode(client_db_mode)
     should_inject = bool(inject)
+    should_shuffle = bool(shuffle_after_inject)
     filename = (file.filename or "db_upload.txt").strip() or "db_upload.txt"
     data = await file.read()
     if not data:
@@ -6738,6 +6740,7 @@ async def deploy_global_domain_file(
                 "server_file_mode": server_mode,
                 "client_db_mode": client_mode,
                 "inject": should_inject,
+                "shuffle_after_inject": should_shuffle,
                 "created_files": 0,
                 "deleted_files": 0,
                 "jobs": [],
@@ -6811,6 +6814,16 @@ async def deploy_global_domain_file(
                     """,
                     (inject_job["id"], file_id),
                 )
+            shuffle_job: Optional[Dict[str, Any]] = None
+            if should_shuffle:
+                shuffle_job = create_job(
+                    conn,
+                    device_id,
+                    normalized,
+                    "shuffle_domain",
+                    {"domain": normalized, "origin": "global_file_deploy"},
+                )
+                created_jobs.append(shuffle_job["id"])
             results.append(
                 {
                     "device_id": device_id,
@@ -6820,6 +6833,7 @@ async def deploy_global_domain_file(
                     "deleted_files": deleted_files,
                     "purge_job_id": purge_job["id"] if purge_job else None,
                     "inject_job_id": inject_job["id"] if inject_job else None,
+                    "shuffle_job_id": shuffle_job["id"] if shuffle_job else None,
                 }
             )
         conn.commit()
@@ -6829,6 +6843,7 @@ async def deploy_global_domain_file(
         "server_file_mode": server_mode,
         "client_db_mode": client_mode,
         "inject": should_inject,
+        "shuffle_after_inject": should_shuffle,
         "created_files": len(results),
         "deleted_files": deleted_file_total,
         "jobs": created_jobs,

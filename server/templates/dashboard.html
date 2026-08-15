@@ -2703,6 +2703,13 @@ button:not(:disabled):hover {
                 <option value="append">기존 DB에 추가 Inject</option>
               </select>
             </label>
+            <label class="field">
+              <span>Inject 후 처리</span>
+              <select id="globalDbShuffleMode">
+                <option value="shuffle">Inject 후 DB 섞기</option>
+                <option value="keep">DB 섞지 않기</option>
+              </select>
+            </label>
             <label class="field global-db-deploy-file">
               <span>파일</span>
               <input id="globalDbDeployFile" type="file" accept=".db,.sqlite,.sqlite3,.txt,.csv">
@@ -3154,6 +3161,10 @@ const GLOBAL_DB_CLIENT_DB_MODE_LABELS = {
   reset: "기존 DB 비우고 새로 Inject",
   append: "기존 DB에 추가 Inject",
 };
+const GLOBAL_DB_SHUFFLE_MODE_LABELS = {
+  shuffle: "Inject 후 DB 섞기",
+  keep: "DB 섞지 않기",
+};
 const DOMAIN_FILTER_STORAGE_KEY = "dashboard.domainFilter";
 const DOMAIN_FILTERS = ["all", "naver", "daum"];
 
@@ -3306,14 +3317,24 @@ function sanitizeGlobalDbClientDbMode(value) {
     : "reset";
 }
 
+function sanitizeGlobalDbShuffleMode(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(GLOBAL_DB_SHUFFLE_MODE_LABELS, normalized)
+    ? normalized
+    : "shuffle";
+}
+
 function getGlobalDbDeployLabels() {
   const serverMode = sanitizeGlobalDbServerFileMode(document.getElementById("globalDbServerFileMode")?.value);
   const clientMode = sanitizeGlobalDbClientDbMode(document.getElementById("globalDbClientDbMode")?.value);
+  const shuffleMode = sanitizeGlobalDbShuffleMode(document.getElementById("globalDbShuffleMode")?.value);
   return {
     serverMode,
     clientMode,
+    shuffleMode,
     serverLabel: GLOBAL_DB_SERVER_FILE_MODE_LABELS[serverMode],
     clientLabel: GLOBAL_DB_CLIENT_DB_MODE_LABELS[clientMode],
+    shuffleLabel: GLOBAL_DB_SHUFFLE_MODE_LABELS[shuffleMode],
   };
 }
 
@@ -3611,7 +3632,8 @@ function initGlobalDbDeployControls() {
   const domainSelect = document.getElementById("globalDbDeployDomain");
   const serverModeSelect = document.getElementById("globalDbServerFileMode");
   const clientModeSelect = document.getElementById("globalDbClientDbMode");
-  [domainSelect, serverModeSelect, clientModeSelect].forEach((control) => {
+  const shuffleModeSelect = document.getElementById("globalDbShuffleMode");
+  [domainSelect, serverModeSelect, clientModeSelect, shuffleModeSelect].forEach((control) => {
     if (control) {
       control.addEventListener("change", updateGlobalDbDeployTarget);
     }
@@ -13788,10 +13810,11 @@ async function handleGlobalDbDeploy(button, fileInput) {
   }
   const domain = sanitizeGlobalDomain(document.getElementById("globalDbDeployDomain")?.value || "naver");
   const domainLabel = DOMAIN_LABELS[domain] || domain;
-  const { serverMode, clientMode, serverLabel, clientLabel } = getGlobalDbDeployLabels();
+  const { serverMode, clientMode, shuffleMode, serverLabel, clientLabel, shuffleLabel } = getGlobalDbDeployLabels();
   const confirmLines = [
     `${scopeLabel} ${targetIds.length}대의 ${domainLabel} 관리 등록 파일 처리: ${serverLabel}`,
     `클라이언트 발송 DB 처리: ${clientLabel}`,
+    `Inject 후 처리: ${shuffleLabel}`,
     `파일: ${file.name}`,
     "",
     "계속할까요?",
@@ -13805,12 +13828,14 @@ async function handleGlobalDbDeploy(button, fileInput) {
   formData.append("server_file_mode", serverMode);
   formData.append("client_db_mode", clientMode);
   formData.append("inject", "true");
+  formData.append("shuffle_after_inject", shuffleMode === "shuffle" ? "true" : "false");
   const controls = [
     button,
     fileInput,
     document.getElementById("globalDbDeployDomain"),
     document.getElementById("globalDbServerFileMode"),
     document.getElementById("globalDbClientDbMode"),
+    document.getElementById("globalDbShuffleMode"),
   ].filter(Boolean);
   const originalText = button?.textContent;
   controls.forEach((control) => {
@@ -13839,8 +13864,9 @@ async function handleGlobalDbDeploy(button, fileInput) {
     const deviceCount = payload?.device_count ?? 0;
     const deletedFiles = payload?.deleted_files ?? 0;
     const jobCount = Array.isArray(payload?.jobs) ? payload.jobs.length : 0;
+    const shuffleSuffix = shuffleMode === "shuffle" ? " · DB 섞기 포함" : "";
     setGlobalStatus(
-      `${scopeLabel} ${deviceCount}대에 공통 DB 배포를 예약했습니다. · 삭제 파일 ${deletedFiles}개 · 작업 ${jobCount}개`,
+      `${scopeLabel} ${deviceCount}대에 공통 DB 배포를 예약했습니다. · 삭제 파일 ${deletedFiles}개 · 작업 ${jobCount}개${shuffleSuffix}`,
       "success",
     );
     if (fileInput) {
