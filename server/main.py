@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
-from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, Response, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
@@ -28,6 +28,9 @@ from email.utils import make_msgid
 DOMAINS = ("naver", "daum")
 DOMAIN_LABELS = {"naver": "네이버", "daum": "다음"}
 DOMAIN_PREVIEW_LIMIT = 100
+GLOBAL_BATCH_HEADER_MODES = ("same", "per_client", "per_session")
+GLOBAL_DB_SERVER_FILE_MODES = ("keep", "replace")
+GLOBAL_DB_CLIENT_DB_MODES = ("append", "reset")
 VALID_PREVIEW_STATUSES = {
     "pending",
     "reserved",
@@ -2211,6 +2214,54 @@ def normalize_domain(domain: str) -> str:
     return lowered
 
 
+def sanitize_global_batch_header_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"shared", "all_same", "all"}:
+        return "same"
+    if normalized in {"client", "client_unique"}:
+        return "per_client"
+    if normalized in {"session", "session_unique"}:
+        return "per_session"
+    return normalized if normalized in GLOBAL_BATCH_HEADER_MODES else "same"
+
+
+def sanitize_global_db_server_file_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"replace", "delete", "delete_existing", "clear"}:
+        return "replace"
+    if normalized in {"keep", "append", "add"}:
+        return "keep"
+    return "replace"
+
+
+def sanitize_global_db_client_db_mode(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"reset", "purge", "clear", "replace"}:
+        return "reset"
+    if normalized in {"append", "keep", "add"}:
+        return "append"
+    return "reset"
+
+
+def parse_form_device_ids(value: Any) -> List[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return sanitize_device_id_list(value)
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        parsed = None
+    if isinstance(parsed, (list, tuple, set)):
+        return sanitize_device_id_list(parsed)
+    return sanitize_device_id_list(
+        [part.strip() for part in re.split(r"[\n,]+", text) if part.strip()]
+    )
+
+
 def _sanitize_preview_timestamp(value: Optional[str]) -> Optional[str]:
     if not value:
         return None
@@ -4246,6 +4297,10 @@ class GlobalBatchRequest(DeviceScopedRequest):
         default="active",
         description="명시하면 해당 도메인으로 전체 발송을 예약합니다. 기본은 각 디바이스의 활성 도메인입니다.",
     )
+    header_mode: Optional[str] = Field(
+        default="same",
+        description="전역 전체발송 치환 방식입니다. same, per_client, per_session 중 하나입니다.",
+    )
 
 
 class GlobalSingleRequest(DeviceScopedRequest):
@@ -5860,6 +5915,7 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
     forced_domain: Optional[str] = None
     if mode != "active":
         forced_domain = normalize_domain(mode)
+    header_mode = sanitize_global_batch_header_mode(payload.header_mode)
     created_jobs: List[Dict[str, Any]] = []
     target_device_ids = sanitize_device_id_list(payload.device_ids)
     with db_lock, get_conn() as conn:
@@ -5874,20 +5930,30 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                     "jobs": [],
                     "device_count": 0,
                     "mode": forced_domain or "active",
+                    "header_mode": header_mode,
                 }
         global_config = load_global_config(conn=conn)
         bot_token, chat_id = extract_telegram_credentials(global_config)
         source_rules = global_config.get("substitution_rules")
-        substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
-        context = build_substitution_context(substitution_rules)
+        shared_substitution_rules = sanitize_substitution_rules(source_rules)
+        shared_context = build_substitution_context(shared_substitution_rules)
+        shared_random_seed = random.SystemRandom().randrange(1 << 63)
         for device_row in device_rows:
             device_id = device_row["id"]
             active = device_row["active_domain"] or "naver"
             domain = forced_domain or normalize_domain(active)
             configs = load_device_configs(device_id, conn=conn)
             config_snapshot = build_config_snapshot(configs, domain)
+            config_snapshot["all_headers_unique"] = header_mode == "per_session"
             template_config = dict(config_snapshot)
-            rng = random.SystemRandom()
+            if header_mode == "same":
+                substitution_rules = shared_substitution_rules
+                context = shared_context
+                rng = random.Random(shared_random_seed)
+            else:
+                substitution_rules = sanitize_substitution_rules(source_rules)
+                context = build_substitution_context(substitution_rules)
+                rng = random.SystemRandom()
             base_config = configs.get(domain) or {}
             lock_mode = sanitize_substitution_lock_mode(base_config.get("substitution_lock_mode"))
             lock_snapshot = decode_substitution_snapshot(base_config.get("substitution_snapshot"))
@@ -5917,7 +5983,7 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                 base_config.get("imap_reroll_on_retry")
             )
             substitution_payload: Optional[Dict[str, Any]] = None
-            if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
+            if header_mode == "per_session" or reroll_on_retry_enabled:
                 substitution_payload = build_job_substitution_payload(
                     template_config,
                     substitution_rules,
@@ -5946,6 +6012,7 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
         "jobs": [job["id"] for job in created_jobs],
         "device_count": len(created_jobs),
         "mode": forced_domain or "active",
+        "header_mode": header_mode,
     }
 
 
@@ -6507,6 +6574,32 @@ def fetch_device_file(conn: sqlite3.Connection, device_id: str, domain: str, fil
     return row
 
 
+def delete_domain_file_rows(conn: sqlite3.Connection, device_id: str, domain: str) -> int:
+    rows = conn.execute(
+        """
+        SELECT stored_name
+        FROM device_files
+        WHERE device_id=? AND domain=?
+        """,
+        (device_id, domain),
+    ).fetchall()
+    conn.execute(
+        "DELETE FROM device_files WHERE device_id=? AND domain=?",
+        (device_id, domain),
+    )
+    deleted = 0
+    for row in rows:
+        stored_name = row["stored_name"]
+        storage_path = build_storage_path(device_id, domain, stored_name)
+        if storage_path.exists():
+            try:
+                storage_path.unlink()
+            except OSError as exc:
+                log_console(f"[파일] 기존 파일 삭제 실패: {storage_path} · {exc}")
+        deleted += 1
+    return deleted
+
+
 @app.get("/api/devices/{device_id}/domains/{domain}/preview")
 def get_domain_db_preview(device_id: str, domain: str) -> Dict[str, Any]:
     normalized = normalize_domain(domain)
@@ -6606,6 +6699,145 @@ def list_domain_files(device_id: str, domain: str) -> FileListResponse:
         for row in rows
     ]
     return FileListResponse(files=files)
+
+
+@app.post("/api/global/domains/{domain}/files/deploy")
+async def deploy_global_domain_file(
+    domain: str,
+    file: UploadFile = File(...),
+    device_ids: str = Form("[]"),
+    server_file_mode: str = Form("replace"),
+    client_db_mode: str = Form("reset"),
+    inject: bool = Form(True),
+) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    selected_device_ids = parse_form_device_ids(device_ids)
+    server_mode = sanitize_global_db_server_file_mode(server_file_mode)
+    client_mode = sanitize_global_db_client_db_mode(client_db_mode)
+    should_inject = bool(inject)
+    filename = (file.filename or "db_upload.txt").strip() or "db_upload.txt"
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="파일이 비어 있습니다.")
+    checksum = compute_checksum(data)
+    uploaded_at = now_ts()
+    results: List[Dict[str, Any]] = []
+    created_jobs: List[str] = []
+    deleted_file_total = 0
+    with db_lock, get_conn() as conn:
+        device_rows = conn.execute(
+            "SELECT id, name FROM devices ORDER BY name COLLATE NOCASE",
+        ).fetchall()
+        if selected_device_ids:
+            allowed_ids = set(selected_device_ids)
+            device_rows = [row for row in device_rows if row["id"] in allowed_ids]
+        if not device_rows:
+            return {
+                "device_count": 0,
+                "domain": normalized,
+                "server_file_mode": server_mode,
+                "client_db_mode": client_mode,
+                "inject": should_inject,
+                "created_files": 0,
+                "deleted_files": 0,
+                "jobs": [],
+                "results": [],
+            }
+        for device_row in device_rows:
+            device_id = device_row["id"]
+            deleted_files = 0
+            if server_mode == "replace":
+                deleted_files = delete_domain_file_rows(conn, device_id, normalized)
+                deleted_file_total += deleted_files
+            version = get_next_file_version(conn, device_id, normalized)
+            stored_name = f"{uuid.uuid4().hex}_{filename}"
+            storage_path = build_storage_path(device_id, normalized, stored_name)
+            storage_path.write_bytes(data)
+            cursor = conn.execute(
+                """
+                INSERT INTO device_files (
+                    device_id, domain, filename, stored_name, size, checksum,
+                    version, uploaded_at, uploaded_by
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    device_id,
+                    normalized,
+                    filename,
+                    stored_name,
+                    len(data),
+                    checksum,
+                    version,
+                    uploaded_at,
+                    "global-dashboard",
+                ),
+            )
+            file_id = int(cursor.lastrowid)
+            purge_job: Optional[Dict[str, Any]] = None
+            if client_mode == "reset":
+                purge_job = create_job(
+                    conn,
+                    device_id,
+                    normalized,
+                    "purge_domain",
+                    {"domain": normalized, "origin": "global_file_deploy"},
+                )
+                created_jobs.append(purge_job["id"])
+            inject_job: Optional[Dict[str, Any]] = None
+            if should_inject:
+                inject_job = create_job(
+                    conn,
+                    device_id,
+                    normalized,
+                    "inject_file",
+                    {
+                        "file_id": file_id,
+                        "filename": filename,
+                        "version": version,
+                        "file_size": len(data),
+                        "download_path": f"/api/devices/{device_id}/domains/{normalized}/files/{file_id}/download",
+                        "origin": "global_file_deploy",
+                    },
+                )
+                created_jobs.append(inject_job["id"])
+                conn.execute(
+                    """
+                    UPDATE device_files
+                    SET last_injected_status='pending',
+                        last_injected_job_id=?,
+                        last_injected_at=NULL
+                    WHERE id=?
+                    """,
+                    (inject_job["id"], file_id),
+                )
+            results.append(
+                {
+                    "device_id": device_id,
+                    "name": device_row["name"],
+                    "file_id": file_id,
+                    "version": version,
+                    "deleted_files": deleted_files,
+                    "purge_job_id": purge_job["id"] if purge_job else None,
+                    "inject_job_id": inject_job["id"] if inject_job else None,
+                }
+            )
+        conn.commit()
+    return {
+        "device_count": len(results),
+        "domain": normalized,
+        "server_file_mode": server_mode,
+        "client_db_mode": client_mode,
+        "inject": should_inject,
+        "created_files": len(results),
+        "deleted_files": deleted_file_total,
+        "jobs": created_jobs,
+        "results": results,
+        "filename": filename,
+        "size": len(data),
+        "checksum": checksum,
+        "uploaded_at": uploaded_at,
+    }
 
 
 @app.post("/api/global/actions/clear-logs")

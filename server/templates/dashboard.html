@@ -506,6 +506,93 @@ header {
   justify-content: flex-start;
   gap: 8px;
 }
+.global-batch-mode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 2px;
+}
+.global-batch-mode label {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-muted);
+  white-space: nowrap;
+}
+.global-batch-mode select {
+  height: 36px;
+  min-width: 190px;
+  max-width: min(280px, 100%);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  padding: 0 10px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+.global-batch-mode select:focus {
+  outline: 2px solid var(--color-accent-ghost-strong);
+  border-color: var(--color-accent);
+}
+.global-db-deploy {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface-subtle);
+}
+.global-db-deploy-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.global-db-deploy-head h4 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--color-heading);
+}
+.global-db-deploy-hint {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.global-db-deploy-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+.global-db-deploy .field select,
+.global-db-deploy .field input[type="file"] {
+  min-height: 36px;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 10px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 13px;
+}
+.global-db-deploy-file {
+  grid-column: span 2;
+}
+.global-db-deploy-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+@media (max-width: 720px) {
+  .global-db-deploy-file {
+    grid-column: span 1;
+  }
+}
 .global-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
@@ -2559,6 +2646,14 @@ button:not(:disabled):hover {
           <div class="global-actions global-section-actions">
             <button class="secondary" id="globalSaveAllBtn">설정 저장</button>
             <button class="secondary" id="globalSendSingleBtn">단일 발송</button>
+            <div class="global-batch-mode">
+              <label for="globalBatchHeaderMode">치환 방식</label>
+              <select id="globalBatchHeaderMode" title="전역 전체발송에 적용할 치환 생성 방식을 선택합니다.">
+                <option value="same">모든 클라이언트 동일</option>
+                <option value="per_client">클라이언트별 개별 생성</option>
+                <option value="per_session">클라이언트별 + 세션별 개별 생성</option>
+              </select>
+            </div>
             <button class="secondary" id="globalSendAllBtn">전체 발송</button>
             <button class="ghost" id="globalChangeIpBtn">IP 변경</button>
             <button class="ghost" id="globalDisconnectBtn">전체 연결해제</button>
@@ -2577,6 +2672,45 @@ button:not(:disabled):hover {
             <button type="button" class="secondary" data-action="switch-domain" data-target="daum" data-filter-scope="all">전체 카드 · 모두 다음 도메인으로</button>
             <button type="button" class="ghost" data-action="switch-domain" data-target="daum" data-filter-scope="naver">네이버 카드만 다음으로 전환</button>
             <button type="button" class="ghost" data-action="switch-domain" data-target="naver" data-filter-scope="daum">다음 카드만 네이버로 전환</button>
+          </div>
+        </div>
+        <div class="global-db-deploy" id="globalDbDeploy">
+          <div class="global-db-deploy-head">
+            <div>
+              <h4>공통 DB 배포</h4>
+              <p class="global-db-deploy-hint" id="globalDbDeployHint">현재 필터 대상에 같은 DB 파일을 등록하고 Inject를 예약합니다.</p>
+            </div>
+          </div>
+          <div class="global-db-deploy-grid">
+            <label class="field">
+              <span>도메인</span>
+              <select id="globalDbDeployDomain">
+                <option value="naver">네이버</option>
+                <option value="daum">다음</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>관리 등록 파일</span>
+              <select id="globalDbServerFileMode">
+                <option value="replace">기존 등록 파일 삭제 후 새 파일만 등록</option>
+                <option value="keep">기존 등록 파일 유지하고 새 파일 추가</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>클라이언트 발송 DB</span>
+              <select id="globalDbClientDbMode">
+                <option value="reset">기존 DB 비우고 새로 Inject</option>
+                <option value="append">기존 DB에 추가 Inject</option>
+              </select>
+            </label>
+            <label class="field global-db-deploy-file">
+              <span>파일</span>
+              <input id="globalDbDeployFile" type="file" accept=".db,.sqlite,.sqlite3,.txt,.csv">
+            </label>
+          </div>
+          <div class="global-db-deploy-actions">
+            <button type="button" class="secondary" id="globalDbDeployBtn">공통 DB 배포</button>
+            <span class="meta" id="globalDbDeployTarget">대상: 현재 필터 대상 0대</span>
           </div>
         </div>
       </div>
@@ -3005,6 +3139,21 @@ const LOG_PANEL_DEFAULT_HEIGHT = 220;
 const LOG_PANEL_MANUAL_INTERVAL_MS = 1200;
 const GLOBAL_TAB_STORAGE_KEY = "dashboard.globalTab";
 const GLOBAL_TAB_KEYS = ["control", "settings"];
+const GLOBAL_BATCH_HEADER_MODE_STORAGE_KEY = "dashboard.globalBatchHeaderMode";
+const GLOBAL_BATCH_HEADER_MODES = ["same", "per_client", "per_session"];
+const GLOBAL_BATCH_HEADER_MODE_LABELS = {
+  same: "모든 클라이언트 동일",
+  per_client: "클라이언트별 개별 생성",
+  per_session: "클라이언트별 + 세션별 개별 생성",
+};
+const GLOBAL_DB_SERVER_FILE_MODE_LABELS = {
+  replace: "기존 등록 파일 삭제 후 새 파일만 등록",
+  keep: "기존 등록 파일 유지하고 새 파일 추가",
+};
+const GLOBAL_DB_CLIENT_DB_MODE_LABELS = {
+  reset: "기존 DB 비우고 새로 Inject",
+  append: "기존 DB에 추가 Inject",
+};
 const DOMAIN_FILTER_STORAGE_KEY = "dashboard.domainFilter";
 const DOMAIN_FILTERS = ["all", "naver", "daum"];
 
@@ -3104,6 +3253,68 @@ function persistGlobalTabPreference(tab) {
   } catch (err) {
     console.warn("글로벌 탭 설정 저장에 실패했습니다.", err);
   }
+}
+
+function sanitizeGlobalBatchHeaderMode(value) {
+  const candidate = String(value ?? "").trim().toLowerCase();
+  return GLOBAL_BATCH_HEADER_MODES.includes(candidate) ? candidate : "same";
+}
+
+function loadGlobalBatchHeaderModePreference() {
+  if (typeof localStorage === "undefined") {
+    return "same";
+  }
+  try {
+    const stored = localStorage.getItem(GLOBAL_BATCH_HEADER_MODE_STORAGE_KEY);
+    return sanitizeGlobalBatchHeaderMode(stored);
+  } catch (err) {
+    console.warn("전체발송 치환 방식 설정을 불러오지 못했습니다.", err);
+    return "same";
+  }
+}
+
+function persistGlobalBatchHeaderModePreference(mode) {
+  if (typeof localStorage === "undefined") {
+    return;
+  }
+  try {
+    localStorage.setItem(
+      GLOBAL_BATCH_HEADER_MODE_STORAGE_KEY,
+      sanitizeGlobalBatchHeaderMode(mode)
+    );
+  } catch (err) {
+    console.warn("전체발송 치환 방식 설정 저장에 실패했습니다.", err);
+  }
+}
+
+function getGlobalBatchHeaderModeLabel(mode = state.globalBatchHeaderMode) {
+  const normalized = sanitizeGlobalBatchHeaderMode(mode);
+  return GLOBAL_BATCH_HEADER_MODE_LABELS[normalized] || GLOBAL_BATCH_HEADER_MODE_LABELS.same;
+}
+
+function sanitizeGlobalDbServerFileMode(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(GLOBAL_DB_SERVER_FILE_MODE_LABELS, normalized)
+    ? normalized
+    : "replace";
+}
+
+function sanitizeGlobalDbClientDbMode(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return Object.prototype.hasOwnProperty.call(GLOBAL_DB_CLIENT_DB_MODE_LABELS, normalized)
+    ? normalized
+    : "reset";
+}
+
+function getGlobalDbDeployLabels() {
+  const serverMode = sanitizeGlobalDbServerFileMode(document.getElementById("globalDbServerFileMode")?.value);
+  const clientMode = sanitizeGlobalDbClientDbMode(document.getElementById("globalDbClientDbMode")?.value);
+  return {
+    serverMode,
+    clientMode,
+    serverLabel: GLOBAL_DB_SERVER_FILE_MODE_LABELS[serverMode],
+    clientLabel: GLOBAL_DB_CLIENT_DB_MODE_LABELS[clientMode],
+  };
 }
 
 function getDomainFilterLabel(filter = state.domainFilter) {
@@ -3379,6 +3590,38 @@ function initDomainSwitchControls() {
   updateDomainSwitchControls();
 }
 
+function updateGlobalDbDeployTarget() {
+  const targetEl = document.getElementById("globalDbDeployTarget");
+  const hintEl = document.getElementById("globalDbDeployHint");
+  const count = getActionTargetDeviceIds().length;
+  const scopeLabel = getFilterScopeLabel();
+  if (targetEl) {
+    targetEl.textContent = `대상: ${scopeLabel} ${count}대`;
+  }
+  if (hintEl) {
+    hintEl.textContent = count > 0
+      ? `${scopeLabel}에 같은 DB 파일을 등록하고 Inject를 예약합니다.`
+      : `${scopeLabel}에 배포할 디바이스가 없습니다.`;
+  }
+}
+
+function initGlobalDbDeployControls() {
+  const button = document.getElementById("globalDbDeployBtn");
+  const fileInput = document.getElementById("globalDbDeployFile");
+  const domainSelect = document.getElementById("globalDbDeployDomain");
+  const serverModeSelect = document.getElementById("globalDbServerFileMode");
+  const clientModeSelect = document.getElementById("globalDbClientDbMode");
+  [domainSelect, serverModeSelect, clientModeSelect].forEach((control) => {
+    if (control) {
+      control.addEventListener("change", updateGlobalDbDeployTarget);
+    }
+  });
+  if (button) {
+    button.addEventListener("click", () => handleGlobalDbDeploy(button, fileInput));
+  }
+  updateGlobalDbDeployTarget();
+}
+
 function setDomainFilter(nextFilter) {
   const resolved = sanitizeDomainFilter(nextFilter);
   if (resolved === state.domainFilter) {
@@ -3422,6 +3665,16 @@ function setGlobalTab(tab) {
   applyGlobalTabVisibility();
 }
 
+function setGlobalBatchHeaderMode(mode) {
+  const normalized = sanitizeGlobalBatchHeaderMode(mode);
+  state.globalBatchHeaderMode = normalized;
+  persistGlobalBatchHeaderModePreference(normalized);
+  const select = document.getElementById("globalBatchHeaderMode");
+  if (select && select.value !== normalized) {
+    select.value = normalized;
+  }
+}
+
 function initGlobalTabs() {
   const nav = document.getElementById("globalTabNav");
   if (nav) {
@@ -3434,6 +3687,17 @@ function initGlobalTabs() {
   }
   updateGlobalTabButtons();
   applyGlobalTabVisibility();
+}
+
+function initGlobalBatchHeaderModeControl() {
+  const select = document.getElementById("globalBatchHeaderMode");
+  if (!select) {
+    return;
+  }
+  select.value = sanitizeGlobalBatchHeaderMode(state.globalBatchHeaderMode);
+  select.addEventListener("change", () => {
+    setGlobalBatchHeaderMode(select.value);
+  });
 }
 
 function initDeviceFilterTabs() {
@@ -3619,6 +3883,7 @@ const state = {
   telegramSaving: false,
   deviceEditMode: false,
   globalTab: loadGlobalTabPreference(),
+  globalBatchHeaderMode: loadGlobalBatchHeaderModePreference(),
   domainFilter: loadDomainFilterPreference(),
   filterOnlineOnly: false,
   deletingDevices: new Set(),
@@ -11449,6 +11714,7 @@ function renderDevices() {
   }
   updateDeviceFilterMeta(visibleCards);
   updateDomainSwitchControls();
+  updateGlobalDbDeployTarget();
   updateLockActionButtons();
   updateGlobalBatchLogButton();
   refreshLockIndicators();
@@ -12768,8 +13034,10 @@ if (shuffleBtn) {
 
 initGlobalForm();
 initGlobalTabs();
+initGlobalBatchHeaderModeControl();
 initDeviceFilterTabs();
 initDomainSwitchControls();
+initGlobalDbDeployControls();
 initSubstitutionSection();
 initSinglePreviewModal();
 
@@ -13469,6 +13737,10 @@ async function handleGlobalSendSingle() {
 async function handleGlobalSendAll() {
   const sendBtn = document.getElementById("globalSendAllBtn");
   if (!sendBtn) return;
+  const modeSelect = document.getElementById("globalBatchHeaderMode");
+  const headerMode = sanitizeGlobalBatchHeaderMode(modeSelect?.value || state.globalBatchHeaderMode);
+  setGlobalBatchHeaderMode(headerMode);
+  const headerModeLabel = getGlobalBatchHeaderModeLabel(headerMode);
   const scopeLabel = getFilterScopeLabel();
   const targetIds = getActionTargetDeviceIds();
   if (!targetIds.length) {
@@ -13477,19 +13749,114 @@ async function handleGlobalSendAll() {
   }
   const originalText = sendBtn.textContent;
   sendBtn.disabled = true;
+  if (modeSelect) {
+    modeSelect.disabled = true;
+  }
   sendBtn.textContent = "전체 발송 예약 중...";
   try {
     const result = await fetchJSON("/api/global/actions/send-batch", {
       method: "POST",
-      body: JSON.stringify({ device_ids: targetIds }),
+      body: JSON.stringify({
+        device_ids: targetIds,
+        header_mode: headerMode,
+      }),
     });
-    setGlobalStatus(`${scopeLabel} ${result.device_count ?? 0}대에 전체 발송을 예약했습니다.`, "success");
+    setGlobalStatus(`${scopeLabel} ${result.device_count ?? 0}대에 전체 발송을 예약했습니다. · ${headerModeLabel}`, "success");
     await loadDevices({ silent: true });
   } catch (err) {
     setGlobalStatus(`${scopeLabel}: ${err.message || "전체 발송 예약에 실패했습니다."}`, "error");
   } finally {
     sendBtn.disabled = false;
+    if (modeSelect) {
+      modeSelect.disabled = false;
+    }
     sendBtn.textContent = originalText;
+  }
+}
+
+async function handleGlobalDbDeploy(button, fileInput) {
+  const targetIds = getActionTargetDeviceIds();
+  const scopeLabel = getFilterScopeLabel();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 배포할 디바이스가 없습니다.`, "info");
+    return;
+  }
+  const file = fileInput?.files?.[0];
+  if (!file) {
+    setGlobalStatus("공통 DB 배포에 사용할 파일을 선택하세요.", "error");
+    return;
+  }
+  const domain = sanitizeGlobalDomain(document.getElementById("globalDbDeployDomain")?.value || "naver");
+  const domainLabel = DOMAIN_LABELS[domain] || domain;
+  const { serverMode, clientMode, serverLabel, clientLabel } = getGlobalDbDeployLabels();
+  const confirmLines = [
+    `${scopeLabel} ${targetIds.length}대의 ${domainLabel} 관리 등록 파일 처리: ${serverLabel}`,
+    `클라이언트 발송 DB 처리: ${clientLabel}`,
+    `파일: ${file.name}`,
+    "",
+    "계속할까요?",
+  ];
+  if (!confirm(confirmLines.join("\n"))) {
+    return;
+  }
+  const formData = new FormData();
+  formData.append("file", file);
+  formData.append("device_ids", JSON.stringify(targetIds));
+  formData.append("server_file_mode", serverMode);
+  formData.append("client_db_mode", clientMode);
+  formData.append("inject", "true");
+  const controls = [
+    button,
+    fileInput,
+    document.getElementById("globalDbDeployDomain"),
+    document.getElementById("globalDbServerFileMode"),
+    document.getElementById("globalDbClientDbMode"),
+  ].filter(Boolean);
+  const originalText = button?.textContent;
+  controls.forEach((control) => {
+    control.disabled = true;
+  });
+  if (button) {
+    button.textContent = "공통 DB 배포 중...";
+  }
+  try {
+    const response = await fetch(`/api/global/domains/${domain}/files/deploy`, {
+      method: "POST",
+      body: formData,
+    });
+    let payload = null;
+    const contentType = response.headers.get("content-type") || "";
+    if (contentType.includes("application/json")) {
+      payload = await response.json();
+    } else {
+      const text = await response.text();
+      payload = text ? { detail: text } : {};
+    }
+    if (!response.ok) {
+      const detail = payload?.detail;
+      throw new Error(typeof detail === "string" ? detail : "공통 DB 배포에 실패했습니다.");
+    }
+    const deviceCount = payload?.device_count ?? 0;
+    const deletedFiles = payload?.deleted_files ?? 0;
+    const jobCount = Array.isArray(payload?.jobs) ? payload.jobs.length : 0;
+    setGlobalStatus(
+      `${scopeLabel} ${deviceCount}대에 공통 DB 배포를 예약했습니다. · 삭제 파일 ${deletedFiles}개 · 작업 ${jobCount}개`,
+      "success",
+    );
+    if (fileInput) {
+      fileInput.value = "";
+    }
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(`${scopeLabel}: ${err.message || "공통 DB 배포에 실패했습니다."}`, "error");
+  } finally {
+    controls.forEach((control) => {
+      control.disabled = false;
+    });
+    if (button) {
+      button.textContent = originalText || "공통 DB 배포";
+    }
+    updateGlobalDbDeployTarget();
   }
 }
 

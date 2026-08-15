@@ -27,6 +27,9 @@ from server.main import (
     SubstitutionPreviewRequest,
     preview_substitution_endpoint,
     resolve_substitution_outputs,
+    sanitize_global_batch_header_mode,
+    sanitize_global_db_client_db_mode,
+    sanitize_global_db_server_file_mode,
 )
 from fastapi import HTTPException
 
@@ -74,6 +77,20 @@ class SubstitutionRuleTests(unittest.TestCase):
         self.assertEqual(list_rule["mode"], "list")
         self.assertEqual(list_rule["values"], ["Alpha", "Beta"])
         self.assertEqual(list_rule["description"], "샘플 목록")
+
+    def test_sanitize_global_batch_header_mode(self) -> None:
+        self.assertEqual(sanitize_global_batch_header_mode("same"), "same")
+        self.assertEqual(sanitize_global_batch_header_mode("client"), "per_client")
+        self.assertEqual(sanitize_global_batch_header_mode("session_unique"), "per_session")
+        self.assertEqual(sanitize_global_batch_header_mode("unknown"), "same")
+
+    def test_sanitize_global_db_deploy_modes(self) -> None:
+        self.assertEqual(sanitize_global_db_server_file_mode("keep"), "keep")
+        self.assertEqual(sanitize_global_db_server_file_mode("delete_existing"), "replace")
+        self.assertEqual(sanitize_global_db_server_file_mode("unknown"), "replace")
+        self.assertEqual(sanitize_global_db_client_db_mode("append"), "append")
+        self.assertEqual(sanitize_global_db_client_db_mode("purge"), "reset")
+        self.assertEqual(sanitize_global_db_client_db_mode("unknown"), "reset")
 
     def test_canonicalize_static_resolves_list_tokens_before_encoding(self) -> None:
         rng = random.Random(123)
