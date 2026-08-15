@@ -28,6 +28,58 @@ class ToPlaceholderTests(unittest.TestCase):
         self.client._shutdown_imap_executor()
         self.client._shutdown_offline_probe_executor()
 
+    def test_all_headers_unique_recomputes_source_rules_each_session(self) -> None:
+        class SequencedRandom:
+            counter = 0
+
+            def __init__(self) -> None:
+                self.char = "a" if SequencedRandom.counter == 0 else "b"
+                SequencedRandom.counter += 1
+
+            def randint(self, start, end):
+                return start
+
+            def choice(self, values):
+                return self.char if self.char in values else values[0]
+
+        payload = {
+            "template": {
+                "helo": "mx.example.com",
+                "mail_from": "sender@example.com",
+                "header": "From: sender@example.com\nSubject: ${TITLE}\n\n본문",
+            },
+            "rules": [
+                {
+                    "key": "TITLE",
+                    "source": "제목-${랜덤:영소:5}",
+                    "encoding": "none",
+                    "value": "제목-fixed",
+                    "mode": "static",
+                    "values": [],
+                    "description": "",
+                }
+            ],
+            "source_rules": [
+                {
+                    "key": "TITLE",
+                    "source": "제목-${랜덤:영소:5}",
+                    "encoding": "none",
+                    "mode": "static",
+                    "values": [],
+                    "description": "",
+                }
+            ],
+        }
+
+        with patch.object(client_main.random, "SystemRandom", SequencedRandom):
+            first, first_missing = self.client._render_all_headers_unique_config({}, payload)
+            second, second_missing = self.client._render_all_headers_unique_config({}, payload)
+
+        self.assertEqual(first_missing, set())
+        self.assertEqual(second_missing, set())
+        self.assertIn("Subject: 제목-aaaaa", first["header"])
+        self.assertIn("Subject: 제목-bbbbb", second["header"])
+
     def test_compose_to_header_value_formats_and_deduplicates(self) -> None:
         rendered = client_main._compose_to_header_value(
             "pxy528@daum.net",

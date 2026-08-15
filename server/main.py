@@ -3313,6 +3313,20 @@ def log_missing_substitutions(job: Dict[str, Any], missing: Iterable[str]) -> No
     )
 
 
+def build_job_substitution_payload(
+    template_config: Dict[str, Any],
+    substitution_rules: List[Dict[str, Any]],
+    source_rules: Any,
+) -> Dict[str, Any]:
+    payload = {
+        "template": template_config,
+        "rules": substitution_rules,
+    }
+    if isinstance(source_rules, list):
+        payload["source_rules"] = copy.deepcopy(source_rules)
+    return payload
+
+
 def load_job_payload(row: sqlite3.Row) -> Dict[str, Any]:
     if not row["payload"]:
         return {}
@@ -5584,6 +5598,7 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
             raise HTTPException(status_code=400, detail="IMAP 계정 ID가 설정되어 있지 않습니다.")
         global_config = load_global_config(conn=conn)
         bot_token, chat_id = extract_telegram_credentials(global_config)
+        source_rules = global_config.get("substitution_rules")
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
@@ -5629,10 +5644,11 @@ def enqueue_imap_manual_check(device_id: str, domain: str, payload: ImapManualCh
         }
         substitution_payload: Optional[Dict[str, Any]] = None
         if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
-            substitution_payload = {
-                "template": template_config,
-                "rules": substitution_rules,
-            }
+            substitution_payload = build_job_substitution_payload(
+                template_config,
+                substitution_rules,
+                source_rules,
+            )
         existing_job = conn.execute(
             """
             SELECT id
@@ -5861,6 +5877,7 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
                 }
         global_config = load_global_config(conn=conn)
         bot_token, chat_id = extract_telegram_credentials(global_config)
+        source_rules = global_config.get("substitution_rules")
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         for device_row in device_rows:
@@ -5901,10 +5918,11 @@ def enqueue_global_batch(payload: GlobalBatchRequest) -> Dict[str, Any]:
             )
             substitution_payload: Optional[Dict[str, Any]] = None
             if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
-                substitution_payload = {
-                    "template": template_config,
-                    "rules": substitution_rules,
-                }
+                substitution_payload = build_job_substitution_payload(
+                    template_config,
+                    substitution_rules,
+                    source_rules,
+                )
             payload_map: Dict[str, Any] = {"config": resolved_config}
             if substitution_payload:
                 payload_map["substitution"] = substitution_payload
@@ -5956,6 +5974,7 @@ def enqueue_global_single(payload: GlobalSingleRequest) -> Dict[str, Any]:
             }
         global_config = load_global_config(conn=conn)
         bot_token, chat_id = extract_telegram_credentials(global_config)
+        source_rules = global_config.get("substitution_rules")
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         for device_row in device_rows:
@@ -6017,10 +6036,11 @@ def enqueue_global_single(payload: GlobalSingleRequest) -> Dict[str, Any]:
                 "force_imap_check": False,
             }
             if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
-                payload_map["substitution"] = {
-                    "template": template_config,
-                    "rules": substitution_rules,
-                }
+                payload_map["substitution"] = build_job_substitution_payload(
+                    template_config,
+                    substitution_rules,
+                    source_rules,
+                )
             job_payload = attach_telegram_credentials(
                 payload_map,
                 bot_token=bot_token,
@@ -6126,6 +6146,7 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         global_config = load_global_config(conn=conn)
         bot_token, chat_id = extract_telegram_credentials(global_config)
+        source_rules = global_config.get("substitution_rules")
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
@@ -6185,10 +6206,11 @@ def enqueue_single_send(device_id: str, payload: SingleSendRequest) -> Dict[str,
         if enable_bcc:
             base_payload["bcc_enabled"] = True
         if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
-            base_payload["substitution"] = {
-                "template": template_config,
-                "rules": substitution_rules,
-            }
+            base_payload["substitution"] = build_job_substitution_payload(
+                template_config,
+                substitution_rules,
+                source_rules,
+            )
         job_payload = attach_telegram_credentials(
             base_payload,
             bot_token=bot_token,
@@ -6215,6 +6237,7 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         global_config = load_global_config(conn=conn)
         bot_token, chat_id = extract_telegram_credentials(global_config)
+        source_rules = global_config.get("substitution_rules")
         substitution_rules = sanitize_substitution_rules(global_config.get("substitution_rules"))
         context = build_substitution_context(substitution_rules)
         configs = load_device_configs(device_id, conn=conn)
@@ -6251,10 +6274,11 @@ def enqueue_batch_send(device_id: str, payload: BatchSendRequest) -> Dict[str, A
         )
         payload_map: Dict[str, Any] = {"config": resolved_config}
         if resolved_config.get("all_headers_unique") or reroll_on_retry_enabled:
-            payload_map["substitution"] = {
-                "template": template_config,
-                "rules": substitution_rules,
-            }
+            payload_map["substitution"] = build_job_substitution_payload(
+                template_config,
+                substitution_rules,
+                source_rules,
+            )
         job_payload = attach_telegram_credentials(
             payload_map,
             bot_token=bot_token,

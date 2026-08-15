@@ -44,7 +44,7 @@ from lib import substitution as substitution_lib
 from lib.encoding_utils import encode_substitution_value
 
 
-APP_VERSION = "0.0.116"
+APP_VERSION = "0.0.117"
 
 smtp_utils.TELNET_READ_TIMEOUT_SECONDS = 5
 
@@ -2538,10 +2538,16 @@ class MailClient:
     ) -> Tuple[Dict[str, Any], Set[str]]:
         template = substitution_payload.get("template")
         rules = substitution_payload.get("rules")
+        source_rules = substitution_payload.get("source_rules")
         if not isinstance(template, dict) or not isinstance(rules, list):
             return dict(base_config), set()
         rng = random.SystemRandom()
         try:
+            if isinstance(source_rules, list):
+                rules = substitution_lib.canonicalize_substitution_rules(
+                    source_rules,
+                    random_generator=rng,
+                )
             resolved, missing = substitution_lib.resolve_config(template, rules, random_generator=rng)
         except Exception as exc:  # pylint: disable=broad-except
             print(f"[경고] 치환 재계산 실패: {exc}")

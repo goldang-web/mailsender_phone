@@ -4,6 +4,8 @@ import re
 import string
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+from .encoding_utils import encode_substitution_value, normalize_encoding_name
+
 SUBSTITUTION_PATTERN = re.compile(r"\$\{([^{}]+)\}")
 FIELD_TOKEN_PATTERN = re.compile(r"^필드:([A-Za-z0-9_]+)$")
 RANDOM_TOKEN_PATTERN = re.compile(r"^랜덤:([^:]+):(\d+(?:-\d+)?)$")
@@ -75,6 +77,161 @@ def normalize_substitution_mode(value: Any) -> str:
         if text in {"list", "목록"}:
             return "list"
     return "static"
+
+
+def _extract_list_values(data: Dict[str, Any]) -> List[str]:
+    candidates: List[Any] = []
+    raw_values = data.get("values")
+    if isinstance(raw_values, (list, tuple, set)):
+        candidates.extend(raw_values)
+    elif isinstance(raw_values, str):
+        candidates.extend(raw_values.splitlines())
+    raw_items = data.get("items")
+    if isinstance(raw_items, str):
+        candidates.extend(raw_items.splitlines())
+    raw_source = data.get("source")
+    if isinstance(raw_source, str):
+        candidates.extend(raw_source.splitlines())
+    raw_value_field = data.get("value")
+    if isinstance(raw_value_field, str):
+        candidates.extend(raw_value_field.splitlines())
+
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for item in candidates:
+        if item is None:
+            continue
+        text = str(item).strip()
+        if not text or text in seen:
+            continue
+        normalized.append(text)
+        seen.add(text)
+    return normalized
+
+
+def canonicalize_substitution_rules(
+    raw: Any,
+    *,
+    random_generator: Optional[random.Random] = None,
+) -> List[Dict[str, Any]]:
+    if not isinstance(raw, (list, tuple)):
+        return []
+
+    rng = random_generator or random.SystemRandom()
+    seen_keys: Set[str] = set()
+    ordered_entries: List[Tuple[str, Dict[str, Any]]] = []
+    list_entries: List[Dict[str, Any]] = []
+    static_entries: Dict[str, Dict[str, Any]] = {}
+
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip()
+        if not key:
+            continue
+        key_token = key.lower()
+        if key_token in seen_keys:
+            continue
+        mode = normalize_substitution_mode(item.get("mode"))
+        description = str(item.get("description") or "").strip()
+        if mode == "list":
+            values = _extract_list_values(item)
+            if not values:
+                continue
+            entry = {
+                "key": key,
+                "mode": "list",
+                "values": values,
+                "description": description,
+                "source": "",
+                "encoding": "none",
+                "value": "",
+            }
+            ordered_entries.append(("list", entry))
+            list_entries.append(entry)
+            seen_keys.add(key_token)
+            continue
+
+        source = str(item.get("source") or "")
+        raw_value = item.get("value")
+        if not source and raw_value is not None:
+            source = str(raw_value)
+        if not source:
+            continue
+        entry = {
+            "key": key,
+            "source": source,
+            "encoding": normalize_encoding_name(item.get("encoding")),
+            "value": "",
+            "mode": "static",
+            "values": [],
+            "description": description,
+        }
+        ordered_entries.append(("static", entry))
+        static_entries[key] = entry
+        seen_keys.add(key_token)
+
+    list_map: Dict[str, Tuple[str, ...]] = {
+        entry["key"]: tuple(entry["values"])
+        for entry in list_entries
+    }
+    static_results: Dict[str, str] = {}
+    pending = {key: entry for key, entry in static_entries.items()}
+    max_iterations = max(1, len(pending) * 2)
+
+    for _ in range(max_iterations):
+        if not pending:
+            break
+        progressed = False
+        removal_queue: List[str] = []
+        for key, entry in list(pending.items()):
+            context = {
+                "static": static_results,
+                "lists": list_map,
+            }
+            substituted, missing = substitute_tokens(
+                entry.get("source", ""),
+                [],
+                random_generator=rng,
+                context=context,
+            )
+            blocking_tokens = []
+            unresolved_dependency = False
+            for token in missing:
+                stripped = token.strip()
+                if stripped in pending:
+                    unresolved_dependency = True
+                    continue
+                if stripped in static_results:
+                    continue
+                blocking_tokens.append(stripped)
+            if blocking_tokens or unresolved_dependency:
+                continue
+            encoded_value = encode_substitution_value(
+                substituted,
+                entry.get("encoding"),
+                random_choice=rng.choice if hasattr(rng, "choice") else None,
+                random_generator=rng,
+            )
+            if not encoded_value:
+                continue
+            entry["value"] = encoded_value
+            static_results[key] = encoded_value
+            removal_queue.append(key)
+            progressed = True
+        for key in removal_queue:
+            pending.pop(key, None)
+        if not progressed:
+            break
+
+    unresolved_keys = set(pending.keys())
+    sanitized: List[Dict[str, Any]] = []
+    for kind, entry in ordered_entries:
+        if kind == "list":
+            sanitized.append(entry)
+        elif entry.get("key") not in unresolved_keys and entry.get("key") in static_results:
+            sanitized.append(entry)
+    return sanitized
 
 
 def build_substitution_context(rules: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
