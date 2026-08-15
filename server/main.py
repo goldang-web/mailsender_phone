@@ -3849,6 +3849,42 @@ def enrich_stop_metadata_with_sent_stats(
     return metadata_obj
 
 
+def reset_domain_send_counters(
+    conn: sqlite3.Connection,
+    device_id: str,
+    domains: Optional[Iterable[str]],
+    timestamp: str,
+) -> None:
+    target_domains = [domain for domain in (domains or []) if domain in DOMAINS]
+    if target_domains:
+        placeholders = ",".join(["?"] * len(target_domains))
+        conn.execute(
+            f"""
+            UPDATE device_configs
+            SET client_sent=0,
+                imap_sent_since_last_check=0,
+                imap_sent_last_reset_at=?,
+                imap_reroll_success_count=0,
+                updated_at=?
+            WHERE device_id=? AND domain IN ({placeholders})
+            """,
+            (timestamp, timestamp, device_id, *target_domains),
+        )
+        return
+    conn.execute(
+        """
+        UPDATE device_configs
+        SET client_sent=0,
+            imap_sent_since_last_check=0,
+            imap_sent_last_reset_at=?,
+            imap_reroll_success_count=0,
+            updated_at=?
+        WHERE device_id=?
+        """,
+        (timestamp, timestamp, device_id),
+    )
+
+
 def handle_auto_stop(
     conn: sqlite3.Connection,
     reason: str,
@@ -6889,30 +6925,14 @@ def clear_global_logs(payload: GlobalClearLogsRequest) -> Dict[str, Any]:
                     """,
                     (device_id, normalized_domain),
                 )
-                conn.execute(
-                    """
-                    UPDATE device_configs
-                    SET imap_reroll_success_count=0,
-                        updated_at=?
-                    WHERE device_id=? AND domain=?
-                    """,
-                    (now, device_id, normalized_domain),
-                )
+                reset_domain_send_counters(conn, device_id, [normalized_domain], now)
                 job_payload = {"domains": [normalized_domain]}
             else:
                 cursor = conn.execute(
                     "DELETE FROM send_logs WHERE device_id=?",
                     (device_id,),
                 )
-                conn.execute(
-                    """
-                    UPDATE device_configs
-                    SET imap_reroll_success_count=0,
-                        updated_at=?
-                    WHERE device_id=?
-                    """,
-                    (now, device_id),
-                )
+                reset_domain_send_counters(conn, device_id, None, now)
                 job_payload = {"domains": []}
             cleared = cursor.rowcount if cursor.rowcount is not None else 0
             total_cleared += cleared
@@ -7008,29 +7028,13 @@ def clear_device_logs(device_id: str, payload: ClearLogsRequest) -> Dict[str, An
                 """,
                 (device_id, normalized_domain),
             )
-            conn.execute(
-                """
-                UPDATE device_configs
-                SET imap_reroll_success_count=0,
-                    updated_at=?
-                WHERE device_id=? AND domain=?
-                """,
-                (now_ts(), device_id, normalized_domain),
-            )
+            reset_domain_send_counters(conn, device_id, [normalized_domain], now_ts())
         else:
             cursor = conn.execute(
                 "DELETE FROM send_logs WHERE device_id=?",
                 (device_id,),
             )
-            conn.execute(
-                """
-                UPDATE device_configs
-                SET imap_reroll_success_count=0,
-                    updated_at=?
-                WHERE device_id=?
-                """,
-                (now_ts(), device_id),
-            )
+            reset_domain_send_counters(conn, device_id, None, now_ts())
         deleted = cursor.rowcount if cursor.rowcount is not None else 0
         job_payload = {"domains": [normalized_domain]} if normalized_domain else {"domains": []}
         reset_job = create_job(

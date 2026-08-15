@@ -8166,15 +8166,33 @@ function extractSummaryPayload(payload) {
   return hasExpectedField ? payload : null;
 }
 
-function latestJobSummary(job) {
+function latestJobSummary(job, options = {}) {
   if (!job) {
     return null;
   }
+  const cutoffMs =
+    options && Number.isFinite(options.cutoffMs) && options.cutoffMs > 0
+      ? options.cutoffMs
+      : null;
   const progress = Array.isArray(job.progress) ? job.progress : [];
   for (let i = progress.length - 1; i >= 0; i -= 1) {
+    if (cutoffMs !== null) {
+      const entryMs = parseTimestampMs(progress[i]?.created_at);
+      if (!Number.isNaN(entryMs) && entryMs < cutoffMs) {
+        continue;
+      }
+    }
     const candidate = extractSummaryPayload(progress[i]?.data);
     if (candidate) {
       return candidate;
+    }
+  }
+  if (cutoffMs !== null) {
+    const finishedMs = parseTimestampMs(job.finished_at);
+    const jobCreatedMs = parseTimestampMs(job.created_at || job.queued_at);
+    const summaryMs = !Number.isNaN(finishedMs) ? finishedMs : jobCreatedMs;
+    if (!Number.isNaN(summaryMs) && summaryMs < cutoffMs) {
+      return null;
     }
   }
   const resultSummary = extractSummaryPayload(job.result);
@@ -9313,6 +9331,70 @@ function ensureSuccessTracker(deviceId, domain) {
   return state.successCounters[deviceId][normalizedDomain];
 }
 
+function resetSuccessTracker(deviceId, domain) {
+  const tracker = ensureSuccessTracker(deviceId, domain);
+  if (!tracker) {
+    return;
+  }
+  tracker.value = 0;
+  tracker.current = 0;
+  tracker.total = 0;
+  tracker.anchor = 0;
+  tracker.daumMax = 0;
+  tracker.daumIdle = null;
+  tracker.forceZero = true;
+  tracker.resetCutoff = Date.now();
+}
+
+function resetSuccessTrackers(deviceIds, domainFilter = "all") {
+  const domains =
+    domainFilter === "naver" || domainFilter === "daum"
+      ? [domainFilter]
+      : ["naver", "daum"];
+  (deviceIds || []).forEach((deviceId) => {
+    domains.forEach((domain) => resetSuccessTracker(deviceId, domain));
+  });
+}
+
+function applyGlobalLogClearToState(deviceIds, domainFilter = "all") {
+  const targetSet = new Set((deviceIds || []).filter((deviceId) => Boolean(deviceId)));
+  if (!targetSet.size) {
+    return;
+  }
+  const domains =
+    domainFilter === "naver" || domainFilter === "daum"
+      ? [domainFilter]
+      : ["naver", "daum"];
+  const resetAt = new Date().toISOString();
+  resetSuccessTrackers([...targetSet], domainFilter);
+  (state.devices || []).forEach((device) => {
+    if (!device?.id || !targetSet.has(device.id)) {
+      return;
+    }
+    domains.forEach((domain) => {
+      if (!device.configs?.[domain]) {
+        return;
+      }
+      device.configs[domain] = {
+        ...device.configs[domain],
+        client_sent: 0,
+        imap_sent_since_last_check: 0,
+        imap_reroll_success_count: 0,
+        imap_sent_last_reset_at: resetAt,
+      };
+    });
+    if (Array.isArray(device.logs)) {
+      if (domainFilter === "naver" || domainFilter === "daum") {
+        device.logs = device.logs.filter((entry) => (
+          !recordMatchesDomain(entry?.domain, domainFilter, { fallbackDomain: device.active_domain })
+        ));
+      } else {
+        device.logs = [];
+      }
+    }
+  });
+}
+
 function parseTimestampMs(value) {
   if (!value) {
     return NaN;
@@ -9541,6 +9623,8 @@ function updateSuccessTrackerFromDevice(device, domain) {
     return null;
   }
   const normalizedDomain = normalizeDeviceDomain(domain || device.active_domain || "naver");
+  const config = bestConfig(device, normalizedDomain);
+  const configResetMs = parseTimestampMs(config?.imap_sent_last_reset_at);
   const tracker = ensureSuccessTracker(device.id, normalizedDomain);
   if (!tracker) {
     return null;
@@ -9572,8 +9656,21 @@ function updateSuccessTrackerFromDevice(device, domain) {
     const jobCreatedMs = parseTimestampMs(job?.created_at);
     tracker.resetCutoff = Number.isNaN(jobCreatedMs) ? Date.now() : jobCreatedMs;
   }
+  if (!Number.isNaN(configResetMs) && (!Number.isFinite(tracker.resetCutoff) || configResetMs > tracker.resetCutoff)) {
+    tracker.resetCutoff = configResetMs;
+    tracker.value = 0;
+    tracker.current = 0;
+    tracker.total = 0;
+    tracker.anchor = 0;
+    tracker.daumMax = 0;
+    tracker.daumIdle = null;
+    tracker.forceZero = true;
+  }
 
-  const summary = latestJobSummary(job);
+  const cutoffMs = typeof tracker.resetCutoff === "number" && !Number.isNaN(tracker.resetCutoff)
+    ? tracker.resetCutoff
+    : null;
+  const summary = latestJobSummary(job, { cutoffMs });
   let summaryCurrent = 0;
   let summaryTotal = 0;
   let summaryAnchor = 0;
@@ -9663,10 +9760,6 @@ function updateSuccessTrackerFromDevice(device, domain) {
       };
     }
   }
-
-  const cutoffMs = typeof tracker.resetCutoff === "number" && !Number.isNaN(tracker.resetCutoff)
-    ? tracker.resetCutoff
-    : null;
 
   let maxCurrent = 0;
   let maxTotal = 0;
@@ -13993,6 +14086,9 @@ async function handleGlobalClearLogs() {
     const deviceLabel = deviceCount > 0 ? ` (대상 ${deviceCount}대)` : "";
     const statusType = totalCleared > 0 ? "success" : "info";
     setGlobalStatus(`${scopeLabel}: ${clearedLabel}${deviceLabel}`, statusType);
+    applyGlobalLogClearToState(targetIds, domainFilter);
+    renderDevices();
+    renderMonitoring();
     await loadDevices({ silent: true });
   } catch (err) {
     setGlobalStatus(`${scopeLabel}: ${err.message || "로그 초기화에 실패했습니다."}`, "error");
