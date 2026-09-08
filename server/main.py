@@ -184,6 +184,21 @@ GLOBAL_CONFIG_DEVICE_FIELDS = (
     "daum_idle_ip_change_seconds",
     "daum_idle_stop_limit",
 )
+DEVICE_CONFIG_PRESET_FIELDS = (
+    "helo",
+    "smtp_host",
+    "smtp_port",
+    "mail_from",
+    "header",
+    "all_headers_unique",
+    "message_id_auto",
+    "message_id_pattern",
+    "session_count",
+    "bcc_count",
+    "anchor_interval",
+    "anchor_email",
+    "rcpt_to",
+)
 MAX_DEVICE_LOG_HISTORY = 10
 BATCH_STOP_LOG_FETCH_LIMIT = 200
 BATCH_STOP_LOG_STORE_LIMIT = 200
@@ -1900,6 +1915,18 @@ def _init_db() -> None:
                 FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS device_config_presets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                domain TEXT NOT NULL,
+                name TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (device_id) REFERENCES devices(id) ON DELETE CASCADE,
+                UNIQUE (device_id, domain, name)
+            );
+
             CREATE TABLE IF NOT EXISTS global_settings (
                 key TEXT PRIMARY KEY,
                 value TEXT,
@@ -1910,6 +1937,8 @@ def _init_db() -> None:
                 ON job_progress_logs(job_id, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_batch_stop_logs_device
                 ON batch_stop_logs(device_id, domain, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_device_config_presets_device
+                ON device_config_presets(device_id, domain, updated_at DESC);
             """
         )
         config_columns = {
@@ -3953,6 +3982,11 @@ class UpdateConfigRequest(DeviceConfigPayload):
     pass
 
 
+class ConfigPresetRequest(BaseModel):
+    name: str = Field(..., min_length=1, max_length=80)
+    config: DeviceConfigPayload
+
+
 class ImapSettingsPayload(BaseModel):
     enabled: Optional[bool] = None
     username: Optional[str] = None
@@ -4142,6 +4176,174 @@ class HeaderPreviewResponse(BaseModel):
     anchor_email: str
     missing_tokens: List[str] = Field(default_factory=list)
     generated_at: str
+
+
+def sanitize_preset_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="프리셋 이름을 입력하세요.")
+    if len(text) > 80:
+        raise HTTPException(status_code=400, detail="프리셋 이름은 80자 이하로 입력하세요.")
+    return text
+
+
+def build_config_preset_payload(payload: DeviceConfigPayload) -> Dict[str, Any]:
+    raw = payload.dict()
+    preset: Dict[str, Any] = {}
+    preset["helo"] = str(raw.get("helo") or "").strip()
+    preset["smtp_host"] = str(raw.get("smtp_host") or "").strip()
+    try:
+        preset["smtp_port"] = int(raw.get("smtp_port") or 25)
+    except (TypeError, ValueError):
+        preset["smtp_port"] = 25
+    preset["mail_from"] = str(raw.get("mail_from") or "").strip()
+    preset["header"] = str(raw.get("header") or "")
+    preset["all_headers_unique"] = bool(raw.get("all_headers_unique"))
+    auto_value = raw.get("message_id_auto")
+    preset["message_id_auto"] = bool(auto_value if auto_value is not None else True)
+    preset["message_id_pattern"] = _normalize_message_id_pattern(raw.get("message_id_pattern"))
+    preset["session_count"] = sanitize_session_count(raw.get("session_count"))
+    preset["bcc_count"] = clamp_bcc_count(raw.get("bcc_count"))
+    preset["anchor_interval"] = clamp_anchor_interval(raw.get("anchor_interval"))
+    preset["anchor_email"] = normalize_anchor_email(raw.get("anchor_email"))
+    preset["rcpt_to"] = str(raw.get("rcpt_to") or "").strip()
+    return preset
+
+
+def serialize_config_preset(row: sqlite3.Row) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    try:
+        decoded = json.loads(row["payload"] or "{}")
+        if isinstance(decoded, dict):
+            payload = {key: decoded.get(key) for key in DEVICE_CONFIG_PRESET_FIELDS}
+    except json.JSONDecodeError:
+        payload = {}
+    normalized_payload = build_config_preset_payload(DeviceConfigPayload(**payload))
+    return {
+        "id": row["id"],
+        "device_id": row["device_id"],
+        "domain": row["domain"],
+        "name": row["name"],
+        "config": normalized_payload,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
+def update_device_config_row(
+    conn: sqlite3.Connection,
+    device_id: str,
+    domain: str,
+    payload: DeviceConfigPayload,
+) -> sqlite3.Row:
+    normalized = normalize_domain(domain)
+    device = get_device(device_id, conn=conn)
+    if not device:
+        raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+    config_row = conn.execute(
+        "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+        (device_id, normalized),
+    ).fetchone()
+    if not config_row:
+        raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+    config_data = to_dict(config_row)
+    now = now_ts()
+    sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
+    sanitized_interval = clamp_anchor_interval(payload.anchor_interval or 0)
+    sanitized_anchor = normalize_anchor_email(payload.anchor_email or "")
+    if payload.daum_idle_watch_enabled is None:
+        daum_watch_enabled = sanitize_stop_schedule_enabled(
+            config_data.get("daum_idle_watch_enabled")
+        )
+    else:
+        daum_watch_enabled = sanitize_stop_schedule_enabled(
+            payload.daum_idle_watch_enabled
+        )
+    raw_daum_ip_change = (
+        payload.daum_idle_ip_change_seconds
+        if payload.daum_idle_ip_change_seconds is not None
+        else config_data.get("daum_idle_ip_change_seconds")
+    )
+    sanitized_daum_ip_change = sanitize_daum_idle_seconds(
+        raw_daum_ip_change,
+        default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_ip_change_seconds", 20),
+        minimum=DAUM_IDLE_IP_MIN_SECONDS,
+        maximum=DAUM_IDLE_IP_MAX_SECONDS,
+    )
+    raw_daum_stop_limit = (
+        payload.daum_idle_stop_limit
+        if payload.daum_idle_stop_limit is not None
+        else config_data.get("daum_idle_stop_limit")
+    )
+    legacy_stop_source = (
+        payload.daum_idle_stop_seconds
+        if payload.daum_idle_stop_seconds is not None
+        else config_data.get("daum_idle_stop_seconds")
+    )
+    sanitized_daum_stop_limit = resolve_daum_idle_stop_limit(
+        raw_daum_stop_limit,
+        ip_change_seconds=sanitized_daum_ip_change,
+        legacy_seconds=legacy_stop_source,
+    )
+    sanitized_daum_stop_seconds = convert_stop_limit_to_seconds(
+        sanitized_daum_stop_limit, sanitized_daum_ip_change
+    )
+    lock_mode = sanitize_substitution_lock_mode(config_data.get("substitution_lock_mode"))
+    if payload.all_headers_unique is None:
+        existing_flag = config_data.get("all_headers_unique", DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
+        requested_all_headers_unique = bool(existing_flag)
+    else:
+        requested_all_headers_unique = bool(payload.all_headers_unique)
+    if lock_mode == "lock" and requested_all_headers_unique:
+        raise HTTPException(
+            status_code=409,
+            detail="고정 모드에서는 '모든 헤더 개별화' 옵션을 사용할 수 없습니다. 고정을 해제하거나 옵션을 끄세요.",
+        )
+    all_headers_unique_flag = 1 if requested_all_headers_unique else 0
+    if payload.message_id_auto is None:
+        message_id_auto_flag = 1 if config_data.get("message_id_auto", 1) else 0
+    else:
+        message_id_auto_flag = 1 if payload.message_id_auto else 0
+    pattern_candidate = payload.message_id_pattern if payload.message_id_pattern is not None else config_data.get("message_id_pattern")
+    sanitized_pattern = _normalize_message_id_pattern(pattern_candidate)
+    conn.execute(
+        """
+        UPDATE device_configs
+        SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, all_headers_unique=?, message_id_auto=?, message_id_pattern=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
+            daum_idle_watch_enabled=?, daum_idle_ip_change_seconds=?, daum_idle_stop_seconds=?, daum_idle_stop_limit=?,
+            updated_at=?
+        WHERE device_id=? AND domain=?
+        """,
+        (
+            payload.helo or "",
+            payload.smtp_host or "",
+            int(payload.smtp_port or 25),
+            payload.mail_from or "",
+            payload.header or "",
+            all_headers_unique_flag,
+            message_id_auto_flag,
+            sanitized_pattern,
+            max(1, int(payload.session_count or 1)),
+            sanitized_bcc,
+            sanitized_interval,
+            sanitized_anchor,
+            payload.rcpt_to or "",
+            1 if daum_watch_enabled else 0,
+            sanitized_daum_ip_change,
+            sanitized_daum_stop_seconds,
+            sanitized_daum_stop_limit,
+            now,
+            device_id,
+            normalized,
+        ),
+    )
+    refreshed = conn.execute(
+        "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+        (device_id, normalized),
+    ).fetchone()
+    if not refreshed:
+        raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+    return refreshed
 
 
 @app.post("/api/devices/{device_id}/domains/{domain}/preview-header", response_model=HeaderPreviewResponse)
@@ -5217,114 +5419,108 @@ def delete_device_endpoint(device_id: str) -> Dict[str, Any]:
 def update_device_config(device_id: str, domain: str, payload: UpdateConfigRequest) -> Dict[str, Any]:
     normalized = normalize_domain(domain)
     with db_lock, get_conn() as conn:
+        config_row = update_device_config_row(conn, device_id, normalized, payload)
+        conn.commit()
+    return serialize_config(to_dict(config_row), include_secret=False)
+
+
+@app.get("/api/devices/{device_id}/domains/{domain}/presets")
+def list_device_config_presets(device_id: str, domain: str) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="프리셋은 현재 네이버 도메인에서만 사용할 수 있습니다.")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        rows = conn.execute(
+            """
+            SELECT *
+            FROM device_config_presets
+            WHERE device_id=? AND domain=?
+            ORDER BY updated_at DESC, id DESC
+            """,
+            (device_id, normalized),
+        ).fetchall()
+    return {"presets": [serialize_config_preset(row) for row in rows]}
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/presets")
+def save_device_config_preset(device_id: str, domain: str, payload: ConfigPresetRequest) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="프리셋은 현재 네이버 도메인에서만 사용할 수 있습니다.")
+    name = sanitize_preset_name(payload.name)
+    preset_config = build_config_preset_payload(payload.config)
+    timestamp = now_ts()
+    with db_lock, get_conn() as conn:
         device = get_device(device_id, conn=conn)
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         config_row = conn.execute(
-            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+            "SELECT 1 FROM device_configs WHERE device_id=? AND domain=?",
             (device_id, normalized),
         ).fetchone()
         if not config_row:
             raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
-        config_data = to_dict(config_row)
-        now = now_ts()
-        sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
-        sanitized_interval = clamp_anchor_interval(payload.anchor_interval or 0)
-        sanitized_anchor = normalize_anchor_email(payload.anchor_email or "")
-        if payload.daum_idle_watch_enabled is None:
-            daum_watch_enabled = sanitize_stop_schedule_enabled(
-                config_data.get("daum_idle_watch_enabled")
-            )
-        else:
-            daum_watch_enabled = sanitize_stop_schedule_enabled(
-                payload.daum_idle_watch_enabled
-            )
-        raw_daum_ip_change = (
-            payload.daum_idle_ip_change_seconds
-            if payload.daum_idle_ip_change_seconds is not None
-            else config_data.get("daum_idle_ip_change_seconds")
-        )
-        sanitized_daum_ip_change = sanitize_daum_idle_seconds(
-            raw_daum_ip_change,
-            default=DEFAULT_DOMAIN_CONFIG.get("daum_idle_ip_change_seconds", 20),
-            minimum=DAUM_IDLE_IP_MIN_SECONDS,
-            maximum=DAUM_IDLE_IP_MAX_SECONDS,
-        )
-        raw_daum_stop_limit = (
-            payload.daum_idle_stop_limit
-            if payload.daum_idle_stop_limit is not None
-            else config_data.get("daum_idle_stop_limit")
-        )
-        legacy_stop_source = (
-            payload.daum_idle_stop_seconds
-            if payload.daum_idle_stop_seconds is not None
-            else config_data.get("daum_idle_stop_seconds")
-        )
-        sanitized_daum_stop_limit = resolve_daum_idle_stop_limit(
-            raw_daum_stop_limit,
-            ip_change_seconds=sanitized_daum_ip_change,
-            legacy_seconds=legacy_stop_source,
-        )
-        sanitized_daum_stop_seconds = convert_stop_limit_to_seconds(
-            sanitized_daum_stop_limit, sanitized_daum_ip_change
-        )
-        lock_mode = sanitize_substitution_lock_mode(config_data.get("substitution_lock_mode"))
-        if payload.all_headers_unique is None:
-            existing_flag = config_data.get("all_headers_unique", DEFAULT_DOMAIN_CONFIG.get("all_headers_unique", False))
-            requested_all_headers_unique = bool(existing_flag)
-        else:
-            requested_all_headers_unique = bool(payload.all_headers_unique)
-        if lock_mode == "lock" and requested_all_headers_unique:
-            raise HTTPException(
-                status_code=409,
-                detail="고정 모드에서는 '모든 헤더 개별화' 옵션을 사용할 수 없습니다. 고정을 해제하거나 옵션을 끄세요.",
-            )
-        all_headers_unique_flag = 1 if requested_all_headers_unique else 0
-        if payload.message_id_auto is None:
-            message_id_auto_flag = 1 if config_data.get("message_id_auto", 1) else 0
-        else:
-            message_id_auto_flag = 1 if payload.message_id_auto else 0
-        pattern_candidate = payload.message_id_pattern if payload.message_id_pattern is not None else config_data.get("message_id_pattern")
-        sanitized_pattern = _normalize_message_id_pattern(pattern_candidate)
         conn.execute(
             """
-            UPDATE device_configs
-            SET helo=?, smtp_host=?, smtp_port=?, mail_from=?, header=?, all_headers_unique=?, message_id_auto=?, message_id_pattern=?, session_count=?, bcc_count=?, anchor_interval=?, anchor_email=?, rcpt_to=?,
-                daum_idle_watch_enabled=?, daum_idle_ip_change_seconds=?, daum_idle_stop_seconds=?, daum_idle_stop_limit=?,
-                updated_at=?
-            WHERE device_id=? AND domain=?
+            INSERT INTO device_config_presets (device_id, domain, name, payload, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(device_id, domain, name) DO UPDATE SET
+                payload=excluded.payload,
+                updated_at=excluded.updated_at
             """,
             (
-                payload.helo or "",
-                payload.smtp_host or "",
-                int(payload.smtp_port or 25),
-                payload.mail_from or "",
-                payload.header or "",
-                all_headers_unique_flag,
-                message_id_auto_flag,
-                sanitized_pattern,
-                max(1, int(payload.session_count or 1)),
-                sanitized_bcc,
-                sanitized_interval,
-                sanitized_anchor,
-                payload.rcpt_to or "",
-                1 if daum_watch_enabled else 0,
-                sanitized_daum_ip_change,
-                sanitized_daum_stop_seconds,
-                sanitized_daum_stop_limit,
-                now,
                 device_id,
                 normalized,
+                name,
+                json.dumps(preset_config, ensure_ascii=False),
+                timestamp,
+                timestamp,
             ),
         )
         conn.commit()
-        config_row = conn.execute(
-            "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
-            (device_id, normalized),
+        row = conn.execute(
+            "SELECT * FROM device_config_presets WHERE device_id=? AND domain=? AND name=?",
+            (device_id, normalized, name),
         ).fetchone()
-    if not config_row:
-        raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
-    return serialize_config(to_dict(config_row), include_secret=False)
+    if not row:
+        raise HTTPException(status_code=500, detail="프리셋 저장 결과를 확인하지 못했습니다.")
+    return {"preset": serialize_config_preset(row)}
+
+
+@app.post("/api/devices/{device_id}/domains/{domain}/presets/{preset_id}/apply")
+def apply_device_config_preset(device_id: str, domain: str, preset_id: int) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="프리셋은 현재 네이버 도메인에서만 사용할 수 있습니다.")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        preset_row = conn.execute(
+            """
+            SELECT *
+            FROM device_config_presets
+            WHERE id=? AND device_id=? AND domain=?
+            """,
+            (preset_id, device_id, normalized),
+        ).fetchone()
+        if not preset_row:
+            raise HTTPException(status_code=404, detail="프리셋을 찾을 수 없습니다.")
+        preset = serialize_config_preset(preset_row)
+        config_row = update_device_config_row(
+            conn,
+            device_id,
+            normalized,
+            DeviceConfigPayload(**preset["config"]),
+        )
+        conn.commit()
+    return {
+        "preset": preset,
+        "config": serialize_config(to_dict(config_row), include_secret=False),
+    }
 
 
 @app.post("/api/devices/{device_id}/domains/{domain}/imap")

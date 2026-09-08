@@ -1626,7 +1626,8 @@ button.card-delete-btn:disabled {
 }
 .field span { font-weight: 600; }
 .field input,
-.field textarea {
+.field textarea,
+.field select {
   padding: 8px 10px;
   border: 1px solid var(--color-border-strong);
   border-radius: 10px;
@@ -1634,6 +1635,9 @@ button.card-delete-btn:disabled {
   font-size: 13px;
   font-family: inherit;
   color: var(--color-text);
+}
+.field select {
+  min-height: 36px;
 }
 .field textarea {
   min-height: 100px;
@@ -1693,6 +1697,24 @@ button.card-delete-btn:disabled {
   gap: 6px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+.preset-row {
+  align-items: flex-end;
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+}
+.preset-name-field {
+  flex: 1 1 180px;
+}
+.preset-select-field {
+  flex: 1 1 220px;
+}
+.preset-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 .device-schedule {
   margin-top: 12px;
@@ -3909,6 +3931,7 @@ const state = {
   domainFilter: loadDomainFilterPreference(),
   filterOnlineOnly: false,
   deletingDevices: new Set(),
+  configPresets: {},
 };
 
 removeLegacyHiddenOfflinePreference();
@@ -4797,6 +4820,187 @@ function collectConfigPayload(card, currentDevice, domain) {
       daum_idle_stop_limit: Number(daumIdleStopValue),
     },
   };
+}
+
+function getPresetCacheKey(deviceId, domain) {
+  return `${deviceId || ""}::${normalizeDeviceDomain(domain || "naver")}`;
+}
+
+function getCachedPresets(deviceId, domain) {
+  const key = getPresetCacheKey(deviceId, domain);
+  return Array.isArray(state.configPresets[key]) ? state.configPresets[key] : [];
+}
+
+function setCachedPresets(deviceId, domain, presets) {
+  const key = getPresetCacheKey(deviceId, domain);
+  state.configPresets[key] = Array.isArray(presets) ? presets : [];
+}
+
+function renderPresetControls(card, device, domain) {
+  const controls = card.querySelector('[data-role="presetControls"]');
+  if (!controls || !device?.id) {
+    return;
+  }
+  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
+  const isNaver = normalizedDomain === "naver";
+  controls.classList.toggle("hidden", !isNaver);
+  controls.hidden = !isNaver;
+  if (!isNaver) {
+    return;
+  }
+  const select = controls.querySelector('[data-role="presetSelect"]');
+  const applyBtn = controls.querySelector('button[data-action="preset-apply"]');
+  const presets = getCachedPresets(device.id, normalizedDomain);
+  if (select) {
+    const previous = select.value;
+    select.innerHTML = "";
+    if (!presets.length) {
+      const option = document.createElement("option");
+      option.value = "";
+      option.textContent = "프리셋 없음";
+      select.appendChild(option);
+    } else {
+      presets.forEach((preset) => {
+        const option = document.createElement("option");
+        option.value = String(preset.id);
+        const updatedLabel = preset.updated_at ? ` · ${formatDate(preset.updated_at)}` : "";
+        option.textContent = `${preset.name}${updatedLabel}`;
+        option.title = preset.name;
+        select.appendChild(option);
+      });
+      if (previous && presets.some((preset) => String(preset.id) === previous)) {
+        select.value = previous;
+      }
+    }
+    select.disabled = !presets.length;
+  }
+  if (applyBtn) {
+    applyBtn.disabled = !presets.length;
+  }
+}
+
+async function loadConfigPresets(card, device, domain, options = {}) {
+  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
+  if (!card || !device?.id || normalizedDomain !== "naver") {
+    return [];
+  }
+  const { silent = false } = options;
+  const controls = card.querySelector('[data-role="presetControls"]');
+  const refreshBtn = controls?.querySelector('button[data-action="preset-refresh"]');
+  if (refreshBtn && !silent) {
+    refreshBtn.disabled = true;
+    refreshBtn.textContent = "불러오는 중...";
+  }
+  try {
+    const result = await fetchJSON(`/api/devices/${device.id}/domains/${normalizedDomain}/presets`);
+    const presets = Array.isArray(result.presets) ? result.presets : [];
+    setCachedPresets(device.id, normalizedDomain, presets);
+    renderPresetControls(card, device, normalizedDomain);
+    if (!silent) {
+      setNotice(card, `프리셋 ${presets.length}개를 불러왔습니다.`, "info");
+    }
+    return presets;
+  } catch (err) {
+    if (!silent) {
+      setNotice(card, err?.message || "프리셋 목록을 불러오지 못했습니다.", "error");
+    }
+    return getCachedPresets(device.id, normalizedDomain);
+  } finally {
+    if (refreshBtn && refreshBtn.isConnected) {
+      refreshBtn.disabled = false;
+      refreshBtn.textContent = "목록";
+    }
+  }
+}
+
+async function saveConfigPreset(card, device, domain) {
+  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
+  if (normalizedDomain !== "naver") {
+    setNotice(card, "프리셋은 현재 네이버 도메인에서만 사용할 수 있습니다.", "error");
+    return;
+  }
+  const nameInput = card.querySelector('[data-field="preset_name"]');
+  const name = (nameInput?.value || "").trim();
+  if (!name) {
+    setNotice(card, "프리셋 이름을 입력하세요.", "error");
+    nameInput?.focus?.();
+    return;
+  }
+  const { payload } = collectConfigPayload(card, device, normalizedDomain);
+  const saveBtn = card.querySelector('button[data-action="preset-save"]');
+  const originalText = saveBtn?.textContent || "프리셋 저장";
+  if (saveBtn) {
+    saveBtn.disabled = true;
+    saveBtn.textContent = "저장 중...";
+  }
+  try {
+    const result = await fetchJSON(`/api/devices/${device.id}/domains/${normalizedDomain}/presets`, {
+      method: "POST",
+      body: JSON.stringify({ name, config: payload }),
+    });
+    const preset = result?.preset;
+    const next = getCachedPresets(device.id, normalizedDomain).filter((item) => item.id !== preset?.id && item.name !== name);
+    if (preset) {
+      next.unshift(preset);
+    }
+    setCachedPresets(device.id, normalizedDomain, next);
+    renderPresetControls(card, device, normalizedDomain);
+    const select = card.querySelector('[data-role="presetSelect"]');
+    if (select && preset?.id !== undefined) {
+      select.value = String(preset.id);
+    }
+    setNotice(card, `'${name}' 프리셋을 저장했습니다.`, "success");
+  } catch (err) {
+    setNotice(card, err?.message || "프리셋 저장에 실패했습니다.", "error");
+  } finally {
+    if (saveBtn && saveBtn.isConnected) {
+      saveBtn.disabled = false;
+      saveBtn.textContent = originalText;
+    }
+  }
+}
+
+async function applyConfigPreset(card, device, domain) {
+  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
+  if (normalizedDomain !== "naver") {
+    setNotice(card, "프리셋은 현재 네이버 도메인에서만 사용할 수 있습니다.", "error");
+    return;
+  }
+  const select = card.querySelector('[data-role="presetSelect"]');
+  const presetId = select?.value || "";
+  if (!presetId) {
+    setNotice(card, "불러올 프리셋을 선택하세요.", "error");
+    return;
+  }
+  const applyBtn = card.querySelector('button[data-action="preset-apply"]');
+  const originalText = applyBtn?.textContent || "불러오기";
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.textContent = "적용 중...";
+  }
+  try {
+    const result = await fetchJSON(`/api/devices/${device.id}/domains/${normalizedDomain}/presets/${presetId}/apply`, {
+      method: "POST",
+    });
+    if (result?.config) {
+      device.configs = device.configs || {};
+      device.configs[normalizedDomain] = result.config;
+      card.__deviceData = { ...device };
+      applyConfigSnapshot(device.id, normalizedDomain, result.config);
+      resetFieldDirty(device.id, normalizedDomain, result.config);
+      populateConfigForm(card, card.__deviceData, normalizedDomain);
+      renderDomainSummary(card, card.__deviceData, normalizedDomain);
+      updateSingleSendControls(card, card.__deviceData);
+    }
+    setNotice(card, `'${result?.preset?.name || "선택한"}' 프리셋을 불러왔습니다.`, "success");
+  } catch (err) {
+    setNotice(card, err?.message || "프리셋 적용에 실패했습니다.", "error");
+  } finally {
+    if (applyBtn && applyBtn.isConnected) {
+      applyBtn.disabled = false;
+      applyBtn.textContent = originalText;
+    }
+  }
 }
 
 function containsSubstitutionToken(value) {
@@ -10380,6 +10584,11 @@ function populateConfigForm(card, device, domain) {
   const daumIdleStopInput = card.querySelector('[data-field="daum_idle_stop_limit"]');
   if (daumIdleStopInput && document.activeElement !== daumIdleStopInput) daumIdleStopInput.value = cache.values.daum_idle_stop_limit;
   toggleDomainSpecificFields(card, activeDomain);
+  renderPresetControls(card, device, activeDomain);
+  if (activeDomain === "naver" && !card.dataset.presetsLoaded) {
+    card.dataset.presetsLoaded = "true";
+    loadConfigPresets(card, device, activeDomain, { silent: true });
+  }
   updateCardLockUI(card, config, activeDomain);
   updateDeviceSchedule(card, device, activeDomain, config);
   renderImapSection(card, device, activeDomain);
@@ -10624,6 +10833,33 @@ function attachCardEvents(card) {
         return;
       }
       openImapModal(card, currentDevice, domain, { forceEnable: false });
+    });
+  }
+
+  const presetSaveBtn = card.querySelector('button[data-action="preset-save"]');
+  if (presetSaveBtn) {
+    presetSaveBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      await saveConfigPreset(card, currentDevice, domain);
+    });
+  }
+
+  const presetRefreshBtn = card.querySelector('button[data-action="preset-refresh"]');
+  if (presetRefreshBtn) {
+    presetRefreshBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      await loadConfigPresets(card, currentDevice, domain, { silent: false });
+    });
+  }
+
+  const presetApplyBtn = card.querySelector('button[data-action="preset-apply"]');
+  if (presetApplyBtn) {
+    presetApplyBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      await applyConfigPreset(card, currentDevice, domain);
     });
   }
 
@@ -11396,11 +11632,28 @@ function buildDeviceCard(device) {
       </div>
     </div>
     <div class="domain-summary" data-role="domainSummary">총 이메일 0건 · 잔여 0건</div>
-    <div class="domain-cycle" data-role="domainCycle"></div>
-    <div class="config-block">
-      <div class="field-row helo-row">
-        <label class="field">
-          <span>HELO</span>
+	    <div class="domain-cycle" data-role="domainCycle"></div>
+	    <div class="config-block">
+	      <div class="field-row preset-row" data-role="presetControls" data-domain-only="naver">
+	        <label class="field preset-name-field">
+	          <span>프리셋 이름</span>
+	          <input type="text" data-field="preset_name" placeholder="예: 네이버 오전 헤더">
+	        </label>
+	        <button type="button" class="secondary" data-action="preset-save">프리셋 저장</button>
+	        <label class="field preset-select-field">
+	          <span>저장된 프리셋</span>
+	          <select data-role="presetSelect">
+	            <option value="">프리셋 없음</option>
+	          </select>
+	        </label>
+	        <div class="preset-actions">
+	          <button type="button" class="ghost" data-action="preset-refresh">목록</button>
+	          <button type="button" class="ghost" data-action="preset-apply">불러오기</button>
+	        </div>
+	      </div>
+	      <div class="field-row helo-row">
+	        <label class="field">
+	          <span>HELO</span>
           <input type="text" data-field="helo">
         </label>
         <label class="field">
@@ -11797,6 +12050,7 @@ function renderDevices() {
       }
       delete cardRegistry[deviceId];
       delete state.successCounters[deviceId];
+      delete state.configPresets[getPresetCacheKey(deviceId, "naver")];
     }
   });
 
