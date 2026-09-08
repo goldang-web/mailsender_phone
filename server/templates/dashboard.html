@@ -12156,9 +12156,8 @@ function renderDevices() {
   const domainFilter = sanitizeDomainFilter(state.domainFilter);
   let visibleCards = 0;
   const realDevices = Array.isArray(state.devices) ? state.devices : [];
-  const devicesToRender = realDevices.length ? realDevices : [createSampleDevice()];
 
-  devicesToRender.forEach((device) => {
+  realDevices.forEach((device) => {
     ensureSamplePreset(device);
     let card = cardRegistry[device.id];
     if (!card) {
@@ -12174,7 +12173,7 @@ function renderDevices() {
       markSampleCard(card);
     }
     const activeDomain = getActiveDomain(card, device.active_domain);
-    const hideForDomain = domainFilter !== "all" && activeDomain !== domainFilter;
+    const hideForDomain = !isSampleDevice(device) && domainFilter !== "all" && activeDomain !== domainFilter;
     const hideForOnline = !isSampleDevice(device) && applyOnlineFilter && device.status !== "connected";
     card.classList.toggle("domain-hidden", hideForDomain);
     card.classList.toggle("online-hidden", hideForOnline);
@@ -12185,6 +12184,27 @@ function renderDevices() {
     }
     seenIds.add(device.id);
   });
+
+  if (!visibleCards) {
+    const sampleDevice = createSampleDevice();
+    ensureSamplePreset(sampleDevice);
+    let sampleCard = cardRegistry[sampleDevice.id];
+    if (!sampleCard) {
+      sampleCard = buildDeviceCard(sampleDevice);
+      cardRegistry[sampleDevice.id] = sampleCard;
+      attachCardEvents(sampleCard);
+    }
+    if (sampleCard.parentNode !== container) {
+      container.appendChild(sampleCard);
+    }
+    updateDeviceCard(sampleCard, sampleDevice);
+    markSampleCard(sampleCard);
+    sampleCard.classList.remove("domain-hidden", "online-hidden");
+    sampleCard.classList.toggle("editing", state.deviceEditMode);
+    updateCardDeleteButton(sampleCard, sampleDevice);
+    visibleCards += 1;
+    seenIds.add(sampleDevice.id);
+  }
 
   Object.keys(cardRegistry).forEach((deviceId) => {
     if (!seenIds.has(deviceId)) {
