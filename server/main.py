@@ -4230,6 +4230,36 @@ def serialize_config_preset(row: sqlite3.Row) -> Dict[str, Any]:
     }
 
 
+def ensure_device_config_row(
+    conn: sqlite3.Connection,
+    device_id: str,
+    domain: str,
+) -> sqlite3.Row:
+    normalized = normalize_domain(domain)
+    row = conn.execute(
+        "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+        (device_id, normalized),
+    ).fetchone()
+    if row:
+        return row
+    timestamp = now_ts()
+    conn.execute(
+        """
+        INSERT INTO device_configs (device_id, domain, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(device_id, domain) DO NOTHING
+        """,
+        (device_id, normalized, timestamp),
+    )
+    row = conn.execute(
+        "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
+        (device_id, normalized),
+    ).fetchone()
+    if not row:
+        raise HTTPException(status_code=500, detail="도메인 기본 설정을 생성하지 못했습니다.")
+    return row
+
+
 def update_device_config_row(
     conn: sqlite3.Connection,
     device_id: str,
@@ -4240,12 +4270,7 @@ def update_device_config_row(
     device = get_device(device_id, conn=conn)
     if not device:
         raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
-    config_row = conn.execute(
-        "SELECT * FROM device_configs WHERE device_id=? AND domain=?",
-        (device_id, normalized),
-    ).fetchone()
-    if not config_row:
-        raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+    config_row = ensure_device_config_row(conn, device_id, normalized)
     config_data = to_dict(config_row)
     now = now_ts()
     sanitized_bcc = clamp_bcc_count(payload.bcc_count or 0)
@@ -5457,12 +5482,7 @@ def save_device_config_preset(device_id: str, domain: str, payload: ConfigPreset
         device = get_device(device_id, conn=conn)
         if not device:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
-        config_row = conn.execute(
-            "SELECT 1 FROM device_configs WHERE device_id=? AND domain=?",
-            (device_id, normalized),
-        ).fetchone()
-        if not config_row:
-            raise HTTPException(status_code=404, detail="도메인 설정을 찾을 수 없습니다.")
+        ensure_device_config_row(conn, device_id, normalized)
         conn.execute(
             """
             INSERT INTO device_config_presets (device_id, domain, name, payload, created_at, updated_at)
