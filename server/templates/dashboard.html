@@ -4934,7 +4934,7 @@ function collectConfigPayload(card, currentDevice, domain) {
 }
 
 function getPresetCacheKey(deviceId, domain) {
-  return `${deviceId || ""}::${normalizeDeviceDomain(domain || "naver")}`;
+  return `shared::${normalizeDeviceDomain(domain || "naver")}`;
 }
 
 function getCachedPresets(deviceId, domain) {
@@ -4945,6 +4945,29 @@ function getCachedPresets(deviceId, domain) {
 function setCachedPresets(deviceId, domain, presets) {
   const key = getPresetCacheKey(deviceId, domain);
   state.configPresets[key] = Array.isArray(presets) ? presets : [];
+}
+
+function formatPresetSourceLabel(preset) {
+  const sourceName = String(preset?.source_device_name || "").trim();
+  const sourceId = String(preset?.source_device_id || preset?.device_id || "").trim();
+  if (sourceName && sourceId && sourceName !== sourceId) {
+    return `${sourceName} (${sourceId})`;
+  }
+  return sourceName || sourceId || "원본 알 수 없음";
+}
+
+function renderPresetControlsForDomain(domain) {
+  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
+  Object.values(cardRegistry || {}).forEach((card) => {
+    const device = card?.__deviceData;
+    if (!card || !device) {
+      return;
+    }
+    const activeDomain = getActiveDomain(card, device.active_domain);
+    if (activeDomain === normalizedDomain) {
+      renderPresetControls(card, device, normalizedDomain);
+    }
+  });
 }
 
 function renderPresetControls(card, device, domain) {
@@ -4974,9 +4997,10 @@ function renderPresetControls(card, device, domain) {
       presets.forEach((preset) => {
         const option = document.createElement("option");
         option.value = String(preset.id);
+        const sourceLabel = formatPresetSourceLabel(preset);
         const updatedLabel = preset.updated_at ? ` · ${formatDate(preset.updated_at)}` : "";
-        option.textContent = `${preset.name}${updatedLabel}`;
-        option.title = preset.name;
+        option.textContent = `${preset.name} · ${sourceLabel}${updatedLabel}`;
+        option.title = `${preset.name} · ${sourceLabel}`;
         select.appendChild(option);
       });
       if (previous && presets.some((preset) => String(preset.id) === previous)) {
@@ -5014,7 +5038,7 @@ async function loadConfigPresets(card, device, domain, options = {}) {
     const result = await fetchJSON(`/api/devices/${device.id}/domains/${normalizedDomain}/presets`);
     const presets = Array.isArray(result.presets) ? result.presets : [];
     setCachedPresets(device.id, normalizedDomain, presets);
-    renderPresetControls(card, device, normalizedDomain);
+    renderPresetControlsForDomain(normalizedDomain);
     if (!silent) {
       setNotice(card, `프리셋 ${presets.length}개를 불러왔습니다.`, "info");
     }
@@ -5059,7 +5083,7 @@ async function saveConfigPreset(card, device, domain) {
     const next = getCachedPresets(device.id, normalizedDomain).filter((item) => item.name !== name);
     next.unshift(preset);
     setCachedPresets(device.id, normalizedDomain, next);
-    renderPresetControls(card, device, normalizedDomain);
+    renderPresetControlsForDomain(normalizedDomain);
     const select = card.querySelector('[data-role="presetSelect"]');
     if (select) {
       select.value = String(preset.id);
@@ -5084,7 +5108,7 @@ async function saveConfigPreset(card, device, domain) {
       next.unshift(preset);
     }
     setCachedPresets(device.id, normalizedDomain, next);
-    renderPresetControls(card, device, normalizedDomain);
+    renderPresetControlsForDomain(normalizedDomain);
     const select = card.querySelector('[data-role="presetSelect"]');
     if (select && preset?.id !== undefined) {
       select.value = String(preset.id);
@@ -12267,7 +12291,6 @@ function renderDevices() {
       }
       delete cardRegistry[deviceId];
       delete state.successCounters[deviceId];
-      delete state.configPresets[getPresetCacheKey(deviceId, "naver")];
     }
   });
 

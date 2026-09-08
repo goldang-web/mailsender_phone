@@ -4211,6 +4211,7 @@ def build_config_preset_payload(payload: DeviceConfigPayload) -> Dict[str, Any]:
 
 
 def serialize_config_preset(row: sqlite3.Row) -> Dict[str, Any]:
+    row_keys = set(row.keys())
     payload: Dict[str, Any] = {}
     try:
         decoded = json.loads(row["payload"] or "{}")
@@ -4227,6 +4228,8 @@ def serialize_config_preset(row: sqlite3.Row) -> Dict[str, Any]:
         "config": normalized_payload,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+        "source_device_id": row["device_id"],
+        "source_device_name": row["device_name"] if "device_name" in row_keys else None,
     }
 
 
@@ -5460,12 +5463,13 @@ def list_device_config_presets(device_id: str, domain: str) -> Dict[str, Any]:
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         rows = conn.execute(
             """
-            SELECT *
-            FROM device_config_presets
-            WHERE device_id=? AND domain=?
-            ORDER BY updated_at DESC, id DESC
+            SELECT p.*, d.name AS device_name
+            FROM device_config_presets p
+            LEFT JOIN devices d ON d.id = p.device_id
+            WHERE p.domain=?
+            ORDER BY p.updated_at DESC, p.id DESC
             """,
-            (device_id, normalized),
+            (normalized,),
         ).fetchall()
     return {"presets": [serialize_config_preset(row) for row in rows]}
 
@@ -5502,7 +5506,12 @@ def save_device_config_preset(device_id: str, domain: str, payload: ConfigPreset
         )
         conn.commit()
         row = conn.execute(
-            "SELECT * FROM device_config_presets WHERE device_id=? AND domain=? AND name=?",
+            """
+            SELECT p.*, d.name AS device_name
+            FROM device_config_presets p
+            LEFT JOIN devices d ON d.id = p.device_id
+            WHERE p.device_id=? AND p.domain=? AND p.name=?
+            """,
             (device_id, normalized, name),
         ).fetchone()
     if not row:
@@ -5521,11 +5530,12 @@ def apply_device_config_preset(device_id: str, domain: str, preset_id: int) -> D
             raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
         preset_row = conn.execute(
             """
-            SELECT *
-            FROM device_config_presets
-            WHERE id=? AND device_id=? AND domain=?
+            SELECT p.*, d.name AS device_name
+            FROM device_config_presets p
+            LEFT JOIN devices d ON d.id = p.device_id
+            WHERE p.id=? AND p.domain=?
             """,
-            (preset_id, device_id, normalized),
+            (preset_id, normalized),
         ).fetchone()
         if not preset_row:
             raise HTTPException(status_code=404, detail="프리셋을 찾을 수 없습니다.")
