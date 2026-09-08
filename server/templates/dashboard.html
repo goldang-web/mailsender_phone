@@ -1832,7 +1832,6 @@ button.card-delete-btn:disabled {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 8px;
 }
 
 .imap-toggle {
@@ -1841,6 +1840,24 @@ button.card-delete-btn:disabled {
   gap: 8px;
   font-weight: 600;
   color: var(--color-heading);
+}
+
+.imap-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.imap-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.imap-body.hidden {
+  display: none;
 }
 
 .imap-toggle input[type="checkbox"] {
@@ -10684,6 +10701,24 @@ function renderImapSection(card, device, domain) {
   if (!(holdStatus === "checking" && !holdExpired && holdCheckedAt === currentCheckedMarker)) {
     clearImapCountdown(card);
   }
+  updateImapCollapseState(block);
+}
+
+function updateImapCollapseState(block) {
+  if (!block) {
+    return;
+  }
+  const body = block.querySelector('[data-role="imapBody"]');
+  const toggleBtn = block.querySelector('button[data-action="imap-collapse-toggle"]');
+  const expanded = block.dataset.imapExpanded === "1";
+  if (body) {
+    body.classList.toggle("hidden", !expanded);
+    body.hidden = !expanded;
+  }
+  if (toggleBtn) {
+    toggleBtn.textContent = expanded ? "접기" : "펼치기";
+    toggleBtn.setAttribute("aria-expanded", expanded ? "true" : "false");
+  }
 }
 
 function populateConfigForm(card, device, domain) {
@@ -10971,6 +11006,19 @@ function attachCardEvents(card) {
         return;
       }
       openImapModal(card, currentDevice, domain, { forceEnable: false });
+    });
+  }
+
+  const imapCollapseBtn = card.querySelector('button[data-action="imap-collapse-toggle"]');
+  if (imapCollapseBtn) {
+    imapCollapseBtn.addEventListener("click", () => {
+      const block = card.querySelector('[data-role="imapBlock"]');
+      if (!block) {
+        return;
+      }
+      const expanded = block.dataset.imapExpanded === "1";
+      block.dataset.imapExpanded = expanded ? "0" : "1";
+      updateImapCollapseState(block);
     });
   }
 
@@ -11902,18 +11950,23 @@ function buildDeviceCard(device) {
           <input type="checkbox" data-field="imap_enabled">
           <span>네이버 IMAP 도착 확인</span>
         </label>
-        <button type="button" class="ghost small" data-action="imap-settings">계정 설정</button>
+        <div class="imap-header-actions">
+          <button type="button" class="ghost small" data-action="imap-collapse-toggle" aria-expanded="false">펼치기</button>
+          <button type="button" class="ghost small" data-action="imap-settings">계정 설정</button>
+        </div>
       </div>
-      <div class="imap-status-row" data-role="imapStatusRow">
-        <div class="imap-status off" data-role="imapStatus">네이버 도메인에서만 사용할 수 있습니다.</div>
-        <button type="button" class="ghost danger small" data-action="imap-cancel-check" hidden>중지</button>
-      </div>
-      <div class="imap-meta" data-role="imapMeta">네이버 발송 시 도착 여부를 자동으로 확인합니다.</div>
-      <div class="imap-threshold-meta" data-role="imapThresholdMeta" title="Sent 누적 기준으로 IMAP 확인을 실행합니다.">Sent 누적 확인: 사용 안 함</div>
-      <div class="imap-reroll-meta" data-role="imapRerollMeta">재롤 누적 성공: 0회</div>
-      <div class="imap-config-meta" data-role="imapConfigMeta">IMAP 설정: 사용 안 함</div>
-      <div class="imap-actions" data-role="imapActions">
-        <button type="button" class="secondary small" data-action="imap-delivery-check">도착 확인</button>
+      <div class="imap-body hidden" data-role="imapBody">
+        <div class="imap-status-row" data-role="imapStatusRow">
+          <div class="imap-status off" data-role="imapStatus">네이버 도메인에서만 사용할 수 있습니다.</div>
+          <button type="button" class="ghost danger small" data-action="imap-cancel-check" hidden>중지</button>
+        </div>
+        <div class="imap-meta" data-role="imapMeta">네이버 발송 시 도착 여부를 자동으로 확인합니다.</div>
+        <div class="imap-threshold-meta" data-role="imapThresholdMeta" title="Sent 누적 기준으로 IMAP 확인을 실행합니다.">Sent 누적 확인: 사용 안 함</div>
+        <div class="imap-reroll-meta" data-role="imapRerollMeta">재롤 누적 성공: 0회</div>
+        <div class="imap-config-meta" data-role="imapConfigMeta">IMAP 설정: 사용 안 함</div>
+        <div class="imap-actions" data-role="imapActions">
+          <button type="button" class="secondary small" data-action="imap-delivery-check">도착 확인</button>
+        </div>
       </div>
     </div>
     <div class="device-schedule" data-role="deviceSchedule">
