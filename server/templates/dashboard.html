@@ -1561,6 +1561,15 @@ button.card-delete-btn:disabled {
 .domain-cycle.active {
   display: inline-flex;
 }
+.sample-card-note {
+  padding: 8px 10px;
+  border: 1px dashed var(--color-border);
+  border-radius: 8px;
+  background: var(--color-panel-soft);
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.4;
+}
 .cycle-badge {
   display: inline-flex;
   align-items: center;
@@ -4159,10 +4168,95 @@ const CARD_COLUMNS_KEY = "dashboard.cardColumns";
 const CARD_COLUMNS_MIN = 2;
 const CARD_COLUMNS_MAX = 4;
 const CARD_COLUMNS_DEFAULT = 4;
+const SAMPLE_DEVICE_ID = "__sample_preset_device__";
 const BCC_MIN = 0;
 const ANCHOR_MIN = 1;
 const ANCHOR_MAX = 1000;
 const fieldCache = {};
+
+function createSampleDevice() {
+  const now = new Date().toISOString();
+  return {
+    id: SAMPLE_DEVICE_ID,
+    name: "샘플 클라이언트",
+    status: "disconnected",
+    active_domain: "naver",
+    last_seen: null,
+    public_ip: "샘플",
+    is_sample: true,
+    configs: {
+      naver: {
+        ...bestConfig({ configs: {} }, "naver"),
+        domain: "naver",
+        helo: "mail.sample-naver.test",
+        smtp_host: "mx1.naver.com,mx2.naver.com",
+        mail_from: "sample@sample-naver.test",
+        header: "From: 샘플 발신자 <{$FROM}>\nTo: {$TO}\nSubject: 샘플 프리셋 테스트",
+        message_id_auto: true,
+        all_headers_unique: true,
+        session_count: 3,
+        bcc_count: 25,
+        anchor_interval: 10,
+        anchor_email: "check@naver.com",
+        rcpt_to: "recipient@naver.com",
+      },
+      daum: {
+        ...bestConfig({ configs: {} }, "daum"),
+        domain: "daum",
+      },
+    },
+    logs: [],
+    jobs: [],
+    files: [],
+    sample_created_at: now,
+  };
+}
+
+function isSampleDevice(device) {
+  return Boolean(device?.is_sample || device?.id === SAMPLE_DEVICE_ID);
+}
+
+function ensureSamplePreset(device) {
+  if (!isSampleDevice(device)) {
+    return;
+  }
+  const domain = "naver";
+  const existing = getCachedPresets(device.id, domain);
+  if (existing.length) {
+    return;
+  }
+  setCachedPresets(device.id, domain, [
+    {
+      id: "sample-default-preset",
+      device_id: device.id,
+      domain,
+      name: "샘플 네이버 프리셋",
+      config: { ...bestConfig(device, domain) },
+      created_at: device.sample_created_at || new Date().toISOString(),
+      updated_at: device.sample_created_at || new Date().toISOString(),
+    },
+  ]);
+}
+
+function markSampleCard(card) {
+  if (!card) {
+    return;
+  }
+  const summary = card.querySelector('[data-role="domainSummary"]');
+  if (summary && card.dataset.sampleReady !== "1") {
+    card.dataset.sampleReady = "1";
+    const note = document.createElement("div");
+    note.className = "sample-card-note";
+    note.textContent = "샘플 카드입니다. 프리셋 UI 확인용이며 실제 발송/저장 작업은 실행되지 않습니다.";
+    summary.insertAdjacentElement("afterend", note);
+  }
+  card.querySelectorAll(
+    'button[data-action="change-ip"], button[data-action="disconnect-device"], button[data-action="delete-device"], button[data-action="files"], button[data-action="save"], button[data-action="copy-global"], button[data-action="single-preview"], button[data-action="lock-refresh"], button[data-action="lock-toggle"], button[data-action="lock-copy"], button[data-action="single"], button[data-action="single-bcc"], button[data-action="batch"], button[data-action="cancel-batch"], button[data-action="clear-logs"], button[data-action="imap-settings"], button[data-action="imap-delivery-check"]',
+  ).forEach((button) => {
+    button.disabled = true;
+    button.title = "샘플 카드에서는 사용할 수 없습니다.";
+  });
+}
 const cardRegistry = {};
 const ONLINE_ONLY_KEY = "dashboard.onlineOnlyFilter";
 const LEGACY_HIDDEN_OFFLINE_KEY = "dashboard.hiddenOfflineDevices";
@@ -4884,6 +4978,14 @@ async function loadConfigPresets(card, device, domain, options = {}) {
   if (!card || !device?.id || normalizedDomain !== "naver") {
     return [];
   }
+  if (isSampleDevice(device)) {
+    const presets = getCachedPresets(device.id, normalizedDomain);
+    renderPresetControls(card, device, normalizedDomain);
+    if (!options.silent) {
+      setNotice(card, `샘플 프리셋 ${presets.length}개를 불러왔습니다.`, "info");
+    }
+    return presets;
+  }
   const { silent = false } = options;
   const controls = card.querySelector('[data-role="presetControls"]');
   const refreshBtn = controls?.querySelector('button[data-action="preset-refresh"]');
@@ -4927,6 +5029,27 @@ async function saveConfigPreset(card, device, domain) {
     return;
   }
   const { payload } = collectConfigPayload(card, device, normalizedDomain);
+  if (isSampleDevice(device)) {
+    const preset = {
+      id: `sample-${Date.now()}`,
+      device_id: device.id,
+      domain: normalizedDomain,
+      name,
+      config: payload,
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    const next = getCachedPresets(device.id, normalizedDomain).filter((item) => item.name !== name);
+    next.unshift(preset);
+    setCachedPresets(device.id, normalizedDomain, next);
+    renderPresetControls(card, device, normalizedDomain);
+    const select = card.querySelector('[data-role="presetSelect"]');
+    if (select) {
+      select.value = String(preset.id);
+    }
+    setNotice(card, `'${name}' 샘플 프리셋을 저장했습니다. 새로고침하면 사라집니다.`, "success");
+    return;
+  }
   const saveBtn = card.querySelector('button[data-action="preset-save"]');
   const originalText = saveBtn?.textContent || "프리셋 저장";
   if (saveBtn) {
@@ -4970,6 +5093,21 @@ async function applyConfigPreset(card, device, domain) {
   const presetId = select?.value || "";
   if (!presetId) {
     setNotice(card, "불러올 프리셋을 선택하세요.", "error");
+    return;
+  }
+  if (isSampleDevice(device)) {
+    const preset = getCachedPresets(device.id, normalizedDomain).find((item) => String(item.id) === String(presetId));
+    if (!preset?.config) {
+      setNotice(card, "샘플 프리셋을 찾지 못했습니다.", "error");
+      return;
+    }
+    device.configs = device.configs || {};
+    device.configs[normalizedDomain] = { ...bestConfig(device, normalizedDomain), ...preset.config };
+    card.__deviceData = { ...device };
+    applyConfigSnapshot(device.id, normalizedDomain, device.configs[normalizedDomain]);
+    resetFieldDirty(device.id, normalizedDomain, device.configs[normalizedDomain]);
+    populateConfigForm(card, card.__deviceData, normalizedDomain);
+    setNotice(card, `'${preset.name}' 샘플 프리셋을 불러왔습니다.`, "success");
     return;
   }
   const applyBtn = card.querySelector('button[data-action="preset-apply"]');
@@ -12017,8 +12155,11 @@ function renderDevices() {
   const applyOnlineFilter = shouldApplyOnlineFilter();
   const domainFilter = sanitizeDomainFilter(state.domainFilter);
   let visibleCards = 0;
+  const realDevices = Array.isArray(state.devices) ? state.devices : [];
+  const devicesToRender = realDevices.length ? realDevices : [createSampleDevice()];
 
-  state.devices.forEach((device) => {
+  devicesToRender.forEach((device) => {
+    ensureSamplePreset(device);
     let card = cardRegistry[device.id];
     if (!card) {
       card = buildDeviceCard(device);
@@ -12029,9 +12170,12 @@ function renderDevices() {
       container.appendChild(card);
     }
     updateDeviceCard(card, device);
+    if (isSampleDevice(device)) {
+      markSampleCard(card);
+    }
     const activeDomain = getActiveDomain(card, device.active_domain);
     const hideForDomain = domainFilter !== "all" && activeDomain !== domainFilter;
-    const hideForOnline = applyOnlineFilter && device.status !== "connected";
+    const hideForOnline = !isSampleDevice(device) && applyOnlineFilter && device.status !== "connected";
     card.classList.toggle("domain-hidden", hideForDomain);
     card.classList.toggle("online-hidden", hideForOnline);
     card.classList.toggle("editing", state.deviceEditMode);
@@ -12059,7 +12203,7 @@ function renderDevices() {
   }
 
   if (!visibleCards) {
-    const hasDevices = (state.devices || []).length > 0;
+    const hasDevices = realDevices.length > 0;
     if (hasDevices) {
       if (applyOnlineFilter) {
         const onlineMessage = domainFilter === "all"
