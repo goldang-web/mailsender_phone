@@ -4950,10 +4950,10 @@ function setCachedPresets(deviceId, domain, presets) {
 function formatPresetSourceLabel(preset) {
   const sourceName = String(preset?.source_device_name || "").trim();
   const sourceId = String(preset?.source_device_id || preset?.device_id || "").trim();
-  if (sourceName && sourceId && sourceName !== sourceId) {
-    return `${sourceName} (${sourceId})`;
+  if (sourceName) {
+    return sourceName;
   }
-  return sourceName || sourceId || "원본 알 수 없음";
+  return sourceId ? sourceId.slice(0, 8) : "원본 알 수 없음";
 }
 
 function renderPresetControlsForDomain(domain) {
