@@ -12182,9 +12182,11 @@ function renderMonitoring() {
   }
 
   grid.innerHTML = "";
-  const devices = Array.isArray(state.devices) ? [...state.devices] : [];
+  const devices = Array.isArray(state.devices)
+    ? state.devices.filter((device) => resolveMonitoringStatus(device) !== "offline")
+    : [];
   if (!devices.length) {
-    metaEl.textContent = "표시할 디바이스가 없습니다.";
+    metaEl.textContent = "표시할 온라인 디바이스가 없습니다.";
     empty.style.display = "block";
     return;
   }
@@ -12270,7 +12272,7 @@ function renderMonitoring() {
     } else if (entry.statusKey === "idle") {
       progressLabel = "상태: 멈춤";
     } else {
-      progressLabel = "상태: 오프라인";
+      progressLabel = "상태: 멈춤";
     }
     const updatedLabel = `응답: ${formatMonitoringUpdated(entry.lastSeen)}`;
     subRow.textContent = `${progressLabel} | ${updatedLabel}`;
@@ -12281,7 +12283,7 @@ function renderMonitoring() {
 
   empty.style.display = entries.length ? "none" : "block";
   const summaryParts = Array.from(summaryGroups.entries()).map(([label, count]) => `${label} ${formatCount(count)}대`);
-  metaEl.textContent = summaryParts.length ? summaryParts.join(" · ") : "표시할 디바이스가 없습니다.";
+  metaEl.textContent = summaryParts.length ? summaryParts.join(" · ") : "표시할 온라인 디바이스가 없습니다.";
 }
 
 function renderDevices() {
