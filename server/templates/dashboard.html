@@ -4984,6 +4984,7 @@ function renderPresetControls(card, device, domain) {
   }
   const select = controls.querySelector('[data-role="presetSelect"]');
   const applyBtn = controls.querySelector('button[data-action="preset-apply"]');
+  const deleteBtn = controls.querySelector('button[data-action="preset-delete"]');
   const presets = getCachedPresets(device.id, normalizedDomain);
   if (select) {
     const previous = select.value;
@@ -5011,6 +5012,9 @@ function renderPresetControls(card, device, domain) {
   }
   if (applyBtn) {
     applyBtn.disabled = !presets.length;
+  }
+  if (deleteBtn) {
+    deleteBtn.disabled = !presets.length;
   }
 }
 
@@ -5178,6 +5182,56 @@ async function applyConfigPreset(card, device, domain) {
     if (applyBtn && applyBtn.isConnected) {
       applyBtn.disabled = false;
       applyBtn.textContent = originalText;
+    }
+  }
+}
+
+async function deleteConfigPreset(card, device, domain) {
+  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
+  if (normalizedDomain !== "naver") {
+    setNotice(card, "프리셋은 현재 네이버 도메인에서만 사용할 수 있습니다.", "error");
+    return;
+  }
+  const select = card.querySelector('[data-role="presetSelect"]');
+  const presetId = select?.value || "";
+  if (!presetId) {
+    setNotice(card, "삭제할 프리셋을 선택하세요.", "error");
+    return;
+  }
+  const presets = getCachedPresets(device.id, normalizedDomain);
+  const preset = presets.find((item) => String(item.id) === String(presetId));
+  const presetLabel = preset ? `${preset.name} · ${formatPresetSourceLabel(preset)}` : "선택한 프리셋";
+  const confirmed = confirm(`'${presetLabel}' 프리셋을 삭제하시겠습니까? 모든 카드의 공유 목록에서 삭제됩니다.`);
+  if (!confirmed) {
+    return;
+  }
+  if (isSampleDevice(device)) {
+    const next = presets.filter((item) => String(item.id) !== String(presetId));
+    setCachedPresets(device.id, normalizedDomain, next);
+    renderPresetControlsForDomain(normalizedDomain);
+    setNotice(card, `'${preset?.name || "선택한"}' 샘플 프리셋을 삭제했습니다.`, "success");
+    return;
+  }
+  const deleteBtn = card.querySelector('button[data-action="preset-delete"]');
+  const originalText = deleteBtn?.textContent || "삭제";
+  if (deleteBtn) {
+    deleteBtn.disabled = true;
+    deleteBtn.textContent = "삭제 중...";
+  }
+  try {
+    const result = await fetchJSON(`/api/devices/${device.id}/domains/${normalizedDomain}/presets/${presetId}`, {
+      method: "DELETE",
+    });
+    const next = presets.filter((item) => String(item.id) !== String(presetId));
+    setCachedPresets(device.id, normalizedDomain, next);
+    renderPresetControlsForDomain(normalizedDomain);
+    setNotice(card, `'${result?.preset?.name || preset?.name || "선택한"}' 프리셋을 삭제했습니다.`, "success");
+  } catch (err) {
+    setNotice(card, err?.message || "프리셋 삭제에 실패했습니다.", "error");
+  } finally {
+    if (deleteBtn && deleteBtn.isConnected) {
+      deleteBtn.disabled = false;
+      deleteBtn.textContent = originalText;
     }
   }
 }
@@ -11073,6 +11127,15 @@ function attachCardEvents(card) {
     });
   }
 
+  const presetDeleteBtn = card.querySelector('button[data-action="preset-delete"]');
+  if (presetDeleteBtn) {
+    presetDeleteBtn.addEventListener("click", async () => {
+      const currentDevice = getDevice();
+      const domain = getActiveDomain(card, currentDevice.active_domain);
+      await deleteConfigPreset(card, currentDevice, domain);
+    });
+  }
+
   CONFIG_FIELDS.forEach((fieldName) => {
     const el = card.querySelector(`[data-field="${fieldName}"]`);
     if (!el) {
@@ -11859,6 +11922,7 @@ function buildDeviceCard(device) {
 	        <div class="preset-actions">
 	          <button type="button" class="ghost" data-action="preset-refresh">목록</button>
 	          <button type="button" class="ghost" data-action="preset-apply">불러오기</button>
+	          <button type="button" class="ghost danger" data-action="preset-delete">삭제</button>
 	        </div>
 	      </div>
 	      <div class="field-row helo-row">

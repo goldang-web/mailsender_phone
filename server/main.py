@@ -5553,6 +5553,35 @@ def apply_device_config_preset(device_id: str, domain: str, preset_id: int) -> D
     }
 
 
+@app.delete("/api/devices/{device_id}/domains/{domain}/presets/{preset_id}")
+def delete_device_config_preset(device_id: str, domain: str, preset_id: int) -> Dict[str, Any]:
+    normalized = normalize_domain(domain)
+    if normalized != "naver":
+        raise HTTPException(status_code=400, detail="프리셋은 현재 네이버 도메인에서만 사용할 수 있습니다.")
+    with db_lock, get_conn() as conn:
+        device = get_device(device_id, conn=conn)
+        if not device:
+            raise HTTPException(status_code=404, detail="디바이스를 찾을 수 없습니다.")
+        preset_row = conn.execute(
+            """
+            SELECT p.*, d.name AS device_name
+            FROM device_config_presets p
+            LEFT JOIN devices d ON d.id = p.device_id
+            WHERE p.id=? AND p.domain=?
+            """,
+            (preset_id, normalized),
+        ).fetchone()
+        if not preset_row:
+            raise HTTPException(status_code=404, detail="프리셋을 찾을 수 없습니다.")
+        preset = serialize_config_preset(preset_row)
+        conn.execute(
+            "DELETE FROM device_config_presets WHERE id=? AND domain=?",
+            (preset_id, normalized),
+        )
+        conn.commit()
+    return {"deleted": True, "preset": preset}
+
+
 @app.post("/api/devices/{device_id}/domains/{domain}/imap")
 def update_device_imap_settings(device_id: str, domain: str, payload: ImapSettingsPayload) -> Dict[str, Any]:
     normalized = normalize_domain(domain)
