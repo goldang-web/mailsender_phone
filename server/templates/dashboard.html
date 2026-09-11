@@ -2788,6 +2788,7 @@ button:not(:disabled):hover {
               <div class="global-schedule-body">
                 <div class="schedule-time-wrapper">
                   <input type="text" class="schedule-time-input" id="globalStopScheduleTime" inputmode="numeric" maxlength="5" autocomplete="off" spellcheck="false" placeholder="예: 02:30">
+                  <button type="button" class="secondary small" id="globalScheduleApplyBtn">전체 적용</button>
                 </div>
                 <div class="global-schedule-meta">
                   <span>다음 실행: <strong id="globalStopScheduleNext">--</strong></span>
@@ -13738,6 +13739,13 @@ document.getElementById("globalSendAllBtn").addEventListener("click", () => {
   handleGlobalSendAll();
 });
 
+const globalScheduleApplyBtn = document.getElementById("globalScheduleApplyBtn");
+if (globalScheduleApplyBtn) {
+  globalScheduleApplyBtn.addEventListener("click", () => {
+    handleGlobalScheduleApply();
+  });
+}
+
 document.getElementById("globalChangeIpBtn").addEventListener("click", () => {
   handleGlobalChangeIp();
 });
@@ -14463,6 +14471,40 @@ async function syncGlobalScheduleBeforeBatch(targetIds) {
   const serverConfig = { ...(result.config || {}), updated_at: result.updated_at || null };
   renderGlobalConfig(serverConfig);
   return true;
+}
+
+async function handleGlobalScheduleApply() {
+  const applyBtn = document.getElementById("globalScheduleApplyBtn");
+  const scopeLabel = getFilterScopeLabel();
+  const targetIds = getActionTargetDeviceIds();
+  if (!targetIds.length) {
+    setGlobalStatus(`${scopeLabel}에 자동 중지를 적용할 카드가 없습니다.`, "info");
+    return;
+  }
+  const originalText = applyBtn?.textContent || "전체 적용";
+  if (applyBtn) {
+    applyBtn.disabled = true;
+    applyBtn.textContent = "적용 중...";
+  }
+  try {
+    const applied = await syncGlobalScheduleBeforeBatch(targetIds);
+    if (!applied) {
+      return;
+    }
+    const schedule = collectGlobalScheduleForAction();
+    const scheduleLabel = schedule?.enabled
+      ? `자동 중지 ${schedule.time}${schedule.disconnect ? " · 중지 후 연결해제" : ""}`
+      : "자동 중지 비활성";
+    setGlobalStatus(`${scopeLabel} ${targetIds.length}대에 ${scheduleLabel} 설정을 적용했습니다.`, "success");
+    await loadDevices({ silent: true });
+  } catch (err) {
+    setGlobalStatus(`${scopeLabel}: 자동 중지 설정 적용에 실패했습니다. ${err?.message || ""}`.trim(), "error");
+  } finally {
+    if (applyBtn) {
+      applyBtn.disabled = false;
+      applyBtn.textContent = originalText;
+    }
+  }
 }
 
 async function handleGlobalSendAll() {
