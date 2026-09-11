@@ -1006,6 +1006,19 @@ def compute_next_stop_schedule(time_str: str, *, ref: Optional[datetime] = None)
     return candidate.isoformat()
 
 
+def is_stop_schedule_future_today(time_str: str, *, ref: Optional[datetime] = None) -> bool:
+    sanitized = sanitize_stop_schedule_time(time_str)
+    if not sanitized:
+        return False
+    base = ref.astimezone() if ref else get_local_now()
+    try:
+        target_time = datetime.strptime(sanitized, "%H:%M").time()
+    except ValueError:
+        return False
+    candidate = datetime.combine(base.date(), target_time, tzinfo=base.tzinfo)
+    return candidate > base
+
+
 def sanitize_global_active_domain(value: Any) -> str:
     if isinstance(value, str):
         candidate = value.strip().lower()
@@ -4981,6 +4994,8 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                 schedule_reset_last_run = True
         elif final_schedule_time != current_schedule_time:
             schedule_reset_last_run = True
+        elif schedule_requested and is_stop_schedule_future_today(final_schedule_time):
+            schedule_reset_last_run = True
         if schedule_requested or schedule_changed or schedule_reset_last_run:
             apply_values["stop_schedule_enabled"] = 1 if final_schedule_enabled else 0
             apply_values["stop_schedule_time"] = final_schedule_time or ""
@@ -6061,6 +6076,8 @@ def update_device_schedule(device_id: str, domain: str, payload: DeviceScheduleU
         if schedule_enabled_flag == 0:
             schedule_last_run = None
         elif not previous_enabled or previous_time != schedule_time:
+            schedule_last_run = None
+        elif is_stop_schedule_future_today(schedule_time):
             schedule_last_run = None
         else:
             schedule_last_run = previous_last_run

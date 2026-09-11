@@ -14409,6 +14409,62 @@ async function handleGlobalSendSingle() {
   }
 }
 
+function collectGlobalScheduleForAction() {
+  const scheduleToggle = document.getElementById("globalStopScheduleToggle");
+  const scheduleTimeInput = document.getElementById("globalStopScheduleTime");
+  const scheduleDisconnectToggle = document.getElementById("globalStopScheduleDisconnectToggle");
+  const activeDomainRadio = document.querySelector('input[name="globalActiveDomain"]:checked');
+  const rawValue = scheduleTimeInput?.value ?? state.globalDraft.stop_schedule_time ?? "";
+  const formatted = formatScheduleInputValue(rawValue);
+  if (scheduleTimeInput && scheduleTimeInput.value !== formatted) {
+    scheduleTimeInput.value = formatted;
+  }
+  const sanitized = sanitizeScheduleTime(formatted);
+  const enabled = Boolean(scheduleToggle?.checked);
+  const disconnect = Boolean(scheduleDisconnectToggle?.checked);
+  if (formatted.trim() && !sanitized) {
+    updateGlobalScheduleUI({ error: "HH:MM 형식으로 입력하세요." });
+    scheduleTimeInput?.focus();
+    return null;
+  }
+  if (enabled && !sanitized) {
+    updateGlobalScheduleUI({ error: "자동 중지를 활성화하려면 HH:MM 형식의 시간을 입력하세요." });
+    scheduleTimeInput?.focus();
+    return null;
+  }
+  updateGlobalScheduleUI({ error: null });
+  const activeDomain = activeDomainRadio
+    ? sanitizeGlobalDomain(activeDomainRadio.value)
+    : sanitizeGlobalDomain(state.globalDraft.active_domain);
+  return {
+    activeDomain,
+    enabled: enabled && Boolean(sanitized),
+    time: sanitized || "",
+    disconnect,
+  };
+}
+
+async function syncGlobalScheduleBeforeBatch(targetIds) {
+  const schedule = collectGlobalScheduleForAction();
+  if (!schedule) {
+    return false;
+  }
+  const payload = {
+    device_ids: targetIds,
+    target_domain: schedule.activeDomain,
+    stop_schedule_enabled: schedule.enabled,
+    stop_schedule_time: schedule.time,
+    stop_schedule_disconnect: schedule.disconnect,
+  };
+  const result = await fetchJSON("/api/global/config/apply", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+  const serverConfig = { ...(result.config || {}), updated_at: result.updated_at || null };
+  renderGlobalConfig(serverConfig);
+  return true;
+}
+
 async function handleGlobalSendAll() {
   const sendBtn = document.getElementById("globalSendAllBtn");
   if (!sendBtn) return;
@@ -14429,6 +14485,12 @@ async function handleGlobalSendAll() {
   }
   sendBtn.textContent = "전체 발송 예약 중...";
   try {
+    sendBtn.textContent = "자동 중지 적용 중...";
+    const scheduleSynced = await syncGlobalScheduleBeforeBatch(targetIds);
+    if (!scheduleSynced) {
+      return;
+    }
+    sendBtn.textContent = "전체 발송 예약 중...";
     const result = await fetchJSON("/api/global/actions/send-batch", {
       method: "POST",
       body: JSON.stringify({
