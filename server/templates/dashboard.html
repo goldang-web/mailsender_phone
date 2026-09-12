@@ -4862,6 +4862,15 @@ function resetFieldDirty(deviceId, domain, config) {
   entry.dirty = false;
 }
 
+function clearFieldCacheForDevices(deviceIds, domain) {
+  const normalizedDomain = normalizeDeviceDomain(domain || "naver");
+  (deviceIds || []).forEach((deviceId) => {
+    if (fieldCache[deviceId]?.[normalizedDomain]) {
+      delete fieldCache[deviceId][normalizedDomain];
+    }
+  });
+}
+
 function collectConfigPayload(card, currentDevice, domain) {
   const sessionInput = card.querySelector('[data-field="session_count"]');
   const sessionValue = sanitizeSessionValue(sessionInput?.value ?? "1");
@@ -11388,6 +11397,7 @@ function attachCardEvents(card) {
       const deviceConfig = bestConfig(currentDevice, domain) || {};
       const scheduleToggleEl = card.querySelector('[data-field="stop_schedule_enabled"]');
       const scheduleTimeEl = card.querySelector('[data-field="stop_schedule_time"]');
+      const scheduleDisconnectEl = card.querySelector('[data-field="stop_schedule_disconnect"]');
       const rawScheduleInput = scheduleTimeEl?.value ?? "";
       const formattedScheduleInput = formatScheduleInputValue(rawScheduleInput);
       if (scheduleTimeEl && scheduleTimeEl.value !== formattedScheduleInput) {
@@ -11404,6 +11414,7 @@ function attachCardEvents(card) {
       if (scheduleToggleEl) {
         scheduleToggleEl.checked = finalScheduleEnabled;
       }
+      const scheduleDisconnect = Boolean(scheduleDisconnectEl?.checked);
       const daumOverrides = {};
       if (sanitizedDomain === "daum") {
         daumOverrides.daum_idle_watch_enabled = payload.daum_idle_watch_enabled;
@@ -11417,19 +11428,23 @@ function attachCardEvents(card) {
         mail_from: payload.mail_from,
         header: payload.header,
         all_headers_unique: payload.all_headers_unique,
+        rcpt_to: payload.rcpt_to,
         session_count: payload.session_count,
         bcc_count: payload.bcc_count,
         message_id_auto: payload.message_id_auto,
         message_id_pattern: payload.message_id_pattern,
         stop_schedule_enabled: finalScheduleEnabled,
         stop_schedule_time: effectiveScheduleTime,
+        stop_schedule_disconnect: scheduleDisconnect,
         ...daumOverrides,
       });
       setGlobalStatus("선택한 카드 설정을 전체 기기에 적용합니다...", "info");
       copyGlobalBtn.disabled = true;
       copyGlobalBtn.textContent = "전체 적용 중...";
       try {
+        const targetDeviceIds = getActionTargetDeviceIds();
         await handleGlobalApply({
+          targetDeviceIds,
           overrides: {
             active_domain: sanitizedDomain,
             helo: payload.helo,
@@ -11437,12 +11452,14 @@ function attachCardEvents(card) {
             mail_from: payload.mail_from,
             header: payload.header,
             all_headers_unique: payload.all_headers_unique,
+            rcpt_to: payload.rcpt_to,
             session_count: payload.session_count,
             bcc_count: payload.bcc_count,
             message_id_auto: payload.message_id_auto,
             message_id_pattern: payload.message_id_pattern,
             stop_schedule_enabled: finalScheduleEnabled,
             stop_schedule_time: effectiveScheduleTime,
+            stop_schedule_disconnect: scheduleDisconnect,
             ...daumOverrides,
           },
         });
@@ -13886,6 +13903,9 @@ async function handleGlobalSaveAll() {
 
 async function handleGlobalApply(options = {}) {
   const overrides = options?.overrides && typeof options.overrides === "object" ? options.overrides : {};
+  const explicitTargetIds = Array.isArray(options?.targetDeviceIds)
+    ? options.targetDeviceIds.filter((deviceId) => Boolean(deviceId))
+    : null;
   const applyBtn = options?.triggerButton || document.getElementById("globalApplyBtn");
   const heloInput = document.getElementById("globalHelo");
   const smtpHostInput = document.getElementById("globalSmtpHost");
@@ -13900,7 +13920,7 @@ async function handleGlobalApply(options = {}) {
   const telegramTokenInput = document.getElementById("globalTelegramBotToken");
   const telegramChatInput = document.getElementById("globalTelegramChatId");
   const scopeLabel = getFilterScopeLabel();
-  const targetDeviceIds = getActionTargetDeviceIds();
+  const targetDeviceIds = explicitTargetIds && explicitTargetIds.length ? explicitTargetIds : getActionTargetDeviceIds();
   if (!targetDeviceIds.length) {
     setGlobalStatus(`${scopeLabel}에 적용할 카드가 없습니다.`, "info");
     return;
@@ -14195,6 +14215,7 @@ async function handleGlobalApply(options = {}) {
         if (field === "helo") return "HELO";
         if (field === "mail_from") return "MAIL FROM";
         if (field === "header") return "HEADER";
+        if (field === "rcpt_to") return "RCPT TO";
         if (field === "session_count") return "세션 수";
         if (field === "bcc_count") return "BCC 수";
         if (field === "stop_schedule") return "자동 중지";
@@ -14225,6 +14246,7 @@ async function handleGlobalApply(options = {}) {
     state.substitutionDirty = false;
     state.substitutionInvalidRows = new Set();
     renderGlobalConfig(serverConfig);
+    clearFieldCacheForDevices(targetDeviceIds, targetDomainValue);
     if (substitutionChanged || substitutionWasDirty) {
       setSubstitutionModalMessage("치환 변수가 최신 상태로 반영되었습니다.", "success");
     }

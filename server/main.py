@@ -175,6 +175,7 @@ GLOBAL_CONFIG_DEVICE_FIELDS = (
     "mail_from",
     "header",
     "all_headers_unique",
+    "rcpt_to",
     "bcc_count",
     "session_count",
     "message_id_auto",
@@ -4529,6 +4530,7 @@ class GlobalConfigPayload(DeviceScopedRequest):
     mail_from: Optional[str] = None
     header: Optional[str] = None
     all_headers_unique: Optional[bool] = None
+    rcpt_to: Optional[str] = None
     bcc_count: Optional[int] = None
     session_count: Optional[int] = None
     active_domain: Optional[str] = None
@@ -4900,6 +4902,11 @@ def apply_global_config_endpoint(payload: GlobalConfigPayload) -> Dict[str, Any]
                     continue
                 candidate_pattern = str(raw_value or "").strip() or MESSAGE_ID_PATTERN_DEFAULT
                 value_to_apply = candidate_pattern
+                should_apply = True
+            elif field == "rcpt_to":
+                if raw_value is None:
+                    continue
+                value_to_apply = str(raw_value or "").strip()
                 should_apply = True
             elif field == "stop_schedule_disconnect":
                 if raw_value is None:
